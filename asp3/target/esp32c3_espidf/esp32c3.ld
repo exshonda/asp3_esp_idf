@@ -23,6 +23,9 @@
 
 OUTPUT_ARCH(riscv)
 
+/* esp-halのペリフェラル構造体インスタンス（SYSTIMER等．-Lで検索） */
+INCLUDE esp32c3.peripherals.ld
+
 MEMORY
 {
     IROM(rx)  : ORIGIN = 0x42000000, LENGTH = 4096k

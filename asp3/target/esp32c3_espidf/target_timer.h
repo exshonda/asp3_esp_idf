@@ -12,17 +12,18 @@
  */
 
 /*
- *  タイマドライバのターゲット依存部（ESP32-C3用）
+ *  タイマドライバのターゲット依存部（ESP32-C3 esp-hal LL層版）
  *
- *  pico2_riscv（TIMER0 ALARM0＝1MHzカウンタ）のロジックを，ESP32-C3の
- *  SYSTIMER（16MHz固定・52bitカウンタ・target0コンパレータ）に置き換
- *  えたもの：
- *    - HRTCNT（μs）はカウント値の1/16（シフトのみで正確に変換できる）．
+ *  asp3_core の target/esp32c3_gcc/target_timer.h（レジスタ直叩き版）
+ *  のSYSTIMERアクセスを，esp-hal-3rdparty の LL 層
+ *  （hal/systimer_ll.h＝static inline・RTOS非依存）で置き換えたもの
+ *  （Phase B-1：esp-hal統合の実証）：
+ *    - HRTCNT（μs）はカウント値の1/16（16MHz固定）．
  *    - 割込みの強制（過去時刻設定時のペンディング・raise_event）は，
- *      Xh3irqの割込み強制ビット（meifa）の代わりに，同じCPU割込み線に
- *      多重マップしたFROM_CPU_0ソース（SYSTEMレジスタでソフトウェアが
- *      アサートできるlevelソース）で行う．タイマ割込みハンドラは
- *      SYSTIMERとFROM_CPU_0の両方をクリアする．
+ *      同じCPU割込み線に多重マップしたFROM_CPU_0ソースで行う（ASP3
+ *      固有の機構のためLL化せずレジスタ直書きのまま）．
+ *  SYSTIMERデバイス構造体インスタンスは esp-hal の
+ *  esp32c3.peripherals.ld（リンカスクリプトからINCLUDE）が提供する．
  */
 
 #ifndef TOPPERS_TARGET_TIMER_H
@@ -42,6 +43,8 @@
 
 #ifndef TOPPERS_MACRO_ONLY
 
+#include "hal/systimer_ll.h"
+
 /*
  *  高分解能タイマの起動処理
  */
@@ -53,22 +56,17 @@ extern void target_hrt_initialize(intptr_t exinf);
 extern void target_hrt_terminate(intptr_t exinf);
 
 /*
- *  SYSTIMERの52bitカウンタの読出し
- *
- *  UPDATEビットで現在値をラッチし，VALUE_VALIDを待ってからHI/LOを
- *  読み出す（HI/LOは同時にラッチされるためテアリングしない）．
+ *  SYSTIMERの52bitカウンタの読出し（unit0．スナップショット方式）
  */
 Inline uint64_t
 esp32c3_systimer_read(void)
 {
 	uint32_t hi, lo;
 
-	sil_wrw_mem((void *)ESP32C3_SYSTIMER_UNIT0_OP,
-				ESP32C3_SYSTIMER_OP_UPDATE);
-	while ((sil_rew_mem((void *)ESP32C3_SYSTIMER_UNIT0_OP)
-			& ESP32C3_SYSTIMER_OP_VALUE_VALID) == 0U) ;
-	hi = sil_rew_mem((void *)ESP32C3_SYSTIMER_UNIT0_VALUE_HI);
-	lo = sil_rew_mem((void *)ESP32C3_SYSTIMER_UNIT0_VALUE_LO);
+	systimer_ll_counter_snapshot(&SYSTIMER, 0U);
+	while (!systimer_ll_is_counter_value_valid(&SYSTIMER, 0U)) ;
+	hi = systimer_ll_get_counter_value_high(&SYSTIMER, 0U);
+	lo = systimer_ll_get_counter_value_low(&SYSTIMER, 0U);
 	return(((uint64_t)hi << 32) | (uint64_t)lo);
 }
 
@@ -106,12 +104,10 @@ target_hrt_set_event(HRTCNT hrtcnt)
 					+ (uint64_t)hrtcnt * ESP32C3_SYSTIMER_TICKS_PER_US;
 
 	/*
-	 *  target0コンパレータへ比較値を設定する（HI/LO→COMP0_LOADの順）
+	 *  target0コンパレータへ比較値を設定する
 	 */
-	sil_wrw_mem((void *)ESP32C3_SYSTIMER_TARGET0_HI,
-				(uint32_t)(target >> 32) & 0x000FFFFFU);
-	sil_wrw_mem((void *)ESP32C3_SYSTIMER_TARGET0_LO, (uint32_t)target);
-	sil_wrw_mem((void *)ESP32C3_SYSTIMER_COMP0_LOAD, 1U);
+	systimer_ll_set_alarm_target(&SYSTIMER, 0U, target);
+	systimer_ll_apply_alarm_value(&SYSTIMER, 0U);
 
 	/*
 	 *  設定完了時点で比較値を過ぎていたら割込みを強制する

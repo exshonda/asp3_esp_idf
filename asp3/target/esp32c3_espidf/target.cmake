@@ -13,6 +13,31 @@
 set(TARGETDIR ${CMAKE_CURRENT_LIST_DIR})
 
 #
+#  esp-hal-3rdparty（submodule）のパスとインクルードディレクトリ
+#
+#  Phase B-1で使用するのはRTOS非依存の下層のみ：
+#    hal（LL層＝static inlineのレジスタ薄層）・soc（レジスタ定義・
+#    構造体・peripherals.ld）・esp_common（esp_attr.h）．
+#  sdkconfig.hはKconfig生成物を使わず，esp-hal同梱のNuttX用静的スタブ
+#  （SOC機能フラグのみ）を流用する．
+#
+get_filename_component(ESP_HAL_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../hal ABSOLUTE)
+
+list(APPEND ASP3_INCLUDE_DIRS
+    ${TARGETDIR}/hal_stub/include
+    ${ESP_HAL_DIR}/components/hal/esp32c3/include
+    ${ESP_HAL_DIR}/components/hal/include
+    ${ESP_HAL_DIR}/components/hal/platform_port/include
+    ${ESP_HAL_DIR}/components/esp_hal_usb/esp32c3/include
+    ${ESP_HAL_DIR}/components/esp_hal_usb/include
+    ${ESP_HAL_DIR}/components/soc/esp32c3/include
+    ${ESP_HAL_DIR}/components/soc/esp32c3/register
+    ${ESP_HAL_DIR}/components/soc/include
+    ${ESP_HAL_DIR}/components/esp_common/include
+    ${ESP_HAL_DIR}/nuttx/esp32c3/include
+)
+
+#
 #  コンフィギュレーション関連
 #
 list(APPEND ASP3_CFG_FILES
@@ -76,6 +101,7 @@ list(APPEND ASP3_LINK_OPTIONS
     -Wl,--print-memory-usage
     -Wl,--gc-sections
     -Wl,--build-id=none
+    -L${ESP_HAL_DIR}/components/soc/esp32c3/ld
 )
 
 set(ASP3_LDSCRIPT ${TARGETDIR}/esp32c3.ld)
@@ -93,6 +119,17 @@ list(APPEND ASP3_TARGET_C_FILES
 #  チップ依存部のインクルード
 #
 include(${ASP3_ROOT_DIR}/arch/riscv_gcc/esp32c3/chip.cmake)
+
+#
+#  USB Serial/JTAGコンソールドライバをesp-hal LL層版に差し替える
+#  （Phase B-1．公開シンボルは同一のためchip_serial.cはそのまま）
+#
+if(ESP32C3_CONSOLE STREQUAL "usbjtag")
+    list(REMOVE_ITEM ASP3_SYSSVC_TARGET_C_FILES
+        ${ASP3_ROOT_DIR}/arch/riscv_gcc/esp32c3/esp32c3_usbjtag.c)
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${TARGETDIR}/esp32c3_usbjtag_hal.c)
+endif()
 
 #
 #  QEMUによる実行（cmake --build <dir> --target run）
