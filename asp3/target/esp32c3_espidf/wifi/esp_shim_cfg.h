@@ -10,7 +10,7 @@
 #define ESP_SHIM_NUM_SEM    24    /* セマフォプール */
 #define ESP_SHIM_NUM_MTX    8     /* ミューテックスプール */
 #define ESP_SHIM_NUM_DTQ    4     /* キュープール（各深さESP_SHIM_DTQ_CNT） */
-#define ESP_SHIM_DTQ_CNT    64
+#define ESP_SHIM_DTQ_CNT    256   /* WiFiドライバタスクのイベントキューは200深を要求 */
 #define ESP_SHIM_NUM_TSK    6     /* タスクプール（各スタックESP_SHIM_TSK_STKSZ） */
 #define ESP_SHIM_TSK_STKSZ  8192
 

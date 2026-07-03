@@ -12,6 +12,15 @@
 /*
  *  ログレベル（sdkconfig.hのCONFIG_LOG_DEFAULT_LEVEL等が参照）．
  *  ESP_LOG_INFO(=3)相当．esp_log_level.hのESP_LOG_*列挙値と対応。
+ *
+ *  Phase B-2b（WPA2 4-wayハンドシェイク切り分け）の調査時は一時的に
+ *  4（DEBUG）＋下記CONFIG_WPA_DEBUG_PRINTを1にして
+ *  wpa_printf(MSG_DEBUG,...)を可視化した（LOG_LOCAL_LEVEL＝
+ *  CONFIG_LOG_MAXIMUM_LEVEL＝これでゲートされるため）．
+ *  原因はesp_shim_random()のRNG_DATA_REGアドレス誤り（SNonce常時
+ *  ゼロ→AP側がnonce再利用とみなしmsg1再送）と判明・修正済み
+ *  （wifi/esp_shim.c）のため既定値3に戻す．RAM使用率も4では88%超と
+ *  高かった（3では基準値相当に戻る）．
  */
 #define CONFIG_ESPRESSIF_LOG_LEVEL 3
 

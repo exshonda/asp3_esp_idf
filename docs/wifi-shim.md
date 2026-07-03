@@ -47,6 +47,37 @@ shim層＝アプリ/ライブラリ層のヒープは対象外（ただし静的
 
 ## 実施結果
 
+### B-2b 達成：実機WPA2接続成立（2026-07-04）
+
+接続デモ `apps/wifi_connect/`（-DWIFI_SSID/-DWIFI_PASSWORDで接続先指定）で
+**実機ESP32-C3がWPA2 APへL2接続成立**（STA_CONNECTED・複数回再現）：
+
+```
+event: STA_CONNECTED
+wifi_connect: CONNECTED to '<SSID>' rssi=-56 ch=1
+```
+
+AP発見→認証→アソシエーションまでは容易に到達したが，**WPA2 4-way
+ハンドシェイクがタイムアウト（reason=15）**する壁があった．実機JTAG
+（wpa_supplicant状態機械にbrえ）で「msg1受信→PTK導出→msg2送信→msg1
+再受信」の無限ループ＝AP側がmsg2を黙って拒否（bad MIC）と判明．原因は
+Direct Boot（ESP-IDF起動シーケンス非経由）に起因する2つのshimバグ：
+
+1. **HW RNGレジスタのアドレス誤り**（esp_shim.c esp_shim_random）：
+   0x6002607C（常時0を返す別レジスタ）を読んでいた．正しくは
+   SYSCON_RND_DATA_REG=0x600260B0．SNonceが常時全ゼロになり，AP側が
+   nonce再利用/リプレイとみなしmsg1を再送し続けていた．
+2. **PSA Crypto未初期化**（esp_shim.c esp_shim_initialize）：
+   esp_supplicantのhmac_vector（sha1_prf経由のPTK/MIC導出）はPSA Crypto
+   API（psa_import_key等）を使い，psa_crypto_init()が前提．ESP-IDFは
+   コンポーネント初期化セクション（ESP_SYSTEM_INIT_FN）で自動実行するが，
+   本ポートのASP3独自起動は通らず未呼出しだった＝PTKに未初期化スタック
+   のゴミが入りMICが必ず不一致．esp_shim_initialize()で明示的に
+   psa_crypto_init()を呼ぶよう修正（PBKDF2のPMK導出は旧mbedtls_md経路で
+   PSA非依存のため正しく，PTK側だけが壊れていた）．
+
+較正はNVS永続化なし（毎回フル較正）．IP/DHCPはスコープ外（L2まで）．
+
 ### B-2a 達成：実機Wi-Fiスキャン成功（2026-07-03）
 
 実機ESP32-C3で **esp_wifi_init→start→scan→SSID一覧取得** が完動．周囲の

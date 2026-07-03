@@ -167,8 +167,9 @@ esp_hmac_calculate(int key_id, const void *message, size_t message_len,
  *  独自のint版externで呼ぶ＝別TUのためリンクは名前のみで解決され
  *  問題ない）．
  */
-#define EFUSE_RD_MAC_SPI_SYS_0_REG	0x60008044U
-#define EFUSE_RD_MAC_SPI_SYS_1_REG	0x60008048U
+/*  DR_REG_EFUSE_BASE(0x60008800) + 0x44／0x48（reg_base.h／efuse_reg.h）  */
+#define EFUSE_RD_MAC_SPI_SYS_0_REG	0x60008844U
+#define EFUSE_RD_MAC_SPI_SYS_1_REG	0x60008848U
 
 esp_err_t
 esp_read_mac(uint8_t *mac, esp_mac_type_t type)

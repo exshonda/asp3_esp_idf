@@ -33,6 +33,7 @@
 #include "esp_shim.h"
 #include "esp_shim_cfg.h"
 #include "target_timer.h"		/* esp32c3_systimer_read */
+#include "psa/crypto.h"			/* psa_crypto_init（後述） */
 
 /*
  *  クリティカルセクション（mstatus.MIEの退避・復元＝ネスト対応）
@@ -90,9 +91,20 @@ esp_shim_random(void)
 {
 	/*
 	 *  HW乱数生成器（RNG_DATA_REG）．無線が有効になるとRFノイズ由来の
-	 *  真性乱数になる（無効時はエントロピー低）
+	 *  真性乱数になる（無効時はエントロピー低）．
+	 *
+	 *  アドレスは SYSCON_RND_DATA_REG = DR_REG_SYSCON_BASE(0x60026000)
+	 *  + 0x0B0 = 0x600260B0（esp-hal-3rdparty:
+	 *  soc/esp32c3/register/soc/syscon_reg.h の SYSCON_RND_DATA_REG／
+	 *  RNG_DATA_REG，apb_ctrl_reg.h の APB_CTRL_RND_DATA_REG も同値＝
+	 *  SYSCONの旧名）．旧実装は0x6002607C（-0x34のオフセット違い）を
+	 *  読んでおり，これは常に0を返す別レジスタだった＝WPA2 4-way
+	 *  ハンドシェイクのSNonceが常時全ゼロになり，AP側がゼロnonceを
+	 *  リプレイ攻撃/nonce再利用とみなして黙ってmsg1を再送し続ける
+	 *  （4-wayハンドシェイクタイムアウト，reason=15）原因だった．
+	 *  実機JTAG（gdbでSYSCON_RND_DATA_REGを複数回読み比較）で確認済み．
 	 */
-	return(sil_rew_mem((void *)0x6002607CU));	/* APB_CTRL_RND_DATA_REG */
+	return(sil_rew_mem((void *)0x600260B0U));	/* SYSCON_RND_DATA_REG */
 }
 
 /*
@@ -853,14 +865,14 @@ esp_shim_set_isr(int32_t cpu_intno, void *handler, void *arg)
 	}
 }
 
+volatile uint32_t esp_shim_int_count[ESP_SHIM_MAX_WIFI_INTNO + 1];
+
 static void
 shim_int_dispatch(int intno)
 {
+	esp_shim_int_count[intno]++;
 	if (shim_isr_tbl[intno].fn != NULL) {
 		shim_isr_tbl[intno].fn(shim_isr_tbl[intno].arg);
-	}
-	else {
-		syslog(LOG_ERROR, "esp_shim: spurious wifi int %d", (int_t)intno);
 	}
 }
 
@@ -883,5 +895,37 @@ esp_shim_initialize(void)
 		initialized = true;
 		heap_initialize();
 		(void) act_tsk(SHIM_TIMER_TSK);
+
+		/*
+		 *  PSA Crypto初期化．
+		 *
+		 *  esp_supplicant/crypto_mbedtls.cのhmac_vector()（PTK/MIC
+		 *  導出のHMAC-SHA1等で使用）はPSA Crypto API（psa_import_key
+		 *  /psa_mac_sign_setup等）を直接呼ぶ．本来はESP-IDF起動シーケ
+		 *  ンス（esp_system_startup.cのSECONDARY初期化，優先度104＝
+		 *  mbedtls/port/esp_psa_crypto_init.cのESP_SYSTEM_INIT_FN経由）
+		 *  でpsa_crypto_init()が自動的に呼ばれるが，本ポートはDirect
+		 *  Boot（ESP-IDF起動シーケンス非経由）のためこの初期化が走ら
+		 *  ない．未初期化のままPSA API群を呼ぶと全て失敗し（PBKDF2は
+		 *  レガシーmbedtls_md経路のため無関係で正常動作するが，PTK
+		 *  導出のsha1_prf→hmac_sha1_vector→hmac_vectorはPSA経由のため
+		 *  全滅），呼び出し元（sha1_prf等）は戻り値未チェックのため
+		 *  ptk->kck/kek/tkに未初期化のスタック内容（ポインタ値等）が
+		 *  そのまま書き込まれる．結果，STAが送るmsg2のMICが常に不正
+		 *  となりAPがmsg1を再送し続ける（4-wayハンドシェイクタイム
+		 *  アウト，reason=15）．実機JTAGでptk->kck/kek/tkの中身が
+		 *  ポインタらしき値（sm->snonceやsrc_addr等のアドレス）である
+		 *  ことを確認して特定．
+		 *
+		 *  WiFi初期化前（esp_wifi_init呼び出し前）に一度だけ呼ぶ．
+		 */
+		{
+			psa_status_t st = psa_crypto_init();
+			if (st != PSA_SUCCESS) {
+				syslog(LOG_ERROR,
+					   "esp_shim: psa_crypto_init failed (%d)",
+					   (int_t)st);
+			}
+		}
 	}
 }
