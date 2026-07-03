@@ -1,0 +1,146 @@
+/*
+ *  TOPPERS/ASP Kernel
+ *      Toyohashi Open Platform for Embedded Real-Time Systems/
+ *      Advanced Standard Profile Kernel
+ *
+ *  Copyright (C) 2026 by Embedded and Real-Time Systems Laboratory
+ *              Graduate School of Information Science, Nagoya Univ., JAPAN
+ *
+ *  上記著作権者は，本ソフトウェアをTOPPERSライセンス（条件は他のソー
+ *  スファイルの先頭コメントを参照）の下で利用することを許諾する．本ソ
+ *  フトウェアは無保証で提供される．
+ */
+
+/*
+ *  タイマドライバのターゲット依存部（ESP32-C3用）
+ *
+ *  pico2_riscv（TIMER0 ALARM0＝1MHzカウンタ）のロジックを，ESP32-C3の
+ *  SYSTIMER（16MHz固定・52bitカウンタ・target0コンパレータ）に置き換
+ *  えたもの：
+ *    - HRTCNT（μs）はカウント値の1/16（シフトのみで正確に変換できる）．
+ *    - 割込みの強制（過去時刻設定時のペンディング・raise_event）は，
+ *      Xh3irqの割込み強制ビット（meifa）の代わりに，同じCPU割込み線に
+ *      多重マップしたFROM_CPU_0ソース（SYSTEMレジスタでソフトウェアが
+ *      アサートできるlevelソース）で行う．タイマ割込みハンドラは
+ *      SYSTIMERとFROM_CPU_0の両方をクリアする．
+ */
+
+#ifndef TOPPERS_TARGET_TIMER_H
+#define TOPPERS_TARGET_TIMER_H
+
+#include <sil.h>
+#include "esp32c3.h"
+
+/*
+ *  タイマ割込みハンドラ登録のための定数
+ *  （SYSTIMER_TARGET0とFROM_CPU_0の両ソースをCPU割込み線1に多重マップ）
+ */
+#define INTNO_TIMER  1                            /* 割込み番号 */
+#define INHNO_TIMER  1                            /* 割込みハンドラ番号 */
+#define INTPRI_TIMER (TMAX_INTPRI - 1)            /* 割込み優先度 */
+#define INTATR_TIMER TA_NULL                      /* 割込み属性 */
+
+#ifndef TOPPERS_MACRO_ONLY
+
+/*
+ *  高分解能タイマの起動処理
+ */
+extern void target_hrt_initialize(intptr_t exinf);
+
+/*
+ *  高分解能タイマの停止処理
+ */
+extern void target_hrt_terminate(intptr_t exinf);
+
+/*
+ *  SYSTIMERの52bitカウンタの読出し
+ *
+ *  UPDATEビットで現在値をラッチし，VALUE_VALIDを待ってからHI/LOを
+ *  読み出す（HI/LOは同時にラッチされるためテアリングしない）．
+ */
+Inline uint64_t
+esp32c3_systimer_read(void)
+{
+	uint32_t hi, lo;
+
+	sil_wrw_mem((void *)ESP32C3_SYSTIMER_UNIT0_OP,
+				ESP32C3_SYSTIMER_OP_UPDATE);
+	while ((sil_rew_mem((void *)ESP32C3_SYSTIMER_UNIT0_OP)
+			& ESP32C3_SYSTIMER_OP_VALUE_VALID) == 0U) ;
+	hi = sil_rew_mem((void *)ESP32C3_SYSTIMER_UNIT0_VALUE_HI);
+	lo = sil_rew_mem((void *)ESP32C3_SYSTIMER_UNIT0_VALUE_LO);
+	return(((uint64_t)hi << 32) | (uint64_t)lo);
+}
+
+/*
+ *  高分解能タイマの現在のカウント値の読出し（μs単位・下位32bit）
+ */
+Inline HRTCNT
+target_hrt_get_current(void)
+{
+	return((HRTCNT)(esp32c3_systimer_read()
+					/ ESP32C3_SYSTIMER_TICKS_PER_US));
+}
+
+/*
+ *  タイマ割込みの強制（FROM_CPU_0ソースのアサート．levelソースの
+ *  ため，タイマ割込みハンドラでクリア（0書込み）するまで保持される）
+ */
+Inline void
+target_timer_force_int(void)
+{
+	sil_wrw_mem((void *)ESP32C3_SYSTEM_CPU_INTR_FROM_CPU_0, 1U);
+}
+
+/*
+ *  高分解能タイマへの割込みタイミングの設定
+ *
+ *  高分解能タイマを，hrtcntで指定した値カウントアップしたら割込みを発
+ *  生させるように設定する．
+ */
+Inline void
+target_hrt_set_event(HRTCNT hrtcnt)
+{
+	uint64_t	current = esp32c3_systimer_read();
+	uint64_t	target = current
+					+ (uint64_t)hrtcnt * ESP32C3_SYSTIMER_TICKS_PER_US;
+
+	/*
+	 *  target0コンパレータへ比較値を設定する（HI/LO→COMP0_LOADの順）
+	 */
+	sil_wrw_mem((void *)ESP32C3_SYSTIMER_TARGET0_HI,
+				(uint32_t)(target >> 32) & 0x000FFFFFU);
+	sil_wrw_mem((void *)ESP32C3_SYSTIMER_TARGET0_LO, (uint32_t)target);
+	sil_wrw_mem((void *)ESP32C3_SYSTIMER_COMP0_LOAD, 1U);
+
+	/*
+	 *  設定完了時点で比較値を過ぎていたら割込みを強制する
+	 *  （oneshotのコンパレータは過去時刻に対して発火しないため）
+	 */
+	if (esp32c3_systimer_read() >= target) {
+		target_timer_force_int();
+	}
+}
+
+/*
+ *  高分解能タイマ割込みの要求
+ */
+Inline void
+target_hrt_raise_event(void)
+{
+	target_timer_force_int();
+}
+
+/*
+ *  割込みタイミングに指定する最大値
+ */
+#define HRTCNT_BOUND 4000000002U
+
+/*
+ *  高分解能タイマ割込みハンドラ
+ */
+extern void target_hrt_handler(void);
+
+#endif /* TOPPERS_MACRO_ONLY */
+
+#endif /* TOPPERS_TARGET_TIMER_H */

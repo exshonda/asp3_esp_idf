@@ -1,0 +1,5 @@
+# target_kernel_impl.c
+target_initialize
+target_exit
+
+INCLUDE "chip"
