@@ -130,6 +130,11 @@ extern uint32_t esp_shim_random(void);
 extern void esp_shim_initialize(void);
 
 /*
+ *  coexアダプタの登録（WiFi初期化前に呼ぶ）
+ */
+extern void esp_shim_coex_adapter_register(void);
+
+/*
  *  ログ（blobの_log_write系の折返し先）
  */
 extern void esp_shim_log_write(const char *format, ...);

@@ -182,6 +182,7 @@ if(ESP32C3_WIFI)
         ${TARGETDIR}/wifi/esp_shim_blobglue.c
         ${TARGETDIR}/wifi/esp_wifi_adapter.c
         ${TARGETDIR}/wifi/esp_event_shim.c
+        ${TARGETDIR}/wifi/esp_coex_adapter.c
     )
 endif()
 include(${TARGETDIR}/esp_wifi.cmake)

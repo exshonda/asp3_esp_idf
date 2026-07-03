@@ -94,6 +94,22 @@ hardware_init_hook(void)
 			 ESP32C3_CPU_PER_CONF_PLL_160M, ESP32C3_CPU_PER_CONF_CLK_MASK);
 	sil_mskw((void *)ESP32C3_SYSTEM_SYSCLK_CONF,
 			 ESP32C3_SYSCLK_CONF_SEL_PLL, ESP32C3_SYSCLK_CONF_SEL_MASK);
+
+#ifdef TOPPERS_ESP32C3_WIFI
+	/*
+	 *  Wi-Fi/BTモデムクロックの全面有効化
+	 *
+	 *  ESP-IDFは起動時のesp_perip_clk_init()（esp_system/port/soc/
+	 *  esp32c3/clk.c）でSYSTEM_WIFI_CLK_EN_REGにSYSTEM_WIFI_CLK_EN
+	 *  （0x00FB9FCF）をセットしてモデム系クロックを起こす．Direct Boot
+	 *  ではこの初期化が走らずMACクロックが不完全（bit6/11/12/16欠落）で，
+	 *  esp_wifi_start()内のhal_initがMAC MMIO（0x60033D14）応答待ちで
+	 *  停止する（実機JTAGで特定）．ここで同じ値をセットする．
+	 *  C3のperiph_ll_wifi_module_enable_clk_clear_rstのマスクは0（no-op）
+	 *  で，モデムクロックはこの起動時設定に依存しているため必須．
+	 */
+	sil_orw((void *)0x60026014U, 0x00FB9FCFU);	/* SYSTEM_WIFI_CLK_EN_REG */
+#endif /* TOPPERS_ESP32C3_WIFI */
 }
 
 void

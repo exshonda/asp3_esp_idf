@@ -670,3 +670,19 @@ _lock_release_recursive(_lock_t *lock)
 {
 	_lock_release(lock);
 }
+
+/*
+ *  coexist_printf（libcoexist.aが参照．syslogへ折返し）
+ */
+int
+coexist_printf(const char *format, ...)
+{
+	char	buf[128];
+	va_list	args;
+
+	va_start(args, format);
+	vsnprintf(buf, sizeof(buf), format, args);
+	va_end(args);
+	syslog(LOG_NOTICE, "%s", buf);
+	return(0);
+}

@@ -47,6 +47,8 @@ main_task(EXINF exinf)
 	(void) esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
 									  (void *)wifi_event_handler, NULL);
 
+	esp_shim_coex_adapter_register();
+
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_init");
 	err = esp_wifi_init(&cfg);
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_init -> %d", (int_t)err);
@@ -56,6 +58,7 @@ main_task(EXINF exinf)
 
 	(void) esp_wifi_set_mode(WIFI_MODE_STA);
 	(void) esp_wifi_set_storage(WIFI_STORAGE_RAM);
+	(void) esp_wifi_set_ps(WIFI_PS_NONE);
 
 	err = esp_wifi_start();
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_start -> %d", (int_t)err);
