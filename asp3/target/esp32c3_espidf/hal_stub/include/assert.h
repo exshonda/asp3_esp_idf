@@ -11,4 +11,15 @@
 
 #define assert(x) ((void)0)
 
+/*
+ *  static_assert（C11 _Static_assertのマクロ形）．esp_assert.hの
+ *  ESP_STATIC_ASSERTがこの名前をそのまま使う．コンパイラ組込みの
+ *  _Static_assertはfreestandingでも利用可能．
+ */
+#ifndef __cplusplus
+#ifndef static_assert
+#define static_assert _Static_assert
+#endif
+#endif
+
 #endif /* TOPPERS_HAL_STUB_ASSERT_H */

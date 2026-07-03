@@ -46,6 +46,25 @@ SECTIONS
         KEEP(*(.text.entry))       /* +8：エントリ（j start） */
         . = ALIGN(256);            /* trap_vector_tableのアライン */
         *(.text*)
+        /*
+         *  IRAM_ATTR系関数（.iram1.N＝esp_hw_support/periph_ctrl.c等
+         *  Wi-Fi統合ソース，.coexiram.N／.wifi0iram.N／.wifiextrairam.N／
+         *  .wifiorslpiram.N／.wifirxiram.N／.wifislpiram.N／
+         *  .wifislprxiram.N＝libcoexist.a/libnet80211.a/libpp.a等の
+         *  blobが要求する高速実行用セクション．esp_wifi.cmakeでリンク
+         *  対象になった.aファイルをobjdump -hで全数走査して確認した
+         *  一覧．本ldは独立したIRAM領域を持たないDirect Boot XIP構成の
+         *  ため，通常コードと同じくIROMへ収容する＝実行速度上の
+         *  最適化は失うが機能上は問題ない）
+         */
+        *(.iram1 .iram1.*)
+        *(.coexiram .coexiram.*)
+        *(.wifi0iram .wifi0iram.*)
+        *(.wifiextrairam .wifiextrairam.*)
+        *(.wifiorslpiram .wifiorslpiram.*)
+        *(.wifirxiram .wifirxiram.*)
+        *(.wifislpiram .wifislpiram.*)
+        *(.wifislprxiram .wifislprxiram.*)
         . = ALIGN(16);
     } > IROM
     _irom_size = SIZEOF(.text);
@@ -57,6 +76,14 @@ SECTIONS
     .rodata ORIGIN(DROM) + _irom_size : AT(ORIGIN(DROM) + _irom_size) {
         *(.rodata .rodata.*)
         *(.srodata .srodata.*)
+        /*
+         *  .rodata_wlog_{debug,error,info,verbose,warning}.N（Wi-Fi
+         *  blob／esp-halのログ文字列圧縮用セクション．ESP_LOGx系
+         *  マクロがフォーマット文字列を専用セクションへ切り出す
+         *  最適化．内容は定数文字列のため.rodata同様DROMへ収容する．
+         *  接尾辞はobjdump -hでの全数走査により確認済み）
+         */
+        *(.rodata_wlog_*)
         . = ALIGN(16);
     } > DROM
 
@@ -71,6 +98,12 @@ SECTIONS
         __data_start = .;
         LONG(0)     /* 番兵（.dataが空だとldがAT指定を無視しLMAがRAMに落ちるため） */
         *(.data*)
+        /*
+         *  .dram1.N（DRAM_ATTR変数．IRAM_ATTR関数と対の初期化済み
+         *  データ．本ldは独立したDRAM専用領域を持たないため通常の
+         *  .dataと同じくRAMへ収容する）
+         */
+        *(.dram1 .dram1.*)
         . = ALIGN(8);
         __global_pointer$ = . + 0x800;
         *(.sdata .sdata.*)

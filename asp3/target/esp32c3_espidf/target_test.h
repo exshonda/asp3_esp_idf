@@ -27,9 +27,9 @@
 
 /*
  *  テストプログラムで使用する割込み（FROM_CPU_1ソースを割り当てた
- *  CPU割込み線3．割り当てはtarget_initializeで行う）
+ *  CPU割込み線18．割り当てはtarget_initializeで行う）
  */
-#define INTNO1			3
+#define INTNO1			18
 #define INTNO1_INTATR	TA_ENAINT
 #define INTNO1_INTPRI	(-2)
 

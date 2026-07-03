@@ -43,7 +43,7 @@ extern void target_fput_log(char c);
 /*
  *  UART割込み（ASP3の割込み番号INTNO = ESP32-C3のCPU割込み線番号そのまま）
  */
-#define INTNO_SIO		2							/* UART割込み番号 */
+#define INTNO_SIO		17							/* UART割込み番号 */
 #define ISRPRI_SIO		1							/* UART ISR優先度 */
 #define INTPRI_SIO		(-2)						/* UART割込み優先度 */
 #define INTATR_SIO		TA_NULL						/* UART割込み属性 */

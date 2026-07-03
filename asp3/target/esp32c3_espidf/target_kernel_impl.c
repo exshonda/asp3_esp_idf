@@ -52,9 +52,18 @@ esp32c3_disable_mwdt(uint32_t timg_base)
 /*
  *  起動時のハードウェア初期化処理
  */
+/*  ブート進行デバッグ（USB Serial/JTAGへ直接1文字．要削除） */
+static void
+dbg_putc(char c)
+{
+	sil_wrw_mem((void *)0x60043000U, (uint32_t)c);
+	sil_wrw_mem((void *)0x60043004U, 1U);
+}
+
 void
 hardware_init_hook(void)
 {
+	dbg_putc('H');
 	/*
 	 *  ウォッチドッグタイマの無効化
 	 *  （MWDT0/1・RTC WDT・スーパーWDT．リセット後デフォルトで有効）
@@ -90,6 +99,7 @@ hardware_init_hook(void)
 void
 software_init_hook(void)
 {
+	dbg_putc('S');
 	/* Initialize sio for fput */
 #ifdef TOPPERS_OMIT_TECS
 	sio_initialize(0);
@@ -106,24 +116,27 @@ target_initialize(void)
 	/*
 	 *  チップ依存の初期化（mtvec・割込みマトリクス・コア依存部）
 	 */
+	dbg_putc('T');
 	chip_initialize();
+	dbg_putc('U');
 
 	/*
 	 *  ペリフェラル割込みソースをCPU割込み線へ割り当てる
 	 *  （SYSTIMER_TARGET0とFROM_CPU_0（タイマ割込みの強制用）は
 	 *  同じ線に多重マップする．target_timer.h参照．FROM_CPU_1は
 	 *  テストプログラム用のras_int対象＝INTNO1．target_test.h参照．
-	 *  コンソール（INTNO_SIO＝線2）はビルド時選択に応じてUART0または
-	 *  USB Serial/JTAGのソースを割り当てる）
+	 *  コンソール（INTNO_SIO＝線17）はビルド時選択に応じてUART0または
+	 *  USB Serial/JTAGのソースを割り当てる．線1〜15はWi-Fi blobが
+	 *  _set_intrで指定する線番号用に開放している）
 	 */
-	esp32c3_intmtx_route(ESP32C3_INTSRC_SYSTIMER_TARGET0, 1U);
-	esp32c3_intmtx_route(ESP32C3_INTSRC_FROM_CPU_0, 1U);
+	esp32c3_intmtx_route(ESP32C3_INTSRC_SYSTIMER_TARGET0, 16U);
+	esp32c3_intmtx_route(ESP32C3_INTSRC_FROM_CPU_0, 16U);
 #ifdef TOPPERS_ESP32C3_CONSOLE_USBJTAG
-	esp32c3_intmtx_route(ESP32C3_INTSRC_USB_SERIAL_JTAG, 2U);
+	esp32c3_intmtx_route(ESP32C3_INTSRC_USB_SERIAL_JTAG, 17U);
 #else /* TOPPERS_ESP32C3_CONSOLE_USBJTAG */
-	esp32c3_intmtx_route(ESP32C3_INTSRC_UART0, 2U);
+	esp32c3_intmtx_route(ESP32C3_INTSRC_UART0, 17U);
 #endif /* TOPPERS_ESP32C3_CONSOLE_USBJTAG */
-	esp32c3_intmtx_route(ESP32C3_INTSRC_FROM_CPU_1, 3U);
+	esp32c3_intmtx_route(ESP32C3_INTSRC_FROM_CPU_1, 18U);
 }
 
 /*

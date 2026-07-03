@@ -71,7 +71,7 @@ UARTブリッジ配線のあるボードは `-DESP32C3_CONSOLE=uart0`。
 |---|---|---|
 | B-0 | リポジトリ骨格・ASP3_TARGET_DIRビルド（QEMU/実機） | **完了** |
 | B-1 | esp-hal-3rdparty統合（LL層でコンソール・タイマを実装．`docs/hal-integration.md`） | **完了**（QEMU/実機 test_porting 6/6・実機testexec） |
-| B-2 | Wi-Fi os_adapter shim（init〜scan〜AP接続） | 未着手 |
+| B-2 | Wi-Fi os_adapter shim（init〜scan〜AP接続） | **実施中**（shim全実装・実機で`esp_wifi_init`成功・PHY較正統合済み。`esp_wifi_start`内のMAC起動待ちで停止＝調査中。`docs/wifi-shim.md`） |
 
 ## ライセンス
 

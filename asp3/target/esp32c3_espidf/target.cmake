@@ -165,6 +165,28 @@ else()
 endif()
 
 #
+#  Wi-Fi（esp_wifi blob＋os_adapter shim．既定OFF＝素のASP3ターゲット）
+#
+#  ONにすると，shim基盤（wifi/esp_shim.*＝静的プールとプリミティブ）と
+#  esp_wifi.cmake（NuttX Wireless.mk移植＝wpa_supplicant/mbedtls/blob
+#  リンク）を取り込む．経緯はdocs/wifi-shim.md．
+#
+option(ESP32C3_WIFI "Enable Wi-Fi (esp_wifi blob + os_adapter shim)" OFF)
+if(ESP32C3_WIFI)
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_WIFI)
+    list(APPEND ASP3_INCLUDE_DIRS ${TARGETDIR}/wifi)
+    list(APPEND ASP3_CFG_FILES ${TARGETDIR}/wifi/esp_shim.cfg)
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${TARGETDIR}/wifi/esp_shim.c
+        ${TARGETDIR}/wifi/esp_shim_libc.c
+        ${TARGETDIR}/wifi/esp_shim_blobglue.c
+        ${TARGETDIR}/wifi/esp_wifi_adapter.c
+        ${TARGETDIR}/wifi/esp_event_shim.c
+    )
+endif()
+include(${TARGETDIR}/esp_wifi.cmake)
+
+#
 #  フラッシュイメージ生成等（aspターゲット定義後に取込み）
 #
 set(ASP3_TARGET_RUN_CMAKE ${TARGETDIR}/run.cmake)

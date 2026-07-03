@@ -34,10 +34,10 @@
 
 /*
  *  タイマ割込みハンドラ登録のための定数
- *  （SYSTIMER_TARGET0とFROM_CPU_0の両ソースをCPU割込み線1に多重マップ）
+ *  （SYSTIMER_TARGET0とFROM_CPU_0の両ソースをCPU割込み線16に多重マップ（線1〜15はWi-Fi blob用に開放））
  */
-#define INTNO_TIMER  1                            /* 割込み番号 */
-#define INHNO_TIMER  1                            /* 割込みハンドラ番号 */
+#define INTNO_TIMER  16                           /* 割込み番号 */
+#define INHNO_TIMER  16                           /* 割込みハンドラ番号 */
 #define INTPRI_TIMER (TMAX_INTPRI - 1)            /* 割込み優先度 */
 #define INTATR_TIMER TA_NULL                      /* 割込み属性 */
 
