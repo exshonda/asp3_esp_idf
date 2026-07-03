@@ -52,18 +52,9 @@ esp32c3_disable_mwdt(uint32_t timg_base)
 /*
  *  起動時のハードウェア初期化処理
  */
-/*  ブート進行デバッグ（USB Serial/JTAGへ直接1文字．要削除） */
-static void
-dbg_putc(char c)
-{
-	sil_wrw_mem((void *)0x60043000U, (uint32_t)c);
-	sil_wrw_mem((void *)0x60043004U, 1U);
-}
-
 void
 hardware_init_hook(void)
 {
-	dbg_putc('H');
 	/*
 	 *  ウォッチドッグタイマの無効化
 	 *  （MWDT0/1・RTC WDT・スーパーWDT．リセット後デフォルトで有効）
@@ -115,7 +106,6 @@ hardware_init_hook(void)
 void
 software_init_hook(void)
 {
-	dbg_putc('S');
 	/* Initialize sio for fput */
 #ifdef TOPPERS_OMIT_TECS
 	sio_initialize(0);
@@ -132,9 +122,7 @@ target_initialize(void)
 	/*
 	 *  チップ依存の初期化（mtvec・割込みマトリクス・コア依存部）
 	 */
-	dbg_putc('T');
 	chip_initialize();
-	dbg_putc('U');
 
 	/*
 	 *  ペリフェラル割込みソースをCPU割込み線へ割り当てる

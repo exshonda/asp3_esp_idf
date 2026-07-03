@@ -34,6 +34,25 @@
 /*  esp_coex_adapter_register（libcoexist.a／esp_coex内） */
 extern int esp_coex_adapter_register(coex_adapter_funcs_t *funcs);
 
+/*
+ *  coexist_funcs：ROM常駐グローバル（esp32c3.rom.ld・0x3fcdf83c）．
+ *  ROMのcoexistラッパー群がこのポインタ経由でメソッドを呼ぶ．
+ *  ESP-IDF/NuttXでは（BT併用時に）blob側が有効なテーブルを設定するが，
+ *  WiFi単独のDirect Boot移植では設定されずNULLのままとなり，WiFi PM
+ *  （pm_disconnected_start）がNULLメソッドを呼んでクラッシュする．
+ *  coexistが不要なWiFi単独では，全メソッドをno-op（0を返す＝coex非
+ *  アクティブ）にしたダミーテーブルを指させれば安全に通過できる．
+ */
+extern void *coexist_funcs;
+
+static intptr_t
+coex_noop(void)
+{
+	return(0);
+}
+
+static void *dummy_coexist_table[48];
+
 static void
 coex_task_yield_from_isr_wrapper(void)
 {
@@ -178,9 +197,19 @@ coex_adapter_funcs_t g_coex_adapter_funcs = {
 void
 esp_shim_coex_adapter_register(void)
 {
-	int	ret = esp_coex_adapter_register(&g_coex_adapter_funcs);
+	int		ret = esp_coex_adapter_register(&g_coex_adapter_funcs);
+	uint_t	i;
 
 	if (ret != 0) {
 		syslog(LOG_ERROR, "esp_coex_adapter_register -> %d", (int_t)ret);
 	}
+
+	/*
+	 *  ROMのcoexist_funcsポインタをダミーno-opテーブルへ向ける
+	 *  （WiFi単独＝coexist非アクティブ．上記コメント参照）．
+	 */
+	for (i = 0U; i < 48U; i++) {
+		dummy_coexist_table[i] = (void *)coex_noop;
+	}
+	coexist_funcs = dummy_coexist_table;
 }

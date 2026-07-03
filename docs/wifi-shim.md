@@ -47,6 +47,38 @@ shim層＝アプリ/ライブラリ層のヒープは対象外（ただし静的
 
 ## 実施結果
 
+### B-2a 達成：実機Wi-Fiスキャン成功（2026-07-03）
+
+実機ESP32-C3で **esp_wifi_init→start→scan→SSID一覧取得** が完動．周囲の
+AP（16〜17個）のSSID・RSSI・チャンネルを実受信（RF較正も機能）．
+
+実機JTAG（OpenOCD-esp32＋riscv32-esp-elf-gdb）デバッグで解明・解決した
+3つの起動ブロッカー（いずれもDirect Boot＝ESP-IDF起動シーケンス非経由に
+起因）：
+
+1. **モデムクロック未初期化**（hal_initハング）：ESP-IDFの
+   esp_perip_clk_init()が起動時にSYSTEM_WIFI_CLK_EN_REG（0x60026014）へ
+   SYSTEM_WIFI_CLK_EN（0x00FB9FCF）をセットしてモデム系クロックを起こす．
+   Direct Bootではこれが走らずMAC MMIO（0x60033D14）が無応答．
+   → hardware_init_hookで同値をセット（TOPPERS_ESP32C3_WIFI時のみ）．
+   C3のperiph_ll_wifi_module_enable_clk_clear_rstのマスクは0（no-op）で，
+   モデムクロックはこの起動時設定に依存する点が非自明．
+2. **coex os_adapter未登録**：g_coex_adapter_funcs（coex_adapter_funcs_t）を
+   実装し起動時にesp_coex_adapter_register（NuttXのbringup相当）．
+3. **coexist_funcs（ROM常駐グローバル・0x3fcdf83c）がNULL**：ROMのcoexist
+   ラッパー群がこのポインタ経由でメソッドを呼ぶが，WiFi単独のDirect Boot
+   では誰も設定せず，WiFi PM（pm_disconnected_start）がNULLメソッドで
+   クラッシュ．→ coexist非アクティブ（全メソッド0返し）のダミーテーブルを
+   指させて回避（esp_coex_adapter.c）．NuttXはWiFi単独時coex osiを全スタブ
+   化するが，pp lib内部のPM経路は直接ROM coexist_funcsを読むため本対処が要る．
+
+### 到達段階
+
+init／start／scan／done すべて到達（**B-2a完了**）．次段（B-2b）はAP接続
+（WPA2）＝wpa_supplicantの本経路．較正は毎回フル（NVS永続化なし）．
+
+### 旧・実装ログ
+
 ### shim・adapter実装（2026-07-03）
 
 - `wifi/esp_shim.[ch]`＋`esp_shim.cfg`＋`esp_shim_cfg.h`：基盤プリミティブ
