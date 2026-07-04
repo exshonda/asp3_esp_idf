@@ -197,6 +197,24 @@ list(APPEND ASP3_COMPILE_DEFS
     #  等，blob/wifi_init.c由来の診断ログが短時間に多数出る）で溢れ，
     #  診断に必要なメッセージ（phy_version等）が失われるため増量する．
     TCNT_SYSLOG_BUFFER=128
+    #  CONFIG_IDF_TARGET_ESP32C6：hal/components/esp_wifi/include/
+    #  esp_private/wifi_os_adapter.hのwifi_osi_funcs_t定義が
+    #  `#if CONFIG_IDF_TARGET_ESP32C6 || ...C5 || ...C61`で
+    #  _regdma_link_set_write_wait_content／
+    #  _sleep_retention_find_link_by_idの2フィールドを条件付き
+    #  追加する（C6/C5/C61専用のsleep retention連携）．本マクロ
+    #  未定義のままだとASP3が計算する構造体レイアウトがこの2
+    #  フィールド分（RV32で8バイト）短くなり，それ以降の全フィールド
+    #  （_coex_schm_flexible_period_set/get・_coex_schm_get_phase_by_idx・
+    #  末尾の_magic）が，C6向けにビルドされたblob（当然本マクロ
+    #  定義済み前提でリンクされている．NuttXの生成sdkconfig.hでも
+    #  `#define CONFIG_IDF_TARGET_ESP32C6 1`を確認済み）が期待する
+    #  オフセットとずれる＝構造体ABI不一致．blobがosi_funcsテーブルを
+    #  誤ったオフセットで読み，特に末尾の_magicチェックが不正な値
+    #  （実際には別フィールドの関数ポインタ）を参照する可能性が高い．
+    #  hal/配下は編集禁止のため，コンパイル定義でNuttX/ESP-IDF本来の
+    #  ターゲット識別マクロを補う（docs/wifi-shim-c6.md「実施10」参照）．
+    CONFIG_IDF_TARGET_ESP32C6=1
 )
 
 list(APPEND ASP3_INCLUDE_DIRS
