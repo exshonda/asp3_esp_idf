@@ -96,12 +96,30 @@ main_task(EXINF exinf)
 	cfg.hci_tl_funcs = NULL;
 	cfg.txant_dft = 0;
 	cfg.rxant_dft = 0;
-	cfg.txpwr_dft = 0;
-	cfg.cfg_mask = 0;
+	/*
+	 *  txpwr_dft：実際のKconfig既定はBT_CTRL_DFT_TX_POWER_LEVEL_P9
+	 *  （+9dBm）＝esp_power_level_tで11．誤って0（P_N24=-24dBm相当）
+	 *  としていたのを修正．
+	 */
+	cfg.txpwr_dft = 11;
+	/*
+	 *  cfg_mask：esp_bt.hの実際のデフォルトは
+	 *  CFG_MASK_BIT_SCAN_DUPLICATE_OPTION=(1<<0)=1．0のままだと
+	 *  scan_duplicate_type等の解釈にズレが生じる．
+	 */
+	cfg.cfg_mask = 1;
 	cfg.scan_duplicate_mode = 0;
 	cfg.scan_duplicate_type = 0;
 	cfg.normal_adv_size = 100;
-	cfg.mesh_adv_size = 100;
+	/*
+	 *  mesh_adv_size：BLEメッシュのスキャン重複排除を使わない
+	 *  （CONFIG_BT_CTRL_BLE_MESH_SCAN_DUPL_EN未定義）場合の実際の
+	 *  Kconfig既定は0（esp_bt.hのMESH_DUPLICATE_SCAN_CACHE_SIZE参照）．
+	 *  100は誤り．ただし実機JTAG調査の結果，"BLE assert emi.c 164"の
+	 *  原因ではないと確認済み（0/100いずれでも同一アサートが発生．
+	 *  詳細はdocs/bt-shim.md）．
+	 */
+	cfg.mesh_adv_size = 0;
 	cfg.coex_phy_coded_tx_rx_time_limit = 0;
 	cfg.hw_target_code = 0x01010000UL;	/* BLE_HW_TARGET_CODE_CHIP_ECO0相当 */
 	cfg.slave_ce_len_min = 5;
