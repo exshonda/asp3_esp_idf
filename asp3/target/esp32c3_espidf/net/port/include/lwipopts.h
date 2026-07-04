@@ -47,6 +47,14 @@
 #define MEMP_NUM_NETCONN            4
 
 /*
+ *  SO_RCVTIMEO（tcp_socket_clientがrecv()をブロックしっぱなしに
+ *  しないため）．NONSTANDARD=1でint（ミリ秒）指定にし，struct
+ *  timeval／sys/time.hへの依存を避ける．
+ */
+#define LWIP_SO_RCVTIMEO            1
+#define LWIP_SO_SNDRCVTIMEO_NONSTANDARD  1
+
+/*
  *  errno（hal_stub/include/errno.hへ委譲．lwip/src/include/lwip/
  *  errno.hがLWIP_ERRNO_STDINCLUDE経由で<errno.h>にフォールバックする
  *  仕組みを利用．詳細はerrno.h先頭コメント参照）
