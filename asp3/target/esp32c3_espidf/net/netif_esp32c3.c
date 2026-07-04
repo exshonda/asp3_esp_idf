@@ -12,14 +12,18 @@
  */
 
 /*
- *  ESP32-C3 Wi-Fi用lwIP netif実装（ASP3．NO_SYS=1．Phase C）
+ *  ESP32-C3 Wi-Fi用lwIP netif実装（ASP3．NO_SYS=0．BSDソケット互換化）
  *
- *  net_task（cfgで生成される唯一のタスク）だけがlwIPコアAPIを呼ぶ
- *  ＝単一実行文脈の原則を守る．wifi_rx_cb（Wi-Fiドライバのタスク
- *  文脈で呼ばれる）は受信フレームをボックス化してnet_taskのキューに
- *  渡すのみで，pbuf操作等のlwIP呼出しは一切行わない．
- *  リンク状態の通知（Wi-Fiイベントハンドラ→net_task）もフラグ経由の
- *  ポーリングに留め，dhcp_start等はnet_task内から呼ぶ．
+ *  lwIP自身が生成するtcpip_thread（＝cfg生成のNET_TSK．port/
+ *  sys_arch.c参照）だけがlwIPコアAPIを直接呼ぶ．
+ *    - wifi_rx_cb（Wi-Fiドライバのタスク文脈）はpbuf_alloc/pbuf_take
+ *      してtcpip_input()に渡すのみ（tcpip_input()は任意の文脈から
+ *      安全に呼べる，lwIPが公式に提供するinjectionポイント）．
+ *    - リンクup/downはtcpip_callback()でtcpip_thread文脈へ委譲する
+ *      （dhcp_start等のraw API呼出しをtcpip_thread内に限定するため）．
+ *    - DHCP完了検出はnetif_set_status_callback()（ポーリング不要）．
+ *    - netif_add／tcpecho_raw_init等の初期化はtcpip_init()のinit_done
+ *      コールバック内（＝tcpip_thread起動直後の文脈）で行う．
  *  設計・経緯はdocs/tcpip-integration.md．
  */
 #include <kernel.h>
@@ -28,11 +32,10 @@
 #include "kernel_cfg.h"
 
 #include "lwip/opt.h"
-#include "lwip/init.h"
+#include "lwip/tcpip.h"
 #include "lwip/netif.h"
 #include "lwip/etharp.h"
 #include "lwip/dhcp.h"
-#include "lwip/timeouts.h"
 #include "lwip/ip4_addr.h"
 #include "netif/ethernet.h"
 #include "tcpecho_raw.h"
@@ -47,22 +50,11 @@
 #include "ping.h"
 
 static struct netif	s_netif;
-static volatile int32_t	s_link_cmd;	/* 0=無し 1=up 2=down（net_taskが消費） */
 static bool_t		s_dhcp_started;
 static bool_t		s_ip_reported;
 
 /*
- *  受信フレームのボックス（wifi_rx_cb→net_task）．esp_shimヒープ上に
- *  1個ずつ確保し，net_task側で解放する．
- */
-struct rx_item {
-	void		*buffer;
-	uint16_t	len;
-	void		*eb;
-};
-
-/*
- *  ---- 送信（net_task文脈．linkoutputはpbufを解放しない＝呼出し元の
+ *  ---- 送信（tcpip_thread文脈．linkoutputはpbufを解放しない＝呼出し元の
  *  責務）----
  *
  *  esp_wifi_internal_txは渡したバッファのコピーを取ってから送信する
@@ -89,32 +81,27 @@ low_level_output(struct netif *netif, struct pbuf *p)
 }
 
 /*
- *  ---- 受信コールバック（Wi-Fiドライバのタスク文脈．lwIP APIは
- *  一切呼ばない．bufferの実体はeb解放まで有効＝net_task側でコピー
- *  してからesp_wifi_internal_free_rx_bufferを呼ぶ）----
+ *  ---- 受信コールバック（Wi-Fiドライバのタスク文脈）----
+ *
+ *  pbuf_alloc/pbuf_takeはSYS_ARCH_PROTECTで保護されており任意の文脈
+ *  から呼んでよい．tcpip_input()はまさにこの目的（外部文脈からの
+ *  安全なパケット注入）でlwIPが提供するAPI．bufferの実体はeb解放まで
+ *  有効＝コピー後に解放する．
  */
 static esp_err_t
 wifi_rx_cb(void *buffer, uint16_t len, void *eb)
 {
-	struct rx_item	*item;
+	struct pbuf	*p;
 
-	item = (struct rx_item *) esp_shim_malloc(sizeof(*item));
-	if (item == NULL) {
-		if (eb != NULL) {
-			esp_wifi_internal_free_rx_buffer(eb);
+	p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
+	if (p != NULL) {
+		(void) pbuf_take(p, buffer, len);
+		if (tcpip_input(p, &s_netif) != ERR_OK) {
+			pbuf_free(p);
 		}
-		return(ESP_FAIL);
 	}
-	item->buffer = buffer;
-	item->len = len;
-	item->eb = eb;
-
-	if (psnd_dtq(NET_RXQ, (intptr_t) item) != E_OK) {
-		/*  キュー満杯．即座にドロップ（bufferはebと共に解放）  */
-		esp_shim_free(item);
-		if (eb != NULL) {
-			esp_wifi_internal_free_rx_buffer(eb);
-		}
+	if (eb != NULL) {
+		esp_wifi_internal_free_rx_buffer(eb);
 	}
 	return(ESP_OK);
 }
@@ -140,8 +127,9 @@ netif_esp32c3_init(struct netif *netif)
 }
 
 /*
- *  ---- ping（lwip契約のcontrib/apps/ping．raw API版＝sys_timeout駆動
- *  なのでnet_taskのsys_check_timeouts()から自動的に動く）----
+ *  ---- ping（lwip契約のcontrib/apps/ping．PING_USE_SOCKETS=0固定
+ *  ＝raw API版．sys_timeoutベースでtcpip_thread内蔵のタイマ処理から
+ *  自動的に動く）----
  */
 void
 net_ping_result(int ok)
@@ -156,11 +144,32 @@ netif_esp32c3_ping_gateway(void)
 }
 
 /*
- *  ---- リンクup/down処理（net_task文脈でのみ呼ぶ）----
+ *  ---- DHCP完了検出（ポーリング不要．netifのアドレスが変化する度に
+ *  tcpip_thread文脈で呼ばれる）----
  */
 static void
-handle_link_up(void)
+netif_status_cb(struct netif *netif)
 {
+	char	ip_buf[16], gw_buf[16];
+
+	if (s_ip_reported || ip4_addr_isany_val(*netif_ip4_addr(netif))) {
+		return;
+	}
+	(void) ip4addr_ntoa_r(netif_ip4_addr(netif), ip_buf, sizeof(ip_buf));
+	(void) ip4addr_ntoa_r(netif_ip4_gw(netif), gw_buf, sizeof(gw_buf));
+	syslog(LOG_NOTICE, "net: DHCP bound ip=%s gw=%s", ip_buf, gw_buf);
+	s_ip_reported = true;
+	netif_esp32c3_ping_gateway();
+}
+
+/*
+ *  ---- リンクup/down処理（tcpip_callback()経由でtcpip_thread文脈から
+ *  呼ばれる．raw API（dhcp_start等）はこの文脈でのみ呼んでよい）----
+ */
+static void
+handle_link_up(void *ctx)
+{
+	(void) ctx;
 	syslog(LOG_NOTICE, "net: link up, starting DHCP");
 	(void) esp_wifi_internal_reg_rxcb(WIFI_IF_STA, wifi_rx_cb);
 	netif_set_link_up(&s_netif);
@@ -171,8 +180,9 @@ handle_link_up(void)
 }
 
 static void
-handle_link_down(void)
+handle_link_down(void *ctx)
 {
+	(void) ctx;
 	syslog(LOG_NOTICE, "net: link down");
 	ping_stop();
 	if (s_dhcp_started) {
@@ -186,13 +196,13 @@ handle_link_down(void)
 }
 
 /*
- *  ---- 公開API（Wi-Fiイベントハンドラ等，net_task以外から呼ぶ．
- *  lwIPには一切触れずフラグを立てるのみ）----
+ *  ---- 公開API（tcpip_thread以外から呼ぶ．lwIPには一切触れず
+ *  tcpip_callback()でtcpip_thread文脈へ処理を委譲するのみ）----
  */
 void
 netif_esp32c3_notify_link(bool up)
 {
-	s_link_cmd = up ? 1 : 2;
+	(void) tcpip_callback(up ? handle_link_up : handle_link_down, NULL);
 }
 
 uint32_t
@@ -202,69 +212,36 @@ netif_esp32c3_get_ipaddr(void)
 }
 
 /*
- *  ---- net_task：lwIPコアの唯一の実行文脈 ----
+ *  ---- 初期化（tcpip_init()のinit_doneコールバック．tcpip_thread
+ *  起動直後にその文脈で一度だけ呼ばれる．netif_add等のraw API呼出しは
+ *  ここで行う）----
  */
-void
-net_task(EXINF exinf)
+static void
+tcpip_init_done(void *arg)
 {
 	ip4_addr_t	anyaddr;
 
-	(void) exinf;
+	(void) arg;
 	IP4_ADDR(&anyaddr, 0, 0, 0, 0);
 
-	lwip_init();
 	(void) netif_add(&s_netif, &anyaddr, &anyaddr, &anyaddr, NULL,
-					  netif_esp32c3_init, ethernet_input);
+					  netif_esp32c3_init, tcpip_input);
 	netif_set_default(&s_netif);
+	netif_set_status_callback(&s_netif, netif_status_cb);
 
 	/*
 	 *  TCPエコーサーバ（ポート7．IP_ANY_TYPEでbindするためlink up前でも
-	 *  呼べる．raw APIのコールバックはすべてnet_task文脈から呼ばれる）
+	 *  呼べる）
 	 */
 	tcpecho_raw_init();
+}
 
-	for (;;) {
-		intptr_t	msg;
-		ER			er;
-
-		er = trcv_dtq(NET_RXQ, &msg, NET_POLL_TMO);
-		if (er == E_OK) {
-			struct rx_item	*item = (struct rx_item *) msg;
-			struct pbuf		*p;
-
-			p = pbuf_alloc(PBUF_RAW, item->len, PBUF_POOL);
-			if (p != NULL) {
-				(void) pbuf_take(p, item->buffer, item->len);
-				if (s_netif.input(p, &s_netif) != ERR_OK) {
-					pbuf_free(p);
-				}
-			}
-			if (item->eb != NULL) {
-				esp_wifi_internal_free_rx_buffer(item->eb);
-			}
-			esp_shim_free(item);
-		}
-
-		if (s_link_cmd == 1) {
-			s_link_cmd = 0;
-			handle_link_up();
-		}
-		else if (s_link_cmd == 2) {
-			s_link_cmd = 0;
-			handle_link_down();
-		}
-
-		if (s_dhcp_started && !s_ip_reported
-			&& !ip4_addr_isany_val(*netif_ip4_addr(&s_netif))) {
-			char	ip_buf[16], gw_buf[16];
-
-			(void) ip4addr_ntoa_r(netif_ip4_addr(&s_netif), ip_buf, sizeof(ip_buf));
-			(void) ip4addr_ntoa_r(netif_ip4_gw(&s_netif), gw_buf, sizeof(gw_buf));
-			syslog(LOG_NOTICE, "net: DHCP bound ip=%s gw=%s", ip_buf, gw_buf);
-			s_ip_reported = true;
-			netif_esp32c3_ping_gateway();
-		}
-
-		sys_check_timeouts();
-	}
+/*
+ *  ---- 起動（アプリから一度だけ呼ぶ．tcpip_init()がtcpip_thread
+ *  （NET_TSK）を起動し，その文脈でtcpip_init_done()が実行される）----
+ */
+void
+netif_esp32c3_start(void)
+{
+	tcpip_init(tcpip_init_done, NULL);
 }

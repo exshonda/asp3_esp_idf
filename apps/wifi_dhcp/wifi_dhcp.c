@@ -69,6 +69,7 @@ main_task(EXINF exinf)
 	(void) exinf;
 	(void) get_tid(&main_tskid);
 
+	netif_esp32c3_start();
 	esp_shim_initialize();
 	(void) esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
 									  (void *)wifi_event_handler, NULL);

@@ -27,8 +27,17 @@
 #include <t_syslog.h>
 #include <stddef.h>
 #include <sys/lock.h>
+#include <errno.h>
 #include "esp_shim.h"
 #include "esp_heap_caps.h"
+
+/*
+ *  errno実体（hal_stub/include/errno.hはexternのみ．BSDソケットAPI
+ *  （lwip/src/api/sockets.c）が参照するため必要．単一グローバル＝
+ *  タスク単位ではない点はerrno.h先頭コメントに既知の制限として記載
+ *  済み（本ターゲットのソケット利用は現状1タスクのみのため実害なし）．
+ */
+int errno;
 
 void *
 malloc(size_t size)

@@ -1,36 +1,66 @@
 /*
- *  lwIP コンフィギュレーション（ASP3／ESP32-C3．Phase C＝TCP/IP統合）
+ *  lwIP コンフィギュレーション（ASP3／ESP32-C3．BSDソケット互換化）
  *
- *  NO_SYS=1（RTOS非依存のraw API）＋専用タスク（net_task）で全ての
- *  lwIPコア呼出しを単一の実行文脈に集約する設計．マルチスレッド用の
- *  tcpip_thread／sockets／netconnは使わない（api配下の.cファイルはビルド対象外）．
+ *  NO_SYS=0．lwIP自身が生成する唯一のスレッド（tcpip_thread）を
+ *  cfg生成のNET_TSK（port/sys_arch.c参照）に割り当てる．
+ *  LWIP_TCPIP_CORE_LOCKING=0＝メッセージパッシングモデル（ソケット呼出し
+ *  は各アプリタスク文脈でmboxにメッセージを積みop_completedセマフォで
+ *  待つ．core全体を保護する巨大ミューテックスは使わない．必要な
+ *  セマフォ／ミューテックスの数が少なく済む）．
  *  設計・経緯は docs/tcpip-integration.md．
  *
  *  個別ファイルは全て自己ガード（#if LWIP_XXX）されているため，
- *  Filelists.cmakeの lwipcore_SRCS／lwipcore4_SRCS をまるごと採用し，
- *  ここでの機能フラグでコンパイル内容を絞る（IPv6・PPP・6LoWPAN・
- *  apps一式・sockets/netconnは非採用＝ソースリスト自体に含めない）．
+ *  Filelists.cmakeの lwipcore_SRCS／lwipcore4_SRCS／lwipapi_SRCS を
+ *  まるごと採用し，ここでの機能フラグでコンパイル内容を絞る
+ *  （IPv6・PPP・6LoWPANは非採用＝ソースリスト自体に含めない）．
  */
 #ifndef LWIP_LWIPOPTS_H
 #define LWIP_LWIPOPTS_H
 
 /*
- *  RTOS非依存（raw API）．sys_now()／sys_arch_protect/unprotectのみ
- *  port/sys_arch.cで実装する．
+ *  NO_SYS=0（BSDソケット／netconn API．tcpip_thread経由のメッセージ
+ *  パッシング）．sys_now()／sys_arch_protect/unprotect／セマフォ・
+ *  メールボックス・スレッド生成はport/sys_arch.cで実装する．
  */
-#define NO_SYS                      1
+#define NO_SYS                      0
 #define SYS_LIGHTWEIGHT_PROT        1
+#define LWIP_TCPIP_CORE_LOCKING     0
+#define LWIP_COMPAT_MUTEX           1
+
+/*
+ *  tcpip_thread自身の受信箱および各netconnのrecv/acceptメールボックス
+ *  の深さ．port/net_cfg.hのSYS_ARCH_MBOX_DEPTH（プール共通深さ）以下
+ *  にすること．
+ */
+#define TCPIP_MBOX_SIZE             6
+#define DEFAULT_RAW_RECVMBOX_SIZE   6
+#define DEFAULT_UDP_RECVMBOX_SIZE   6
+#define DEFAULT_TCP_RECVMBOX_SIZE   6
+#define DEFAULT_ACCEPTMBOX_SIZE     6
+
+/*
+ *  ソケット／netconn（BSD互換．LWIP_COMPAT_SOCKETSは既定1のため
+ *  socket()/connect()/send()/recv()等の標準名がそのまま使える）
+ */
+#define LWIP_NETCONN                1
+#define LWIP_SOCKET                 1
+#define MEMP_NUM_NETCONN            4
+
+/*
+ *  errno（hal_stub/include/errno.hへ委譲．lwip/src/include/lwip/
+ *  errno.hがLWIP_ERRNO_STDINCLUDE経由で<errno.h>にフォールバックする
+ *  仕組みを利用．詳細はerrno.h先頭コメント参照）
+ */
+#define LWIP_ERRNO_STDINCLUDE       1
 
 /*
  *  ヒープ・プール
  *
- *  MEM_SIZEはlwIP内部の可変長確保（raw pcb・dhcp構造体等）用．
- *  PBUF_POOL_BUFSIZEは1イーサネットフレーム（MTU 1500＋ヘッダ）を
- *  1個のpoolバッファに収める値（デフォルト値はTCP_MSS基準で小さすぎる
- *  ため明示指定．収まらない場合はpbufチェーンで自動対応するが，
- *  受信の主経路を単純化するため十分な大きさを確保する）．
+ *  MEM_SIZEはlwIP内部の可変長確保（raw pcb・dhcp構造体・ソケット層の
+ *  一時バッファ等）用．PBUF_POOL_BUFSIZEは1イーサネットフレーム
+ *  （MTU 1500＋ヘッダ）を1個のpoolバッファに収める値．
  *  ESP32-C3のRAMはWi-Fi blob側の静的ヒープ（192KB．esp_shim_cfg.h）
- *  と共存するため小さめに抑える（DHCP＋raw ping程度のスコープ）．
+ *  と共存するため小さめに抑える．
  */
 #define MEM_ALIGNMENT               4
 #define MEM_SIZE                    (4 * 1024)
@@ -42,12 +72,6 @@
 #define MEMP_NUM_UDP_PCB            2
 #define MEMP_NUM_SYS_TIMEOUT        8
 
-/*
- *  プロトコル（ソケット／netconn層＝api配下の.cファイルはビルド対象外のため0固定）
- */
-#define LWIP_NETCONN                0
-#define LWIP_SOCKET                 0
-
 #define LWIP_ARP                    1
 #define LWIP_ETHERNET               1
 #define LWIP_IPV4                   1
@@ -58,14 +82,15 @@
 #define LWIP_UDP                    1
 
 /*
- *  TCP（tcpecho_raw．ポート7でエコーサーバ．raw API＝tcp_arg/tcp_recv等
- *  のコールバックがnet_task文脈から呼ばれるため単一実行文脈の原則は
- *  維持される）．プールは小さめに抑える（RAM予算．docs/
- *  tcpip-integration.md参照）．
+ *  TCP（tcpecho_raw＝ポート7のraw APIエコーサーバ＋tcp_socket_echo＝
+ *  ポート8のBSDソケットAPIエコーサーバ．両方が同時にlistenするため
+ *  MEMP_NUM_TCP_PCB_LISTENは最低2必要（1だと2個目のlisten()が
+ *  ERR_MEMで失敗する．実機で確認済）．プールは小さめに抑える
+ *  （RAM予算．docs/tcpip-integration.md参照）．
  */
 #define LWIP_TCP                    1
-#define MEMP_NUM_TCP_PCB            2
-#define MEMP_NUM_TCP_PCB_LISTEN     1
+#define MEMP_NUM_TCP_PCB            3
+#define MEMP_NUM_TCP_PCB_LISTEN     2
 #define MEMP_NUM_TCP_SEG            8
 
 #define LWIP_DHCP                   1
@@ -87,14 +112,24 @@
 #define CHECKSUM_CHECK_ICMP         1
 
 #define LWIP_STATS                  0
-#define LWIP_NETIF_STATUS_CALLBACK  0
+
+/*
+ *  netifステータス変化（DHCP完了等）のコールバック．ポーリング不要で
+ *  IPアドレス取得を検出するために使用（netif_esp32c3.c参照）．
+ */
+#define LWIP_NETIF_STATUS_CALLBACK  1
 #define LWIP_NETIF_LINK_CALLBACK    0
 #define LWIP_NETIF_HOSTNAME         0
 
 /*
- *  contrib/apps/ping（raw API版．PING_USE_SOCKETS既定=LWIP_SOCKET=0で
- *  raw API経路が選ばれる）の結果通知先．実体はnetif_esp32c3.c．
+ *  contrib/apps/ping．PING_USE_SOCKETSは既定でLWIP_SOCKET追従だが，
+ *  ここでは明示的に0固定＝raw API経路に留める．sys_thread_new()は
+ *  port/sys_arch.cが「生涯に一度だけ（tcpip_thread用）」しか想定して
+ *  いないため，ping_thread()（ソケット版．独自にsys_thread_newする）
+ *  を使うと壊れる．
  */
+#define PING_USE_SOCKETS            0
+
 #ifdef __cplusplus
 extern "C" {
 #endif

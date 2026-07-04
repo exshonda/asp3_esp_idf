@@ -188,14 +188,15 @@ endif()
 include(${TARGETDIR}/esp_wifi.cmake)
 
 #
-#  TCP/IP統合（lwIP，Phase C．Wi-Fi必須＝ESP32C3_WIFIが前提）
+#  TCP/IP統合（lwIP．Wi-Fi必須＝ESP32C3_WIFIが前提）
 #
-#  lwIP（submodule）はNO_SYS=1（raw API）で使用し，net/配下のnetif
-#  ドライバ（esp_wifi_internal_tx/reg_rxcb上のethernet netif）と
-#  net_task 1タスクに全lwIPコア呼出しを集約する．経緯・設計は
-#  docs/tcpip-integration.md．
+#  lwIP（submodule）はNO_SYS=0（BSDソケット／netconn API）で使用する．
+#  lwIP自身が生成する唯一のスレッド（tcpip_thread）はcfg生成の
+#  NET_TSK（port/sys_arch.c参照）に割り当て，netif/配下のnetifドライバ
+#  （esp_wifi_internal_tx/reg_rxcb上のethernet netif）と組み合わせる．
+#  経緯・設計はdocs/tcpip-integration.md．
 #
-option(ESP32C3_LWIP "Integrate lwIP (TCP/IP, requires ESP32C3_WIFI)" OFF)
+option(ESP32C3_LWIP "Integrate lwIP (TCP/IP + BSD sockets, requires ESP32C3_WIFI)" OFF)
 if(ESP32C3_LWIP)
     if(NOT ESP32C3_WIFI)
         message(FATAL_ERROR "ESP32C3_LWIP requires ESP32C3_WIFI=ON")
@@ -219,6 +220,7 @@ if(ESP32C3_LWIP)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
         ${lwipcore_SRCS}
         ${lwipcore4_SRCS}
+        ${lwipapi_SRCS}
         ${LWIP_DIR}/src/netif/ethernet.c
         ${LWIP_DIR}/contrib/apps/ping/ping.c
         ${LWIP_DIR}/contrib/apps/tcpecho_raw/tcpecho_raw.c

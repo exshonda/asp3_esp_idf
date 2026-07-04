@@ -12,13 +12,15 @@
  */
 
 /*
- *  ESP32-C3 Wi-Fi用lwIP netif（ASP3．NO_SYS=1．Phase C）
+ *  ESP32-C3 Wi-Fi用lwIP netif（ASP3．NO_SYS=0．BSDソケット互換化）
  *
  *  esp_wifi_internal_tx/reg_rxcb の上に薄いethernet netifを実装し，
- *  net_task（cfg生成の唯一タスク）1つの実行文脈にlwIPコア呼出しを
- *  集約する（設計・経緯はdocs/tcpip-integration.md）．
- *  アプリはnetif_esp32c3_notify_link()のみを呼び，netif_add／
- *  dhcp_start等のlwIP API自体には触れない．
+ *  lwIP自身が生成するtcpip_thread（cfg生成のNET_TSK．port/
+ *  sys_arch.c参照）にlwIPコア呼出しを集約する（設計・経緯は
+ *  docs/tcpip-integration.md）．アプリはnetif_esp32c3_start()と
+ *  netif_esp32c3_notify_link()のみを呼び，netif_add／dhcp_start／
+ *  socket()等のlwIP API自体はtcpip_thread側（またはソケットAPI経由）
+ *  でのみ扱われる．
  */
 #ifndef NETIF_ESP32C3_H
 #define NETIF_ESP32C3_H
@@ -31,8 +33,14 @@ extern "C" {
 #endif
 
 /*
- *  リンク状態通知（Wi-Fiイベントハンドラから呼ぶ．net_task文脈へは
- *  フラグ経由で反映される＝lwIP API自体はnet_task内でのみ呼ぶ）
+ *  起動（アプリから一度だけ呼ぶ．esp_wifi_init等より前でよい）．
+ *  内部でtcpip_init()を呼びtcpip_thread（NET_TSK）を起動する．
+ */
+extern void netif_esp32c3_start(void);
+
+/*
+ *  リンク状態通知（Wi-Fiイベントハンドラから呼ぶ．tcpip_callback()で
+ *  tcpip_thread文脈へ委譲される＝lwIP API自体はここでは呼ばない）
  *
  *    up   : STA_CONNECTED後に呼ぶ．netif起動＋DHCP開始
  *    down : STA_DISCONNECTED後に呼ぶ．netif停止＋DHCP停止
