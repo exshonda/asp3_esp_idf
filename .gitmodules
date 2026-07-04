@@ -5,3 +5,6 @@
 [submodule "hal"]
 	path = hal
 	url = https://github.com/espressif/esp-hal-3rdparty.git
+[submodule "lwip"]
+	path = lwip
+	url = https://github.com/lwip-tcpip/lwip.git

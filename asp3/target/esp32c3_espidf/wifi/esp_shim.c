@@ -29,6 +29,8 @@
 #include <t_syslog.h>
 #include <string.h>
 #include <sil.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include "kernel_cfg.h"
 #include "esp_shim.h"
 #include "esp_shim_cfg.h"
@@ -105,6 +107,22 @@ esp_shim_random(void)
 	 *  実機JTAG（gdbでSYSCON_RND_DATA_REGを複数回読み比較）で確認済み．
 	 */
 	return(sil_rew_mem((void *)0x600260B0U));	/* SYSCON_RND_DATA_REG */
+}
+
+/*
+ *  ログ（blobの_log_write系・lwIPのLWIP_PLATFORM_DIAG/ASSERT等，
+ *  printf系を持たない呼出し元の共通折返し先）
+ */
+void
+esp_shim_log_write(const char *format, ...)
+{
+	char	buf[128];
+	va_list	args;
+
+	va_start(args, format);
+	vsnprintf(buf, sizeof(buf), format, args);
+	va_end(args);
+	syslog(LOG_NOTICE, "%s", buf);
 }
 
 /*

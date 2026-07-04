@@ -28,6 +28,8 @@ asp3_esp_idf/
 │   ├── asp3_esp_idf.cmake        … パス解決ヘルパ
 │   └── target/esp32c3_espidf/    … ターゲット依存部（本リポジトリ側）
 ├── hal/                          … esp-hal-3rdparty（submodule．Phase B-1〜）
+├── lwip/                         … lwIP（submodule．Phase C〜）
+├── apps/                         … デモアプリ（wifi_scan/wifi_connect/wifi_dhcp）
 └── docs/
 ```
 
@@ -65,6 +67,15 @@ cmake --build build/esp32c3 --target run    # esptoolで書込み
 コンソールは書込みと同じUSBポート（USB Serial/JTAG）に115200bpsで出る。
 UARTブリッジ配線のあるボードは `-DESP32C3_CONSOLE=uart0`。
 
+Wi-Fi＋TCP/IP（DHCP＋ping）のデモを実行する場合は以下を追加する
+（`docs/wifi-shim.md`・`docs/tcpip-integration.md`参照）：
+
+```bash
+  -DESP32C3_WIFI=ON -DESP32C3_LWIP=ON \
+  '-DASP3_EXTRA_COMPILE_DEFS=WIFI_SSID="...";WIFI_PASSWORD="..."' \
+  -DASP3_APPLDIR=$PWD/apps/wifi_dhcp -DASP3_APPLNAME=wifi_dhcp
+```
+
 ## 状態
 
 | Phase | 内容 | 状態 |
@@ -73,6 +84,7 @@ UARTブリッジ配線のあるボードは `-DESP32C3_CONSOLE=uart0`。
 | B-1 | esp-hal-3rdparty統合（LL層でコンソール・タイマを実装．`docs/hal-integration.md`） | **完了**（QEMU/実機 test_porting 6/6・実機testexec） |
 | B-2a | Wi-Fi scan（init〜start〜scan） | **完了**（実機でAP16-17個をSSID/RSSI/ch受信） |
 | B-2b | WPA2 AP接続（L2） | **完了**（実機でSTA_CONNECTED成立。`docs/wifi-shim.md`） |
+| C | TCP/IP統合（lwIP，DHCP＋ping） | **完了**（実機でDHCP取得＋ゲートウェイへのping成功。`docs/tcpip-integration.md`） |
 
 ## ライセンス
 

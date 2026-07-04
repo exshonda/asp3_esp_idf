@@ -188,6 +188,44 @@ endif()
 include(${TARGETDIR}/esp_wifi.cmake)
 
 #
+#  TCP/IP統合（lwIP，Phase C．Wi-Fi必須＝ESP32C3_WIFIが前提）
+#
+#  lwIP（submodule）はNO_SYS=1（raw API）で使用し，net/配下のnetif
+#  ドライバ（esp_wifi_internal_tx/reg_rxcb上のethernet netif）と
+#  net_task 1タスクに全lwIPコア呼出しを集約する．経緯・設計は
+#  docs/tcpip-integration.md．
+#
+option(ESP32C3_LWIP "Integrate lwIP (TCP/IP, requires ESP32C3_WIFI)" OFF)
+if(ESP32C3_LWIP)
+    if(NOT ESP32C3_WIFI)
+        message(FATAL_ERROR "ESP32C3_LWIP requires ESP32C3_WIFI=ON")
+    endif()
+
+    get_filename_component(LWIP_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../lwip ABSOLUTE)
+    include(${LWIP_DIR}/src/Filelists.cmake)
+
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_LWIP)
+
+    list(APPEND ASP3_INCLUDE_DIRS
+        ${LWIP_DIR}/src/include
+        ${LWIP_DIR}/contrib/apps/ping
+        ${TARGETDIR}/net/port/include
+        ${TARGETDIR}/net
+    )
+
+    list(APPEND ASP3_CFG_FILES ${TARGETDIR}/net/net.cfg)
+
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${lwipcore_SRCS}
+        ${lwipcore4_SRCS}
+        ${LWIP_DIR}/src/netif/ethernet.c
+        ${LWIP_DIR}/contrib/apps/ping/ping.c
+        ${TARGETDIR}/net/port/sys_arch.c
+        ${TARGETDIR}/net/netif_esp32c3.c
+    )
+endif()
+
+#
 #  フラッシュイメージ生成等（aspターゲット定義後に取込み）
 #
 set(ASP3_TARGET_RUN_CMAKE ${TARGETDIR}/run.cmake)
