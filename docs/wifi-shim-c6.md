@@ -1249,3 +1249,92 @@ diffはコミット済み（`asp3/target/esp32c6_espidf/wifi/
 esp_wifi_adapter.c`のみ．診断用コード・cmake追加は全てrevert済み）。
 実機は現状ASP3の`wifi_scan`（`clk_i2c_mst_en`修正込み・診断コード
 なしの通常版）が書き込まれた状態。
+
+## 実施8：セカンドオピニオン再検証 — 「WIFI_BB/FEクロックゲート」仮説も実測で反証
+
+セカンドオピニオンの新仮説：「これまでの3件の実バグ（`wifi_reset_
+mac_wrapper`の到達不能コードtrap・割込みLEVEL型欠如・`clk_wifipwr_en`
+＋`clk_i2c_mst_en`欠如）は全て同型パターン＝Direct Bootが飛ばす
+ブートローダ側初期化を，発見の都度1ビットずつ後追いで手動再現して
+いるに過ぎない。実際のESP-IDF/NuttXは`modem_clock_module_enable
+(PERIPH_WIFI_MODULE)`／`(PERIPH_PHY_MODULE)`という参照カウント式の
+一括イネーブルを呼び，`modem_syscon`側のWIFI_BB（ベースバンド）・
+WIFI_MAC・WIFI_APB・FE（RFフロントエンド）系クロックゲートを
+まとめて有効化している。手動ビット単位の対応はこの種の兄弟ビット
+見落としに構造的に弱く，FE/BBクロックが未有効化なら『デジタル的
+にはMAC/PLL/電源とも正常だがTX/RXとも電波が一切出ない』という
+現症状と完全に一致する」という指摘（優先度1）を検証した。
+
+### 参照実装の確認：`wifi_module_enable()`は既に正しい経路を使っている
+
+`hal/components/esp_wifi/esp32c6/esp_adapter.c`（実ESP-IDF本家の
+C6版アダプタ．NuttXではなくESP-IDF自身のリファレンス）の
+`wifi_clock_enable_wrapper()`は`wifi_module_enable();`の1行のみ。
+`wifi_module_enable()`（`esp_hw_support/periph_ctrl.c`）は
+`#if SOC_MODEM_CLOCK_IS_INDEPENDENT`（C6は`soc_caps.h`で1と定義済み）
+の分岐で`modem_clock_module_enable(PERIPH_WIFI_MODULE)`を直接呼ぶ
+実装であり，ASP3は`periph_ctrl.c`を実ソースのまま採用・
+`wifi_clock_enable_wrapper()`から`wifi_module_enable()`を既に呼んで
+いる（実施6以前から変更なし）。FE系クロック（`PERIPH_PHY_MODULE`の
+依存＝`modem_clock_hal_enable_modem_common_fe_clock`/
+`_private_fe_clock`）も，ASP3が実ソースのまま採用している
+`esp_phy/src/phy_init.c`の`esp_phy_enable()`→
+`esp_phy_common_clock_enable()`→`wifi_bt_common_module_enable()`
+（`periph_ctrl.c`．同じく`modem_clock_module_enable(PERIPH_PHY_
+MODULE)`を呼ぶ）という経路で，既存コードから変更なしに到達する
+はずという仮説を立てた。
+
+### 実機JTAG確認：WIFI_BB／WIFI_MAC／WIFI_APB／FE系は全て有効化済み
+
+修正なしで（`clk_i2c_mst_en`修正込み・現行コードのまま）スキャンを
+実行し，直後にJTAGで`modem_syscon.CLK_CONF1_REG`
+（`0x600a9814`）を読み出した：
+
+```
+0x600a9814 = 0x0001e7ff
+```
+
+ビット単位で全て確認：`clk_wifibb_{22m,40m,44m,80m,40x,80x,40x1,
+80x1,160x1}_en`（bit0〜8）＝**全て1**・`clk_wifimac_en`（bit9）＝
+**1**・`clk_wifi_apb_en`（bit10）＝**1**・`clk_fe_80m_en`（bit13）＝
+**1**・`clk_fe_160m_en`（bit14）＝**1**・`clk_fe_cal_160m_en`
+（bit15）＝**1**・`clk_fe_apb_en`（bit16）＝**1**。すなわち
+`modem_clock_wifi_mac_configure`/`_wifi_bb_configure`/
+`_wifi_apb_configure`（`WIFI_CLOCK_DEPS`）と
+`modem_clock_hal_enable_modem_common_fe_clock`/`_private_fe_clock`
+（`PHY_CLOCK_DEPS`）が要求するビットが**1つも欠けることなく既に
+全て有効**であることを実機で直接確認した（bit11/12/17-23は
+FE_20M/FE_40M/BT_APB/BT_EN/WIFIBB_480M/FE_480M/FE_ANAMODE_*＝
+BT/ZigBee専用またはWi-Fi通常動作に不要なビットで，未セットで
+正常）。
+
+### 結論：「WIFI_BB/FEクロックゲート未有効化」仮説も実測で反証される
+
+セカンドオピニオンの優先度1の指摘（構造的パターンとしては正しい
+指摘であり，今回の調査姿勢の見直しとしても有益）だが，**本件の
+具体的な原因ではなかった**。ASP3は既に実ESP-IDFの`periph_ctrl.c`/
+`phy_init.c`を改変なしで採用しているため，`modem_clock_module_
+enable()`の一括経路は既存コードのままで正しく機能しており，
+新たに置き換える修正の余地がない（＝優先度1の作業自体は「確認
+した結果，既に正しかった」という形で完了）。
+
+これでクロック/電源系統（modem_lpcon全域・modem_syscon
+CLK_CONF1全域・PMU RF電源ドメイン・BBPLL較正＝実施7）は
+ほぼ全域にわたって実機で「デジタル的には正常」と確認済みとなり，
+デジタル設定レベルの見落としという仮説群は実質的に消尽した。
+
+残る有力な次の手は，優先度3（NuttXとASP3で共通のブロブに対する
+シンボルレベルのハードウェアブレークポイント段階的絞り込み：
+`chip_v7_set_chan`・`esf_buf_setup`・`hal_init`等のブロブ内シンボル
+をブレークポイント候補とし，ASP3が到達しない/到達しても違う経路を
+取る最初の関数を特定してから，その関数内でのみ命令単位ステップに
+進む）。優先度2（アクティブスキャン中のレジスタ比較）はクロック
+イネーブル系レジスタが静的設定である以上，アイドル時比較で実質
+同等の結論が得られている（`WIFI_PS_NONE`設定によりスキャン中の
+省電力遷移も発生しない設計のため）。
+
+構造的提案（コーディネータより）：`wifi_clock_enable_wrapper()`の
+手動ビット操作（`clk_wifipwr_en`/`clk_i2c_mst_en`）を，将来の
+チップ移植・ブロブ更新に備えて`modem_clock_module_enable()`系の
+直接呼び出しへ統一することは，今回は必須ではないため未実施
+（次の機会の課題として記録のみ）。今回コード変更なし（診断のみ）．
