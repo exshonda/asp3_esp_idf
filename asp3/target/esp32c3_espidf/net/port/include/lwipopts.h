@@ -58,11 +58,15 @@
 #define LWIP_UDP                    1
 
 /*
- *  TCPは本フェーズ（DHCP＋raw ICMP ping）のスコープ外＝OFF．
- *  tcp*.cは自己ガードのためソースリストに含めたままでも空になる．
- *  将来TCPを使う場合はここを1にすれば足りる（追加ソースは不要）．
+ *  TCP（tcpecho_raw．ポート7でエコーサーバ．raw API＝tcp_arg/tcp_recv等
+ *  のコールバックがnet_task文脈から呼ばれるため単一実行文脈の原則は
+ *  維持される）．プールは小さめに抑える（RAM予算．docs/
+ *  tcpip-integration.md参照）．
  */
-#define LWIP_TCP                    0
+#define LWIP_TCP                    1
+#define MEMP_NUM_TCP_PCB            2
+#define MEMP_NUM_TCP_PCB_LISTEN     1
+#define MEMP_NUM_TCP_SEG            8
 
 #define LWIP_DHCP                   1
 #define LWIP_AUTOIP                 0

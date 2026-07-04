@@ -35,6 +35,7 @@
 #include "lwip/timeouts.h"
 #include "lwip/ip4_addr.h"
 #include "netif/ethernet.h"
+#include "tcpecho_raw.h"
 
 #include "esp_wifi.h"
 #include "esp_private/wifi.h"
@@ -215,6 +216,12 @@ net_task(EXINF exinf)
 	(void) netif_add(&s_netif, &anyaddr, &anyaddr, &anyaddr, NULL,
 					  netif_esp32c3_init, ethernet_input);
 	netif_set_default(&s_netif);
+
+	/*
+	 *  TCPエコーサーバ（ポート7．IP_ANY_TYPEでbindするためlink up前でも
+	 *  呼べる．raw APIのコールバックはすべてnet_task文脈から呼ばれる）
+	 */
+	tcpecho_raw_init();
 
 	for (;;) {
 		intptr_t	msg;

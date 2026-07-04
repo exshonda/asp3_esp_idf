@@ -209,6 +209,7 @@ if(ESP32C3_LWIP)
     list(APPEND ASP3_INCLUDE_DIRS
         ${LWIP_DIR}/src/include
         ${LWIP_DIR}/contrib/apps/ping
+        ${LWIP_DIR}/contrib/apps/tcpecho_raw
         ${TARGETDIR}/net/port/include
         ${TARGETDIR}/net
     )
@@ -220,6 +221,7 @@ if(ESP32C3_LWIP)
         ${lwipcore4_SRCS}
         ${LWIP_DIR}/src/netif/ethernet.c
         ${LWIP_DIR}/contrib/apps/ping/ping.c
+        ${LWIP_DIR}/contrib/apps/tcpecho_raw/tcpecho_raw.c
         ${TARGETDIR}/net/port/sys_arch.c
         ${TARGETDIR}/net/netif_esp32c3.c
     )

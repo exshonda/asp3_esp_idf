@@ -41,11 +41,12 @@ NuttXは自前のnetdev層＋lwIPを使用）．
 ## スコープ
 
 - 対応：DHCPによるIPアドレス取得，デフォルトゲートウェイへのraw API
-  ICMP ping（実通信の確認）．
-- 非対応（将来課題）：TCP（`LWIP_TCP=0`．必要になれば
-  `lwipopts.h`のフラグを立てるだけで追加ソースは不要），DNS，
-  ソケット／netconn API（`api/`配下はビルド対象外＝NO_SYS=1では
-  使えない），IPv6．
+  ICMP ping（実通信の確認），TCPエコーサーバ（ポート7．lwIP同梱の
+  `contrib/apps/tcpecho_raw`をそのまま採用）．
+- 非対応（将来課題）：DNS，ソケット／netconn API（`api/`配下はビルド
+  対象外＝NO_SYS=1では使えない。BSDソケット互換が必要になった場合は
+  `sys_arch`のmbox/sem/thread実装＋`tcpip_thread`化＝Wi-Fi shimの
+  os_adapterと同様の作り込みが要る），IPv6．
 
 ## 実施結果
 
@@ -69,17 +70,36 @@ net: ping gateway -> OK
 （`no time event is processed in hrt interrupt.`はfch_mnt拡張の既知の
 定常ログであり本機能とは無関係．`docs/spec/11_usage_notes.md`参照）
 
+### 実機TCP通信成立（2026-07-04）
+
+`LWIP_TCP`を有効化し，lwIP同梱の`contrib/apps/tcpecho_raw`（raw API・
+ポート7）をそのまま採用．開発機（同一LAN，デフォルトゲートウェイ共通）
+から`nc`でTCP接続し，送信データがそのままエコーバックされることを
+確認した（コールバック`tcp_recv`/`tcp_write`等はすべてnet_task文脈から
+呼ばれるため単一実行文脈の原則は維持される）。
+
+```bash
+$ printf "hello asp3 tcp echo test 12345\n" | nc -q 1 192.168.1.56 7
+hello asp3 tcp echo test 12345
+```
+
+TCP_MSS（536）を超える3000バイトのペイロード（複数セグメント・pbuf
+チェーンを要する）も欠落・破損なく正しくエコーバックされることを確認．
+DHCP＋ping（Wi-Fi shimの既存動作）への回帰もなし。
+
+RAM増分はわずか（プールを小さめに抑えたため．下表参照）。
+
 ### 実装したファイル（すべてasp3_esp_idf側．asp3_core側の変更ゼロ）
 
 | ファイル | 内容 |
 |---|---|
 | `.gitmodules`／`lwip`（submodule） | lwip-tcpip/lwip，`STABLE-2_2_1_RELEASE`にpin |
 | `asp3/target/esp32c3_espidf/net/port/include/arch/cc.h` | lwIP適合層（型はGCC既定に委任．診断出力/assert/乱数のみesp_shim経由に上書き．`ctype.h`/`unistd.h`はツールチェーンに実体が無いため`LWIP_NO_CTYPE_H`/`LWIP_NO_UNISTD_H`で回避） |
-| `asp3/target/esp32c3_espidf/net/port/include/lwipopts.h` | `NO_SYS=1`．DHCP/ARP/ICMP/RAW/UDP有効，TCP/DNS/IPv6/ソケット無効．ping結果通知（`PING_RESULT`）をnetif_esp32c3.cへ配線 |
+| `asp3/target/esp32c3_espidf/net/port/include/lwipopts.h` | `NO_SYS=1`．DHCP/ARP/ICMP/RAW/UDP/TCP有効（TCP系プールは小さめに固定），DNS/IPv6/ソケット無効．ping結果通知（`PING_RESULT`）をnetif_esp32c3.cへ配線 |
 | `asp3/target/esp32c3_espidf/net/port/sys_arch.c` | `sys_now()`・`sys_arch_protect/unprotect`のみ（NO_SYS=1で必要なのはこの2種のみ） |
-| `asp3/target/esp32c3_espidf/net/netif_esp32c3.c/.h` | ethernet netif実装（esp_wifi_internal_tx/reg_rxcb上）＋net_task（lwIPコアの唯一実行文脈）＋DHCP開始／ping起動 |
+| `asp3/target/esp32c3_espidf/net/netif_esp32c3.c/.h` | ethernet netif実装（esp_wifi_internal_tx/reg_rxcb上）＋net_task（lwIPコアの唯一実行文脈）＋DHCP開始／ping起動／tcpecho_raw起動 |
 | `asp3/target/esp32c3_espidf/net/net_cfg.h`／`net.cfg` | 受信キュー（CRE_DTQ×1）＋net_task（CRE_TSK×1）の静的定義 |
-| `asp3/target/esp32c3_espidf/target.cmake` | `ESP32C3_LWIP`オプション追加（`ESP32C3_WIFI`必須）．lwIPの`Filelists.cmake`（`lwipcore_SRCS`/`lwipcore4_SRCS`）＋`netif/ethernet.c`＋`contrib/apps/ping/ping.c`を採用 |
+| `asp3/target/esp32c3_espidf/target.cmake` | `ESP32C3_LWIP`オプション追加（`ESP32C3_WIFI`必須）．lwIPの`Filelists.cmake`（`lwipcore_SRCS`/`lwipcore4_SRCS`）＋`netif/ethernet.c`＋`contrib/apps/ping/ping.c`＋`contrib/apps/tcpecho_raw/tcpecho_raw.c`を採用 |
 | `asp3/target/esp32c3_espidf/wifi/esp_shim.c` | `esp_shim_log_write()`を実装（`esp_shim.h`に宣言のみ存在し未実装だった関数．lwIPの`LWIP_PLATFORM_DIAG`/`LWIP_PLATFORM_ASSERT`から利用するため） |
 | `apps/wifi_dhcp/` | デモアプリ（`wifi_connect`にSTA_CONNECTED/DISCONNECTED時の`netif_esp32c3_notify_link()`呼出しを追加しただけ．lwIP APIには一切触れない） |
 
@@ -87,12 +107,14 @@ net: ping gateway -> OK
 
 Wi-Fi shimの静的ヒープ（192KB）と共存するため，lwIP側は小さめに抑えた
 （`MEM_SIZE=4KB`・`PBUF_POOL_SIZE=4`×`PBUF_POOL_BUFSIZE=1600`・
-net_taskスタック3KB）。
+net_taskスタック3KB．TCP有効化後も`MEMP_NUM_TCP_PCB=2`・
+`MEMP_NUM_TCP_PCB_LISTEN=1`・`MEMP_NUM_TCP_SEG=8`と小さめに固定）。
 
 | ビルド | RAM使用率（`--print-memory-usage`．320KB中） |
 |---|---|
 | wifi_connect（Phase B-2b．lwIPなし） | 88.58%（290244B） |
-| wifi_dhcp（Phase C．lwIPあり） | 93.68%（306964B，残り約20.7KB） |
+| wifi_dhcp（DHCP＋ping，TCP無効） | 93.68%（306964B，残り約20.7KB） |
+| wifi_dhcp（TCP＝tcpecho_raw有効化後） | 93.86%（307572B，残り約19.6KB） |
 
 ### 検証結果
 
@@ -100,8 +122,8 @@ net_taskスタック3KB）。
 |---|---|---|
 | POSIX | − | 対象外（ESP32-C3固有機能） |
 | QEMU (esp32c3) | ○ | コンパイル・リンクのみ確認（QEMUのesp32c3にWi-Fi無線モデルが無いため実通信は不可） |
-| 実機 | ○ | `apps/wifi_dhcp`：STA_CONNECTED→DHCP取得（`192.168.1.56`）→ゲートウェイへのraw ICMP ping継続成功 |
-| 既存ビルドへの回帰 | ○ | `wifi_scan`（Wi-Fiのみ・lwIPなし）・`tp-hw`（Wi-Fiなし）とも再ビルドし0エラー確認 |
+| 実機 | ○ | `apps/wifi_dhcp`：STA_CONNECTED→DHCP取得（`192.168.1.56`）→ゲートウェイへのraw ICMP ping継続成功→開発機から`nc`でTCPエコー（短文・3000バイトとも欠落なく確認） |
+| 既存ビルドへの回帰 | ○ | `wifi_scan`（Wi-Fiのみ・lwIPなし）・`tp-hw`（Wi-Fiなし）とも再ビルドし0エラー確認．TCP有効化後もDHCP／ping継続動作を確認 |
 
 ### Git情報
 
