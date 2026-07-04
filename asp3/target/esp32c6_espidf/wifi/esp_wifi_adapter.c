@@ -72,6 +72,7 @@ extern int esp_read_mac(uint8_t *mac, int type);
 #define INTMTX_BASE_ADDR      0x60010000U   /* ソースルーティング */
 #define PLICMX_BASE_ADDR      0x20001000U   /* CPU割込み線制御 */
 #define PLICMX_ENABLE_REG     (PLICMX_BASE_ADDR + 0x000U)
+#define PLICMX_TYPE_REG       (PLICMX_BASE_ADDR + 0x004U)
 #define PLICMX_PRI_REG(n)     (PLICMX_BASE_ADDR + 0x010U + (n) * 4U)
 
 static void
@@ -86,9 +87,20 @@ set_intr_wrapper(int32_t cpu_no, uint32_t intr_source, uint32_t intr_num,
 	 *  共通ディスパッチャ＝esp_shim.cfg参照）のため直接レジスタを
 	 *  操作する．優先度はblobの指定に関わらず内部表現2（外部-2）に
 	 *  固定する（C3のset_intr_wrapperと同じ方針）．
+	 *
+	 *  PLIC_MXINT_TYPE_REG（本来はesprv_int_set_type()／
+	 *  hal/components/esp_wifi/esp32c6/esp_adapter.cのset_intr_wrapper
+	 *  参照実装が呼ぶ）でこの割込み線をLEVEL型（ビットクリア＝
+	 *  LEVEL，セット＝EDGE）に明示設定する．blobが使う線はカーネル
+	 *  管理外のため既定値（chip起動直後の状態）のままだった．
+	 *  WiFi MAC割込みはinterrupts.hで"level"型と明記されており，
+	 *  CPU側がEDGE型のままだと，レベルで張り続ける信号を取りこぼす
+	 *  （最初の一度も含めて）おそれがある．
 	 */
 	sil_wrw_mem((void *)(INTMTX_BASE_ADDR + intr_source * 4U), intr_num);
 	sil_wrw_mem((void *)(uintptr_t)PLICMX_PRI_REG(intr_num), 2U);
+	sil_wrw_mem((void *)PLICMX_TYPE_REG,
+				sil_rew_mem((void *)PLICMX_TYPE_REG) & ~(1UL << intr_num));
 	(void) cpu_no;
 	(void) intr_prio;
 }
