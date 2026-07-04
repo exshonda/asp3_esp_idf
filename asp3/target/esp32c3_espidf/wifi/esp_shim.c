@@ -35,7 +35,12 @@
 #include "esp_shim.h"
 #include "esp_shim_cfg.h"
 #include "target_timer.h"		/* esp32c3_systimer_read */
-#include "psa/crypto.h"			/* psa_crypto_init（後述） */
+#ifdef TOPPERS_ESP32C3_WIFI
+#include "psa/crypto.h"			/* psa_crypto_init（後述．Wi-Fi固有＝
+								   WPA2ハンドシェイクのPTK/MIC導出に必要．
+								   Bluetooth単体ビルドではmbedtlsを
+								   リンクしないため未定義時は除外する） */
+#endif /* TOPPERS_ESP32C3_WIFI */
 
 /*
  *  クリティカルセクション（mstatus.MIEの退避・復元＝ネスト対応）
@@ -936,7 +941,11 @@ esp_shim_initialize(void)
 		 *  ことを確認して特定．
 		 *
 		 *  WiFi初期化前（esp_wifi_init呼び出し前）に一度だけ呼ぶ．
+		 *
+		 *  Bluetooth単体ビルド（ESP32C3_WIFI=OFF）はmbedtls/PSA Cryptoを
+		 *  リンクしないため，この初期化自体が不要（WPA2固有の問題）．
 		 */
+#ifdef TOPPERS_ESP32C3_WIFI
 		{
 			psa_status_t st = psa_crypto_init();
 			if (st != PSA_SUCCESS) {
@@ -945,5 +954,6 @@ esp_shim_initialize(void)
 					   (int_t)st);
 			}
 		}
+#endif /* TOPPERS_ESP32C3_WIFI */
 	}
 }

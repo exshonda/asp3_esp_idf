@@ -172,20 +172,49 @@ endif()
 #  リンク）を取り込む．経緯はdocs/wifi-shim.md．
 #
 option(ESP32C3_WIFI "Enable Wi-Fi (esp_wifi blob + os_adapter shim)" OFF)
-if(ESP32C3_WIFI)
-    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_WIFI)
+
+#
+#  shim基盤（wifi/esp_shim.*）はWi-Fi固有ではなく，ASP3静的プール上に
+#  FreeRTOS風プリミティブ（sem/mutex/queue/task/timer/malloc）を提供
+#  する汎用層（esp_shim.h先頭コメント参照）．Bluetooth統合（Phase D．
+#  docs/dev/esp-idf-integration.md）もこれを再利用するため，
+#  ESP32C3_WIFIとは独立にESP32C3_BTからも取り込めるよう分離する
+#  （Wi-Fi固有のosi/coex/eventアダプタ層は従来通りESP32C3_WIFI限定）．
+#
+if(ESP32C3_WIFI OR ESP32C3_BT)
     list(APPEND ASP3_INCLUDE_DIRS ${TARGETDIR}/wifi)
     list(APPEND ASP3_CFG_FILES ${TARGETDIR}/wifi/esp_shim.cfg)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
         ${TARGETDIR}/wifi/esp_shim.c
         ${TARGETDIR}/wifi/esp_shim_libc.c
         ${TARGETDIR}/wifi/esp_shim_blobglue.c
+    )
+endif()
+
+if(ESP32C3_WIFI)
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_WIFI)
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
         ${TARGETDIR}/wifi/esp_wifi_adapter.c
         ${TARGETDIR}/wifi/esp_event_shim.c
         ${TARGETDIR}/wifi/esp_coex_adapter.c
     )
 endif()
 include(${TARGETDIR}/esp_wifi.cmake)
+
+#
+#  Bluetooth（BLE．NimBLE＋os_adapter shim．既定OFF）
+#
+#  Phase D-1＝コントローラ起動＋VHCIループバック（ホストスタック無し）．
+#  RAM予算のためWi-Fiとの同時ONは現時点で未対応（要求はしない．
+#  docs/dev/esp-idf-integration.md Phase D参照）．
+#
+option(ESP32C3_BT "Enable Bluetooth (BT controller + freertos shim, Phase D-1)" OFF)
+if(ESP32C3_BT)
+    if(ESP32C3_WIFI)
+        message(FATAL_ERROR "ESP32C3_BT + ESP32C3_WIFI is not supported yet (RAM budget; Phase D-1 is BT-only)")
+    endif()
+endif()
+include(${TARGETDIR}/esp_bt.cmake)
 
 #
 #  TCP/IP統合（lwIP．Wi-Fi必須＝ESP32C3_WIFIが前提）

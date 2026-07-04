@@ -30,6 +30,15 @@
 #define OS_FAIL   0
 
 /*
+ *  esp_task.h（Bluetooth統合．Phase D-1）が
+ *  ESP_TASK_BT_CONTROLLER_PRIO等をOS_TASK_PRIO_MAX基準で計算するために
+ *  参照する．ESP-IDF既定のconfigMAX_PRIORITIES(=25)相当を採用する
+ *  （本ビルドは実際にはesp_shim.cの固定優先度プールへ委譲するため，
+ *  この値自体はマクロ計算を成立させるためだけに使われる）。
+ */
+#define OS_TASK_PRIO_MAX  25
+
+/*
  *  esp_private/wifi.h（esp_os_queue_handle_t等の型のみ．
  *  実体はesp_private/wifi_os_adapter.h側のwifi_osi_funcs_tが握る）
  */

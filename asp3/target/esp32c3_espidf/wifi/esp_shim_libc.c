@@ -571,6 +571,17 @@ heap_caps_malloc(size_t size, uint32_t caps)
 }
 
 /*
+ *  heap_caps_calloc（Bluetooth統合．Phase D-1．bt.cのsemphr_create_
+ *  wrapper等が要求する．heap_caps_malloc/freeと同じくcapsは無視）
+ */
+void *
+heap_caps_calloc(size_t n, size_t size, uint32_t caps)
+{
+	(void) caps;
+	return(esp_shim_calloc(n, size));
+}
+
+/*
  *  esp_timer_get_time（hal_stub/include/esp_timer.h参照．
  *  esp_shim_time_us＝SYSTIMER起点のμsへ委譲）
  */
