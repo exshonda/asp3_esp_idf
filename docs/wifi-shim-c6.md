@@ -782,3 +782,149 @@ NuttXの`arch/risc-v/src/esp32c6/esp_wifi_adapter.c`の`wifi_hw_start`
 一度も立たない場合，むしろ「MAC割込みに頼らずポーリングでRXを
 検出している」可能性が浮上し，調査の前提そのものを見直す必要が
 生じる。
+
+## 継続ポーリング計装による決定的比較（追加調査，2026-07-05）
+
+コーディネータの指示により，上記「次の一手」を実施した：ASP3側
+（`target_hrt_handler`のOR蓄積＋scan待ちループの`tslp_tsk`間隔を
+500usへ短縮）とNuttX側（`esp_wifi_start_scan()`内に直接埋め込んだ
+タイトなbusy-pollループ）の両方に，JTAG halt頼みではない**実行中の
+継続計装**を追加し，同じ`INTMTX_STATUS0/1/2`（`0x60010134/138/13C`）
+を比較した。
+
+### ASP3側：高密度サンプリングでも変わらず0
+
+`target_hrt_handler`（既存のSYSTIMER割込み）でOR蓄積する既存手法を
+再度用いたが，scan待ちループの`tslp_tsk`間隔を1秒→500usに短縮する
+ことでカーネルのhrtアラームの実質発火頻度を大幅に引き上げた。
+
+結果：**約2.4秒のスキャン期間中に4702回サンプリング**（従来の約18回
+から大幅に高密度化）してもなお，`status0_or=0x00000000`・
+`status1_or=0x00000000`・`status2_or=0x00000000`のまま。これは
+下記2件の修正（WIFIPWRクロック・割込みLEVEL型設定）を適用した
+**後**の結果であり，これらの修正だけでは「MAC割込みソースが一度も
+アサートされない」という状況が変わらないことを実測で確認した。
+
+### NuttX側：ビルドを修正し，MAC割込みソースが実際に立つことを確認
+
+NuttXの`arch/risc-v/src/common/espressif/esp_wifi_utils.c`の
+`esp_wifi_start_scan()`（`wapi scan`が最終的に呼ぶ関数．
+`esp_wifi_scan_start()`のNuttX側呼出し元）に，同じ3レジスタを
+OR蓄積するbusy-pollループを直接埋め込んだ。
+
+**罠**：この計装は最初，`wlerr()`マクロ（NuttXの`nuttx/debug.h`が
+提供する診断ログマクロ）で出力していたが，**このビルドconfigは
+`CONFIG_DEBUG_FEATURES`が無効**であり，`wlerr`/`wlinfo`等は
+コンパイル時に完全に消える（`_none`へ展開される）ため，何度実行
+しても出力が一切現れなかった。`printf()`＋`fflush(stdout)`に
+差し替えて解決した（NSHのコンソール出力は`CONFIG_DEBUG_FEATURES`
+と無関係のため確実に見える）。もう一つの罠：busy-pollを4000万回の
+単一ループで実装したところ（推定数秒間ノーイールド）出力が一切
+現れなくなった（タスク実行時間監視系のwatchdogに引っかかって
+リブートしていた可能性が高い）。400チャンク×2万回反復＋チャンク間
+`usleep(1000)`という，短い区切りで頻繁にイールドする構成に変更して
+解決した。
+
+結果（`wapi scan wlan0`実行時）：
+
+```
+DIAG intmtx status0_or=0x00000001 status1_or=0x0a000000 status2_or=0x00000000 iters=8000000
+```
+
+**`status0_or`のbit0＝`ETS_WIFI_MAC_INTR_SOURCE`（WiFi MAC割込み
+ソースそのもの）が実際にアサートされている**（`status1_or`の
+bit25/27はNuttX自身のタイマ系＝無関係のノイズ）。
+
+### 結論
+
+**この同一シリコン・同一blobにおいて，WiFi MAC割込みソースは
+「原理的に一度も立たない」わけではなく，NuttXの実装下では実際に
+立つ**。ASP3側は，静的レジスタ設定（MAC制御ブロック16KB・modem
+syscon 4KB・今回のWIFIPWRクロックドメイン・割込みLEVEL型設定）を
+すべて既知良品と一致させた後でも，高密度サンプリング（4702回／
+約2.4秒）で一度もアサートを検出できていない。したがって：
+
+- ハードウェア／blob内部の問題という仮説は完全に排除される。
+- 静的な設定不備（レジスタ値そのものの誤り）という仮説も，主要な
+  候補はほぼ排除された（クロックドメイン・割込み型の2件は実際に
+  見つかり修正したが，どちらも単独では解消せず）。
+- 残る仮説は，**osi関数のいずれかの実装内容**（フィールド自体は
+  ASP3・NuttX間で完全に一致することを確認済み──`grep`で全
+  `wifi_osi_funcs_t`フィールドを比較し，欠落なし）に，まだ見つ
+  かっていない具体的な差異があるという一点に収束する。
+
+### フィールド構造の比較（差異なし）
+
+`asp3/target/esp32c6_espidf/wifi/esp_wifi_adapter.c`と
+NuttXの`arch/risc-v/src/esp32c6/esp_wifi_adapter.c`から
+`._xxx = yyy_wrapper`形式の行をすべて抽出して比較した結果，
+**フィールド名の集合は完全に一致**（ASP3側にのみ存在する
+`._coex_condition_set`・`._coex_schm_get_phase_by_idx`・
+`._esp_timer_get_time`はcoex/timer関連でRX経路とは無関係）。
+`phy_enable_wrapper`／`phy_disable_wrapper`の呼出し順序
+（`esp_phy_enable`→`phy_wifi_enable_set`，逆順で無効化）も
+バイト単位で同一のロジック。
+
+### 次の一手（更新・最有力仮説）
+
+TXおよびスキャンステートマシン自体は正常に機能している可能性が
+高い（アクティブスキャンの所要時間が約2.4秒と，実機での正常な
+チャネル毎dwell timeの合計と整合的であり，固定タイムアウトへ
+すぐ落ちるような挙動ではない）。一方でRX側だけが機能していない
+とすれば，**MACのRXバッファ／ディスクリプタプールの提供**
+（`esf_buf`まわり，`libpp.a`の`esf_buf.o`が扱う領域）が最有力な
+残り仮説である：
+
+- ESP32のWiFi MACは内部DMAでRXバッファへ受信フレームを書き込む
+  設計であり，バッファが無い（またはDMA非対応領域にある）場合，
+  MACはフレームを黙って破棄し，**割込み自体を一度も発生させない**
+  という設計は十分にありうる（「バッファが無ければ受信通知しない」
+  というハードウェア的な自己防御は一般的）。
+- 本セッションで`esp_shim_malloc`の失敗ログ・
+  `esp_shim_queue_create`の"queue pool exhausted"ログが一度も
+  出ていないことは確認済みだが，これは「確保が失敗していない」
+  ことの確認であって，「確保されたメモリがMACのDMAエンジンから
+  見て正しい種類・アライメントか」は未確認。
+- 次セッションでの具体的な確認事項：(1) `_malloc`/`_zalloc`系
+  osi関数が要求するサイズ・呼出し回数をログし，静的ヒープ
+  （`esp_shim.c`の`heap_area[]`，192KB）からの割当てが，esf_buf
+  初期化で期待される個数（既定：static rx buffer num・dynamic rx
+  buffer num等，`WIFI_INIT_CONFIG_DEFAULT()`のKconfig既定値）
+  だけ実際に成功しているかをカウントする，(2) ESP32-C6の
+  DMA対応SRAM領域（`MALLOC_CAP_DMA`相当）の実アドレス範囲を確認し，
+  `esp_shim`の`heap_area`静的配列がその範囲内に収まっているかを
+  リンカマップで確認する。
+
+### 保存物・再現用コマンド（このセッションで追加）
+
+- ASP3側の計装（`target_hrt_handler`のOR蓄積＋`tslp_tsk(500)`）は
+  診断専用のため，本コミットには含めず元に戻した（再現する場合は
+  本セクションの説明どおりに一時追加すること）。
+- NuttX側の計装は`/home/honda/.claude/jobs/494f98a3/tmp/nuttx-c6/`
+  （ASP3リポジトリ外のスクラッチ領域）に残っている：
+  `arch/risc-v/src/common/espressif/esp_wifi_utils.c`の
+  `esp_wifi_start_scan()`内，`ret = esp_wifi_scan_start(...)`の
+  直後に busy-poll ブロックを追加済み。再ビルド・書込みコマンドは
+  上記「残されたNuttXビルド」節と同一（`printf`使用のため
+  `CONFIG_DEBUG_FEATURES`の状態に関わらず出力が見える）。
+- 現状ボードにはNuttXイメージが書き込まれたまま。次回ASP3側を
+  検証する際は`asp_flash.bin`を再書込みすること。
+
+### 本セッションで実装・維持した実修正（2件）
+
+いずれも実機JTAGレジスタ比較で「既知良品と不一致→修正後に一致」を
+確認した，独立に正当化できる実修正（ただしどちらも単独では
+「AP 0個」を解消しない）：
+
+1. **WIFIPWRクロックドメイン有効化**
+   （`wifi_clock_enable_wrapper()`に`modem_clock_select_lp_clock_
+   source(PERIPH_WIFI_MODULE, MODEM_CLOCK_LPCLK_SRC_RC_SLOW, 0)`
+   を追加）。`modem_lpcon.CLK_CONF_REG`（`0x600af018`）のbit0
+   （`clk_wifipwr_en`）が修正前0・修正後1（参照実装も1）。
+2. **WiFi MAC割込み線のLEVEL型設定**
+   （`set_intr_wrapper()`に`PLIC_MXINT_TYPE_REG`
+   （`0x20001004`）の該当ビットクリアを追加）。参照実装
+   （`hal/components/esp_wifi/esp32c6/esp_adapter.c`・NuttX双方）が
+   `esprv_int_set_type(intr_num, INTR_TYPE_LEVEL)`を呼ぶのに対し，
+   ASP3側はこの呼出しを欠いていた。修正後`TYPE_REG`は全ビット0
+   （全線LEVEL）で確認済み。
