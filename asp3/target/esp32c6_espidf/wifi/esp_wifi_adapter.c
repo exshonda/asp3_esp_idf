@@ -552,6 +552,30 @@ wifi_reset_mac_wrapper(void)
 static void
 wifi_clock_enable_wrapper(void)
 {
+	static bool_t	lpclk_selected = false;
+
+	/*
+	 *  esp_perip_clk_init()（esp_system/port/soc/esp32c6/clk.c）が
+	 *  通常起動（第2段ブートローダ経由）で行うWi-Fi低電力クロック
+	 *  ソースの選択をここで代替する．Direct Bootではこの関数自体が
+	 *  一切呼ばれないため，modem_clock_module_enable(PERIPH_WIFI_
+	 *  MODULE)（wifi_module_enable経由）だけではWIFIPWRクロック
+	 *  ドメイン（modem_lpcon.clk_conf.clk_wifipwr_en＝
+	 *  DR_REG_MODEM_LPCON_BASE(0x600af000)+0x18のbit0）が有効化
+	 *  されない．これは`MODEM_CLOCK_DOMAIN_WIFI`とは別系統の
+	 *  クロックゲートである．JTAGで実機比較して確認済み：本関数を
+	 *  無効化するとclk_wifipwr_en=0（既知良品の参照実装は=1）に
+	 *  留まり，本関数を有効化すると=1へ一致する（ただしこの修正
+	 *  単独では「AP 0個」問題は解消しない＝別要因が残っている．
+	 *  docs/wifi-shim-c6.md「実施6」参照）．
+	 */
+	if (!lpclk_selected) {
+		modem_clock_deselect_all_module_lp_clock_source();
+		modem_clock_select_lp_clock_source(PERIPH_WIFI_MODULE,
+											MODEM_CLOCK_LPCLK_SRC_RC_SLOW, 0U);
+		lpclk_selected = true;
+	}
+
 	wifi_module_enable();
 }
 

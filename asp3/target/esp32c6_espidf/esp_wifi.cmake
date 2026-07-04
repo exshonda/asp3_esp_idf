@@ -556,16 +556,34 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     ${ESP_HAL_DIR}/components/esp_hw_support/periph_ctrl.c
     #  C6固有：periph_ctrl.cのwifi/bt module enable経路が
     #  modem_clock_module_enable/disable等を直接呼ぶ（新設のmodem_clock
-    #  サブシステム．C3にはSYSTEM_WIFI_CLK_EN_REG直書き＝
-    #  target_kernel_impl.cのhardware_init_hookで代替していたが，C6は
-    #  この実ソースが自己完結して動くため同種のhookは不要という仮説．
-    #  実機で検証する．docs/wifi-shim.md／esp32c6版参照）
+    #  サブシステム）。C3にはSYSTEM_WIFI_CLK_EN_REG直書き＝
+    #  target_kernel_impl.cのhardware_init_hookで代替していたが，当初は
+    #  「C6はこの実ソースが自己完結して動くため同種のhookは不要」という
+    #  仮説を立てていた。**実機検証の結果，この仮説は誤りと判明**：
+    #  Direct Bootではesp_perip_clk_init()（esp_system/port/soc/esp32c6/
+    #  clk.c）自体が一切呼ばれないため，modem_clock_module_enable()
+    #  だけでは有効化されない別系統のクロックゲート（WIFIPWRドメイン＝
+    #  modem_clock_hal_enable_wifipwr_clock）が未有効化のまま残り，
+    #  PWDET/AGC等ベースバンド系レジスタへのアクセスがバスタイムアウト
+    #  する（HP_SYSTEM_MODEM_PERI_TIMEOUT_ADDR_REG=0x600a2868で実測
+    #  確認）。修正はesp_wifi_adapter.cのwifi_clock_enable_wrapper()で
+    #  modem_clock_select_lp_clock_source(PERIPH_WIFI_MODULE, ...)を
+    #  明示的に呼ぶ形で行った（esp_perip_clk_init()相当の代替）。
+    #  詳細はdocs/wifi-shim-c6.md「実施6」参照。
     ${ESP_HAL_DIR}/components/esp_hw_support/modem_clock.c
     ${ESP_HAL_DIR}/components/hal/esp32c6/modem_clock_hal.c
-    #  rtc_clk_xtal_freq_get()（modem_clock.c経由で参照．--gc-sectionsに
+    #  rtc_clk_xtal_freq_get()（modem_clock.c経由で参照。--gc-sectionsに
     #  より実際に呼ばれる関数のみリンクされるため，同ファイル内の
     #  他のPLL較正関数群は取り込まれない想定＝安全に全体を採用）
     ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c6/rtc_clk.c
+    #  modem_clock_select_lp_clock_source()がefuse_hal_chip_revision()
+    #  を参照する（eco0判定）。efuse_hal.cはefuse_ll.h（static inline
+    #  レジスタ直読み）のみに依存する軽量な実ソースのため採用。
+    #  チップ非依存の共通実装（efuse_hal_chip_revision本体）＋C6固有の
+    #  efuse_hal_get_{major,minor}_chip_version（ともに--gc-sectionsで
+    #  実際に呼ばれる関数のみ残る）の2ファイル構成。
+    ${ESP_HAL_DIR}/components/hal/efuse_hal.c
+    ${ESP_HAL_DIR}/components/hal/esp32c6/efuse_hal.c
 )
 
 #

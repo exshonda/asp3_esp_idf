@@ -35,6 +35,7 @@
 #include "esp_err.h"
 #include "nvs.h"
 #include "esp_mac.h"
+#include "esp_sleep.h"
 #include "esp_private/esp_sleep_internal.h"
 
 /*
@@ -285,6 +286,34 @@ nvs_commit(nvs_handle_t handle)
 {
 	(void) handle;
 	return(ESP_ERR_NVS_NOT_INITIALIZED);
+}
+
+/*
+ *  ------------------------------------------------------------------
+ *  8a-2. esp_sleep（未実装スタブ．modem_clock_select_lp_clock_source
+ *  経由でのみ参照される）
+ *  ------------------------------------------------------------------
+ *
+ *  本ポートはESP-IDFのlight/deep sleepサブシステム（esp_hw_support/
+ *  sleep_modes.c＝多数の依存を持つ大規模ファイル）を採用しない．
+ *  modem_clock_select_lp_clock_source()（esp_perip_clk_init()相当を
+ *  wifi_clock_enable_wrapper()で代替した際に必要になった．
+ *  docs/wifi-shim-c6.md「実施6」参照）がリンク時に要求するシンボルを
+ *  解決するためだけのスタブ．sleepへ実際に入ることはないため，
+ *  参照カウント等の副作用は不要＝常時ESP_OKを返す．
+ */
+esp_err_t
+esp_sleep_pd_config(esp_sleep_pd_domain_t domain, esp_sleep_pd_option_t option)
+{
+	(void) domain; (void) option;
+	return(ESP_OK);
+}
+
+esp_err_t
+esp_sleep_clock_config(esp_sleep_clock_t clock, esp_sleep_clock_option_t option)
+{
+	(void) clock; (void) option;
+	return(ESP_OK);
 }
 
 /*
