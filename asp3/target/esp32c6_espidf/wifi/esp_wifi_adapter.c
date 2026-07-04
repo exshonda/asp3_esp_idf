@@ -33,23 +33,29 @@
 #include "esp_private/wifi_os_adapter.h"
 #include "esp_private/wifi.h"
 #include "private/esp_coexist_adapter.h"
+#include "soc/periph_defs.h"
+#include "esp_private/esp_modem_clock.h"
 
 /*
  *  リンク閉包で解決するesp-hal／blob側の関数（宣言のみ）
+ *
+ *  C6はmodem_clockサブシステムを持ち（SOC_MODEM_CLOCK_IS_INDEPENDENT），
+ *  WIFI/BT等モジュールのreset/enableはmodem_clock_module_*系を使う．
+ *  periph_module_reset()（clk_gate_ll.hのTIMG0/TIMG1/UHCI0/SYSTIMER
+ *  4種のみを扱う旧shared_periph_module_tテーブル）はWIFI(=4)に対して
+ *  範囲外アクセスとなり，GCCが到達不能と判断してebreakを生成する
+ *  （実機JTAG調査で確定．periph_ctrl.cのperiph_ll_reset参照）．
+ *  C3のesp_wifi_adapter.cはこの区別がないチップ向けの実装で，本ファイルは
+ *  そこからの流用時にこの差を見落としていた．
  */
 extern void esp_phy_enable(int modem);
 extern void esp_phy_disable(int modem);
 extern void phy_wifi_enable_set(uint8_t enable);
 extern int esp_phy_update_country_info(const char *country);
-extern void periph_module_reset(int periph);
 extern void wifi_module_enable(void);
 extern void wifi_module_disable(void);
 extern int esp_read_mac(uint8_t *mac, int type);
 
-/*  PERIPH_WIFI_MODULE（esp_private/periph_ctrl.h相当．C3の値） */
-#ifndef PERIPH_WIFI_MODULE
-#define PERIPH_WIFI_MODULE  24
-#endif
 #ifndef PHY_MODEM_WIFI
 #define PHY_MODEM_WIFI      1
 #endif
@@ -540,7 +546,7 @@ read_mac_wrapper(uint8_t *mac, unsigned int type)
 static void
 wifi_reset_mac_wrapper(void)
 {
-	periph_module_reset(PERIPH_WIFI_MODULE);
+	modem_clock_module_mac_reset(PERIPH_WIFI_MODULE);
 }
 
 static void
