@@ -33,9 +33,33 @@ SECTIONS
         KEEP(*(.text.entry))       /* +8：エントリ（j start） */
         . = ALIGN(256);            /* trap_vector_tableのアライン */
         *(.text*)
+        /*
+         *  IRAM_ATTR系関数（.iram1.N＝esp_hw_support/periph_ctrl.c・
+         *  rtc_clk.c等）＋Wi-Fi blob（libcoexist.a/libnet80211.a/
+         *  libpp.a等）が要求する高速実行用セクション一覧（C3の
+         *  esp32c3_espidf/esp32c3.ldと同じ一覧．明示ルールが無いと
+         *  orphan section扱いとなり.dataとLMAが重なる．本ldは独立した
+         *  IRAM領域を持たないDirect Boot XIP構成のため通常コードと
+         *  同じくFLASHへ収容する＝実行速度上の最適化は失うが機能上は
+         *  問題ない）
+         */
+        *(.iram1 .iram1.*)
+        *(.coexiram .coexiram.*)
+        *(.wifi0iram .wifi0iram.*)
+        *(.wifiextrairam .wifiextrairam.*)
+        *(.wifiorslpiram .wifiorslpiram.*)
+        *(.wifirxiram .wifirxiram.*)
+        *(.wifislpiram .wifislpiram.*)
+        *(.wifislprxiram .wifislprxiram.*)
         . = ALIGN(16);
         *(.rodata .rodata.*)
         *(.srodata .srodata.*)
+        /*
+         *  .rodata_wlog_{debug,error,info,verbose,warning}.N（ログ
+         *  文字列圧縮用セクション．C3のesp32c3_espidf/esp32c3.ldと
+         *  同じ扱い）
+         */
+        *(.rodata_wlog_*)
         . = ALIGN(16);
     } > FLASH
 
@@ -49,6 +73,12 @@ SECTIONS
         __data_start = .;
         LONG(0)     /* 番兵（.dataが空だとldがAT指定を無視しLMAがRAMに落ちるため） */
         *(.data*)
+        /*
+         *  .dram1.N（DRAM_ATTR変数．IRAM_ATTR関数と対の初期化済み
+         *  データ．esp_hw_support/rtc_clk.c等．.dataと同じくRAMへ
+         *  収容する．C3のesp32c3_espidf/esp32c3.ldと同じ扱い）
+         */
+        *(.dram1 .dram1.*)
         . = ALIGN(8);
         __global_pointer$ = . + 0x800;
         *(.sdata .sdata.*)

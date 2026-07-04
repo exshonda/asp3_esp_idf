@@ -39,8 +39,8 @@
  *  （asp3_core側target_timer.hと同じ割込み線番号を使う．Phase Aでの
  *  実機検証と合わせるため）
  */
-#define INTNO_TIMER  1                            /* 割込み番号 */
-#define INHNO_TIMER  1                            /* 割込みハンドラ番号 */
+#define INTNO_TIMER  16                           /* 割込み番号（Wi-Fi shimの線1-15予約により線16へ退避） */
+#define INHNO_TIMER  16                           /* 割込みハンドラ番号（INTNO_TIMERと一致させる） */
 #define INTPRI_TIMER (TMAX_INTPRI - 1)             /* 割込み優先度 */
 #define INTATR_TIMER TA_NULL                       /* 割込み属性 */
 

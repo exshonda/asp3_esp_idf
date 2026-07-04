@@ -29,7 +29,7 @@
  *  テストプログラムで使用する割込み（FROM_CPU_1ソースを割り当てた
  *  CPU割込み線3．割り当てはtarget_initializeで行う）
  */
-#define INTNO1			3
+#define INTNO1			18	/* Wi-Fi shimが線1-15を占有するため退避 */
 #define INTNO1_INTATR	TA_ENAINT
 #define INTNO1_INTPRI	(-2)
 

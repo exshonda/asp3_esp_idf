@@ -114,17 +114,20 @@ target_initialize(void)
 	 *  （SYSTIMER_TARGET0とFROM_CPU_0（タイマ割込みの強制用）は
 	 *  同じ線に多重マップする．target_timer.h参照．FROM_CPU_1は
 	 *  テストプログラム用のras_int対象＝INTNO1．target_test.h参照．
-	 *  コンソール（INTNO_SIO＝線2）はビルド時選択に応じてUART0または
-	 *  USB Serial/JTAGのソースを割り当てる）
+	 *  コンソール（INTNO_SIO）はビルド時選択に応じてUART0または
+	 *  USB Serial/JTAGのソースを割り当てる．
+	 *  線16〜18を使用（線1〜15はWi-Fi shim・esp_wifi_adapter.cの
+	 *  set_intr_wrapperが動的に使うため予約＝C3のesp32c3_espidf/
+	 *  target_kernel_impl.cと同じ退避パターン．docs/wifi-shim.md参照）
 	 */
-	esp32c6_intmtx_route(ESP32C6_INTSRC_SYSTIMER_TARGET0, 1U);
-	esp32c6_intmtx_route(ESP32C6_INTSRC_FROM_CPU_0, 1U);
+	esp32c6_intmtx_route(ESP32C6_INTSRC_SYSTIMER_TARGET0, 16U);
+	esp32c6_intmtx_route(ESP32C6_INTSRC_FROM_CPU_0, 16U);
 #ifdef TOPPERS_ESP32C6_CONSOLE_USBJTAG
-	esp32c6_intmtx_route(ESP32C6_INTSRC_USB_SERIAL_JTAG, 2U);
+	esp32c6_intmtx_route(ESP32C6_INTSRC_USB_SERIAL_JTAG, 17U);
 #else /* TOPPERS_ESP32C6_CONSOLE_USBJTAG */
-	esp32c6_intmtx_route(ESP32C6_INTSRC_UART0, 2U);
+	esp32c6_intmtx_route(ESP32C6_INTSRC_UART0, 17U);
 #endif /* TOPPERS_ESP32C6_CONSOLE_USBJTAG */
-	esp32c6_intmtx_route(ESP32C6_INTSRC_FROM_CPU_1, 3U);
+	esp32c6_intmtx_route(ESP32C6_INTSRC_FROM_CPU_1, 18U);
 }
 
 /*

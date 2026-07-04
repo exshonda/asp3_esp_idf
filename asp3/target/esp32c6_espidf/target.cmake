@@ -139,6 +139,39 @@ set(ASP3_RUN_COMMAND
 )
 
 #
+#  Wi-Fi（esp_wifi blob＋os_adapter shim．既定OFF．Phase B-2a＝scanのみ）
+#
+#  shim基盤（esp_shim.[ch]／esp_shim_libc.c／esp_shim_blobglue.c）は
+#  C3のwifi/を土台に，チップ固有アドレス（割込みルーティング＝
+#  INTMTX+PLIC_MX，HW RNG＝LPPERI_RNG_DATA_REG，eFuse MACレジスタ）
+#  のみ差し替えたC6版を${TARGETDIR}/wifi/に置く．chip非依存の
+#  esp_shim.h／esp_shim_cfg.h／esp_shim_libc.c／esp_event_shim.c／
+#  esp_coex_adapter.c／esp_shim.cfgはC3側をそのまま再利用する
+#  （中身に変更不要．docs/wifi-shim.md参照）．
+#
+get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf ABSOLUTE)
+
+option(ESP32C6_WIFI "Enable Wi-Fi (esp_wifi blob + os_adapter shim, Phase B-2a scan)" OFF)
+if(ESP32C6_WIFI)
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_WIFI)
+    list(APPEND ASP3_INCLUDE_DIRS
+        ${TARGETDIR}/wifi
+        ${C3_TARGETDIR}
+        ${C3_TARGETDIR}/wifi
+    )
+    list(APPEND ASP3_CFG_FILES ${C3_TARGETDIR}/wifi/esp_shim.cfg)
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${TARGETDIR}/wifi/esp_shim.c
+        ${TARGETDIR}/wifi/esp_shim_blobglue.c
+        ${TARGETDIR}/wifi/esp_wifi_adapter.c
+        ${C3_TARGETDIR}/wifi/esp_shim_libc.c
+        ${C3_TARGETDIR}/wifi/esp_event_shim.c
+        ${C3_TARGETDIR}/wifi/esp_coex_adapter.c
+    )
+endif()
+include(${TARGETDIR}/esp_wifi.cmake)
+
+#
 #  フラッシュイメージ生成等（aspターゲット定義後に取込み）
 #
 set(ASP3_TARGET_RUN_CMAKE ${TARGETDIR}/run.cmake)
