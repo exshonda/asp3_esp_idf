@@ -177,14 +177,65 @@ Wi-Fi統合時と同じ手法（`openocd-esp32/v0.12.0-esp32-20250422`＋
    0x1000）は`ble_max_act`（アクティビティ数）に非依存の固定値。
    活動数不足によるEM領域サイズ不足という仮説は否定された。
 
+### 検討・却下した仮説（再調査の重複を避けるため記録）
+
+以下の2件は追加の調査依頼で挙がった具体的な仮説だが，実機検証の
+結果いずれも`emi.c:164`の原因ではないと確認済み。再調査は不要。
+
+**仮説A：`CONFIG_IDF_TARGET_ESP32C3`未定義により`periph_module_
+enable(PERIPH_BT_MODULE)`がno-opになっている（クロック未供給／
+リセット未解除）**
+
+`esp_bt_controller_init()`が呼ぶ`periph_module_enable()`の実体
+（`hal/components/esp_hw_support/periph_ctrl.c`）は
+`__PERIPH_CTRL_ALLOW_LEGACY_API`が定義されている場合のみ実装を持ち，
+そのマクロは`CONFIG_IDF_TARGET_ESP32C3`定義時のみ有効になる
+（`esp_private/periph_ctrl.h`）。この定義が本ビルドの`*.cmake`・
+`hal_stub/include/*.h`のいずれにも見当たらないとの指摘があった。
+
+実機テスト前に静的検証で却下：`hal/nuttx/esp32c3/include/
+sdkconfig.h`（NuttX由来のベンダーツリー内ファイル．探索対象外の
+パスにあった）が`#define CONFIG_IDF_TARGET_ESP32C3 1`を既に持ち，
+`bt.c`・`periph_ctrl.h`とも`#include "sdkconfig.h"`で到達済み
+（インクルードパスに`hal/nuttx/esp32c3/include`が既存）。実際の
+ビルドコマンドで前処理・`nm`確認した結果，`periph_module_enable`は
+既に実体を持ち（`hal/clk_gate_ll.h`の`periph_ll_enable_clk_clear_
+rst()`経由でレジスタ操作するコードが既にリンクされている），
+このマクロを追加しても差分ゼロ＝仮説A却下（実機再テスト不要なほど
+静的に決着）。
+
+**仮説B：ESP-IDF本家がリンクする7個のROM linker script
+（`ble_master/ble_50/ble_cca/ble_smp/ble_dtm/ble_test/ble_scan.ld`）
+の欠落により，ROM機能ハンドラテーブルの一部が未初期化のまま残り，
+それが`emi.c:164`のページ所有権チェック不整合を招いている**
+
+実機で二分探索検証（各組み合わせをビルド→フラッシュ→実機ログ確認）：
+
+| 組み合わせ | 結果 |
+|---|---|
+| 7個全部 | **新しい別のクラッシュ**：`esp_bt_controller_init()`内部（`enable()`到達前）で`r_rwip_init+256`からNULL関数ポインタ呼び出し＝Illegal instruction（`pc=0`） |
+| `ble_master`+`ble_50`+`ble_cca`+`ble_smp` | 同上（新クラッシュ再現） |
+| `ble_master`+`ble_50` | 元の`emi.c:164`アサートに復帰（変化なし） |
+| `ble_master`+`ble_50`+`ble_cca` | 同上（変化なし） |
+| 7個中`ble_smp`以外の6個 | 同上（変化なし） |
+
+→ **`ble_smp.ld`単体が新規クラッシュの原因**（`r_rwip_init`が本来
+非NULLを期待する関数ポインタを，このファイルが明示的に0で埋めて
+しまうため）。残り6個（`ble_master`/`ble_50`/`ble_cca`/`ble_dtm`/
+`ble_test`/`ble_scan`）は追加しても`emi.c:164`アサートに一切変化
+なし＝無害だが無意味。**仮説Bは却下**：7個いずれの追加も`emi.c:164`
+を解消しない。`esp_bt.cmake`は元の状態（`eco3_bt_funcs.ld`＋
+`bt_funcs.ld`のみ）に戻した。
+
 **現時点の結論**：`emi.c:164`は`libbtdm_app.a`（ROM側`r_emi_get_
 mem_addr_by_offset`含む）内部の「EMページ所有権テーブル」の整合性
 チェックであり，オフセット0x1000（ページ4）に対応するテーブル
 エントリが，コントローラ初期化シーケンスのどこかで正しく登録されて
 いない。この登録処理自体はソースが公開されていない`libbtdm_app.a`
 （およびROM）の内部実装であり，`bt_smoke.c`側のconfig値（Kconfig
-既定値と一致を確認済み）・アクティビティ数のいずれにも起因しない
-ことが実機JTAGで確認できた。
+既定値と一致を確認済み）・アクティビティ数・`periph_module_enable`
+の有効性・追加ROM linker scriptの7個いずれにも起因しないことが
+実機検証で確認できた。
 
 **未解決／残作業**：
 - 真因は「実際のESP-IDFが`esp_bt_controller_init/enable`前後で

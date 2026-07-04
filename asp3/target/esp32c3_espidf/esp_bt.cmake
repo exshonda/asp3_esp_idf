@@ -149,6 +149,13 @@ set(ESP_BT_ROM_LD_FILES
     #  eco7版が正しい可能性あり＝実機で未解決ならここを見直す。
     ${BT_ROM_LD_DIR}/${BT_CHIP_SERIES}.rom.eco3_bt_funcs.ld
     ${BT_ROM_LD_DIR}/${BT_CHIP_SERIES}.rom.bt_funcs.ld
+    #  esp_rom/CMakeLists.txt（ESP-IDF本家，esp32c3枝）は本来
+    #  ble_master/ble_50/ble_cca/ble_dtm/ble_test/ble_scan/ble_smpの
+    #  7個も（Kconfig既定値では）追加リンクするが，実機での二分探索
+    #  検証の結果こちらでは追加しない．詳細はdocs/bt-shim.md参照
+    #  （ble_smp.ldを足すとr_rwip_init内部でNULL関数ポインタ呼び出し
+    #  により新たなクラッシュが発生＝害あり．残り6個は追加しても
+    #  emi.c:164アサートに変化なし＝無害だが無意味．どちらも不採用）．
 )
 foreach(_esp_bt_rom_ld ${ESP_BT_ROM_LD_FILES})
     list(APPEND ASP3_LINK_OPTIONS -Wl,-T,${_esp_bt_rom_ld})
