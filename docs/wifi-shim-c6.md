@@ -1154,3 +1154,98 @@ sniffer実験の再現用ビルドは`/home/honda/.claude/jobs/494f98a3/tmp/
 c3_sniffer2/`に保存済み（C3実機・`/dev/ttyACM1`向け．チャネル1固定・
 OUI `58:e6:c5`検出）。実機は現状C6側にASP3の`wifi_scan`（チャネル
 固定を戻した通常版）が書き込まれた状態。
+
+## 実施7：実験B（regi2c生存確認）— 新規バグ発見だが「AP 0個」は未解決
+
+セカンドオピニオンの実験B〜Dに沿って`esp-hal-3rdparty`のregi2c関連
+実ソースを読み，実機で直接検証した．
+
+### 発見1：`clk_i2c_mst_en`未有効化（新規バグ・修正済み）
+
+`hal/components/hal/esp32c6/include/hal/regi2c_ctrl_ll.h`より，regi2c
+（RFシンセサイザ/PA/LNA/バイアスの内部アナログ較正バス）の前提クロッ
+クは`MODEM_LPCON.clk_conf.clk_i2c_mst_en`（`modem_lpcon.CLK_CONF_REG`
+＝`0x600af018`のbit2．`clk_wifipwr_en`＝bit0・`clk_coex_en`＝bit1の
+兄弟ビット）．このビットは`hal/components/bootloader_support/src/
+esp32c6/bootloader_esp32c6.c`の`bootloader_hardware_init()`が
+
+```c
+_regi2c_ctrl_ll_master_enable_clock(true); // keep ana i2c mst clock always enabled in bootloader
+regi2c_ctrl_ll_master_configure_clock();
+```
+
+として**第2段ブートローダ内で恒久的に有効化**する設計（`esp_hw_
+support/regi2c_ctrl.c`の参照カウント式`ANALOG_CLOCK_ENABLE/DISABLE`
+はSAR_ADC等の動的経路用で，PHYブロブ自身は有効化済み前提で
+`esp_rom_regi2c_read/write`を直接叩く）．Direct Bootではこのブート
+ローダ自体が一切実行されないため，このビットは常に0（リセット既定
+値）のまま．
+
+`asp3/target/esp32c6_espidf/wifi/esp_wifi_adapter.c`の
+`wifi_clock_enable_wrapper()`に，`bootloader_hardware_init()`と同じ
+2行を追加して修正（`_regi2c_ctrl_ll_master_enable_clock(true)` +
+`regi2c_ctrl_ll_master_configure_clock()`）．JTAGで実機確認：
+`0x600af018`＝修正前0x3（bit0,1のみ）→修正後0x7（bit2も含め全て1）．
+`0x600af010`（`I2C_MST_CLK_CONF_REG`）も期待通り0x1（160MHz選択）．
+
+なお，`esp_rom_regi2c_read/write`のROM実装（`regi2c_enable_block()`
+内）には`assert(regi2c_ctrl_ll_master_is_clock_enabled())`があるが，
+本ビルドでは`assert(x)`が`asp3/target/esp32c3_espidf/hal_stub/
+include/assert.h`により`((void)0)`へ無効化されているため，このビッ
+トが0のままでもクラッシュせず無言で通過していた（今回の一連の調査
+でクラッシュが一度も観測されなかった理由の説明にもなる）．
+
+### 発見2：regi2cバス自体は生きている・BBPLLは正常にロックする
+
+修正適用後，`apps/wifi_scan/wifi_scan.c`に一時診断コードを追加し
+（`esp_wifi_start()`直後，PHY較正完了後の時点で），BBPLLブロック
+（`I2C_BBPLL`=0x66）を実際にregi2c越しに読み出した：
+
+```
+wifi_scan: DIAG bbpll or_lock=1 cal_end=1 cal_ovf=0 reg9=0x96
+```
+
+`OR_LOCK=1`（PLLロック済み）・`OR_CAL_END=1`（較正完了）・
+`OR_CAL_OVF=0`（較正オーバーフローなし）・reg9=0x96（プレースホルダ
+値ではない具体的な較正結果）．これは**regi2cバスが実際に機能し，
+BBPLL較正が正常に完了・ロックしていることを示す**（ROM関数
+`esp_rom_regi2c_read`/`read_mask`はC6ではROMベクタ経由で解決されず，
+診断のため`hal/components/esp_rom/patches/esp_rom_hp_regi2c_esp32c6.c`
+を一時的にビルドへ追加して直接呼んだ．通常ビルドでWi-Fiブロブ自身は
+この外部シンボルを参照しないため未リンクのままでも支障なし＝ブロブ
+は自前の内部実装を持つと推定される）。
+
+`modem_lpcon`全域（`0x600af000`〜`0x600af04c`）もJTAGで読み出したが，
+明らかな異常値（全0/全1のような放置パターン）は見られなかった．
+
+### 結論：セカンドオピニオンの「regi2c/RFアナログ経路が死んでいる」
+仮説は，本ビットの修正後は**成立しない**
+
+修正後も`wifi_scan: 0 APs found (err=0)`は完全に同一（挙動の変化
+なし）．BBPLLが正常にロックしている以上，RFフロントエンドへの
+アナログ較正パスは少なくとも部分的に機能しており，「regi2cが完全に
+死んでいるためTX/RXとも一切動かない」という仮説の前提が崩れる．
+`PMU_RF_PWC_REG`（`0x600B0154`）もJTAGで確認：`0xfc000000`
+（bit26〜31全て1＝XPD_TXRF_I2C/XPD_RFRX_PBUS/XPD_CKGEN_I2C/
+XPD_PLL_I2C含め全RFアナログ電源ドメインが電源投入済み．ヘッダ上の
+リセット既定値は一部bit=0だが，これはPMUの電源状態ステートマシン
+（HP_ACTIVE設定）が適用した後の実測値であり，Direct Bootでも
+「電源投入」自体は最初から成立している）．PCR
+（`0x60096000`〜）は時間の都合で全域diffは未実施。
+
+**新規バグ（`clk_i2c_mst_en`）は本物であり修正済みだが，「AP 0個」
+問題の直接原因ではなかった**．sniffer実験（実施6）が示した「TXも
+死んでいる」という事実自体は変わらないため，原因はregi2c/PLL較正
+より後段（もしくは全く別系統）にあることになる．次の手がかり：
+
+- BBPLLがロックしていてもMAC/PHY側で実際にTXを「キック」する経路
+  （`wifi_hw_start`相当，ROMまたはブロブ内部）が別の未有効化ビット
+  に依存している可能性（PCR/PMUの残り未比較領域，あるいはMAC自体の
+  イネーブル系統）。
+- 単一命令ステップ実行によるNuttX/ASP3比較（当初案）に立ち返る
+  べき局面に近づいている。
+
+diffはコミット済み（`asp3/target/esp32c6_espidf/wifi/
+esp_wifi_adapter.c`のみ．診断用コード・cmake追加は全てrevert済み）。
+実機は現状ASP3の`wifi_scan`（`clk_i2c_mst_en`修正込み・診断コード
+なしの通常版）が書き込まれた状態。

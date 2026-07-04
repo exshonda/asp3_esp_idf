@@ -35,6 +35,7 @@
 #include "private/esp_coexist_adapter.h"
 #include "soc/periph_defs.h"
 #include "esp_private/esp_modem_clock.h"
+#include "hal/regi2c_ctrl_ll.h"
 
 /*
  *  リンク閉包で解決するesp-hal／blob側の関数（宣言のみ）
@@ -585,6 +586,24 @@ wifi_clock_enable_wrapper(void)
 		modem_clock_deselect_all_module_lp_clock_source();
 		modem_clock_select_lp_clock_source(PERIPH_WIFI_MODULE,
 											MODEM_CLOCK_LPCLK_SRC_RC_SLOW, 0U);
+
+		/*
+		 *  bootloader_hardware_init()（bootloader_support/src/esp32c6/
+		 *  bootloader_esp32c6.c）が第2段ブートローダ内で行う
+		 *  「アナログI2Cマスタクロックを常時有効化」をここで代替する．
+		 *  Direct Bootではブートローダ自体が動かないため，
+		 *  modem_lpcon.clk_conf.clk_i2c_mst_en（DR_REG_MODEM_LPCON_BASE
+		 *  (0x600af000)+0x18のbit2．clk_wifipwr_en=bit0とは別ビット）が
+		 *  一度も立たない．このビットはregi2c（RFシンセサイザ/PA/LNA/
+		 *  バイアスの内部アナログ較正バス）の前提クロックで，PHYブロブは
+		 *  esp_rom_regi2c_read/write（ROM関数）をこの前提の下で直接呼ぶ．
+		 *  未有効化のままだとregi2c越しの較正（BBPLL/TXRF/BIAS等）が
+		 *  無応答または不定値のまま進み，TX/RXとも電波が出ない
+		 *  （sniffer実機観測で確認済み．docs/wifi-shim-c6.md参照）．
+		 */
+		_regi2c_ctrl_ll_master_enable_clock(true);
+		regi2c_ctrl_ll_master_configure_clock();
+
 		lpclk_selected = true;
 	}
 
