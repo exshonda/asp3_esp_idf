@@ -1338,3 +1338,80 @@ CLK_CONF1全域・PMU RF電源ドメイン・BBPLL較正＝実施7）は
 チップ移植・ブロブ更新に備えて`modem_clock_module_enable()`系の
 直接呼び出しへ統一することは，今回は必須ではないため未実施
 （次の機会の課題として記録のみ）。今回コード変更なし（診断のみ）．
+
+## 実施9：セカンドオピニオン第3ラウンド — coex（3者調停）no-op化を試したが「AP 0個」は不変
+
+「デジタル設定は全て正常なのにTX/RXとも電波皆無・MAC割込みも皆無
+（TX完了・エラー割込みすら1つも立たない）」という状況は，ハード
+ウェア誤設定というより「ブロブ自身がTX submit自体を自発的に見送っ
+ている」ことを示唆する，という再整理のもとで2件のチェックを実施．
+
+### Check 2（先に実施・即断）：`env_is_chip`は一致
+
+`env_is_chip_wrapper()`（wifi_osi）・`coex_env_is_chip_wrapper()`
+（coex osi）とも，ASP3は`true`固定．リファレンス（`hal/components/
+esp_coex/esp32c6/esp_coex_adapter.c`他，全チップ共通）も
+`#ifdef CONFIG_IDF_ENV_FPGA`未定義時は`true`．一致（問題なし）．
+
+### Check 1（coex初期化）：NuttXとASP3で設計方針が違うことが判明
+
+`asp3/target/esp32c6_espidf/wifi/esp_wifi_adapter.c`の`_coex_*`系
+（`wifi_osi_funcs_t`）は，C3の設計をそのまま踏襲し`libcoexist.a`の
+実関数（`coex_init`/`coex_wifi_request`等）へ無条件に素通しする
+実装だった．
+
+NuttX（`nuttx/arch/risc-v/src/esp32c6/esp_wifi_adapter.c`）を確認
+すると，`_coex_*`系ラッパーは全て`#if CONFIG_SW_COEXIST_ENABLE ||
+CONFIG_EXTERNAL_COEX_ENABLE`でガードされており，**両方未定義
+（BT/802.15.4非併用のWi-Fi単独構成）の場合は`coex_init`等の実体を
+一切呼ばず，即座に成功値（0固定，`coex_schm_flexible_period_get`
+のみ1固定）を返すno-op**になる．本ポートで実機確認したNuttXの
+`.config`を確認したところ，実際に両マクロとも未定義（＝no-op構成）
+のまま6AP検出に成功していた．
+
+ASP3のC3版は無条件の実passthroughのままWi-Fi動作実績あり（C3は
+Wi-Fi/BT2者調停のみでBT非併用時は素通しでも実質no-opに近い挙動に
+なる可能性がある）．C6は3者調停（Wi-Fi/BLE/802.15.4）のPTIベース
+アービタで前提が異なるため，「無条件passthroughのままだと，Wi-Fi
+単独構成でもアービタが未知の初期化待ちになりRFグラントを永遠に
+返さない」という仮説を立て，NuttXのno-op構成に合わせて`_coex_*`
+全域を差し替え・実機検証した．
+
+### 検証結果：no-op化しても`wifi_scan: 0 APs found (err=0)`は不変
+
+`coex_init_wrapper`〜`coex_schm_flexible_period_get_wrapper`まで
+NuttXの`#else`分岐と同じ実装（0固定・void no-op・`curr_phase_get`
+のみNULL・`flexible_period_get`のみ1固定）に置き換え，ビルド
+（flashサイズ533488→528448Bへ縮小＝libcoexist.a側コードが実際に
+リンクされなくなったことを裏付け）・実機再テストした．結果は
+差し替え前と1バイトも違わず完全に同一：
+
+```
+wifi_scan: esp_wifi_init -> 0
+...
+wifi_scan: esp_wifi_start -> 0
+wifi_scan: esp_wifi_scan_start -> 0
+wifi_scan: 0 APs found (err=0)
+wifi_scan: done
+```
+
+coex実装の違い（実passthrough vs no-op）は，症状に一切影響しない
+ことが実機で確認された．**Check 1の具体的仮説（coexが原因）も
+反証**されたため，コード変更は取り消し（`git checkout --`で
+`esp_wifi_adapter.c`をコミット済み状態へ復元．実機も同コミット
+状態を再書込み済み）．
+
+なお，NuttXのno-op設計自体は「BT/802.15.4非併用ならcoexは無効化
+してよい」という正しい設計判断であり，ASP3も将来的に追従する価値
+はある（今回は原因ではなかったため，独立した改善として次の機会に
+先送り）．
+
+### 結論
+
+これでFableが提示した4段階の仮説（regi2c/RF電源系統＝実施7，
+WIFI_BB/FEクロックゲート＝実施8，env_is_chip，coex＝実施9）を
+すべて実機で反証した．残る道筋は当初案の優先度3どおり，NuttXと
+ASP3で共通のブロブに対するシンボルレベルのハードウェアブレーク
+ポイント段階的絞り込み（`chip_v7_set_chan`→
+`ieee80211_send_probereq`相当→`pp_tx_pkt`/`lmacTxFrame`相当の
+3段階でASP3がどこまで到達するかをNuttXと比較）のみ．
