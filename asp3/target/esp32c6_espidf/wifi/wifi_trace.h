@@ -21,4 +21,12 @@ extern void wifi_trace_push(uint16_t id, uint16_t ctx,
 extern void wifi_trace_dump(void);
 extern void wifi_trace_reset(void);
 
+/*
+ *  DIAGNOSTIC (temporary, Priority 2)：チャネルホップ毎の
+ *  INTMTX/PHY-AGC領域レジスタスナップショット．
+ */
+extern void wifi_regsnap_reset(void);
+extern void wifi_regsnap_dump(void);
+extern void wifi_regsnap_capture(void);
+
 #endif /* WIFI_TRACE_H */

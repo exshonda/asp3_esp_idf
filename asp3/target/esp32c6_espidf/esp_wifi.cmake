@@ -262,6 +262,7 @@ list(APPEND ASP3_LINK_OPTIONS
     -Wl,--wrap=wifi_start_process
     -Wl,--wrap=wifi_set_promis_process
     -Wl,--wrap=register_chipv7_phy
+    -Wl,--wrap=scan_inter_channel_timeout_process
 )
 
 list(APPEND ASP3_LINK_OPTIONS

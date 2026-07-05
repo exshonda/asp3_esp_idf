@@ -132,6 +132,7 @@ main_task(EXINF exinf)
 		(void) esp_wifi_set_promiscuous(false);
 	}
 
+	wifi_regsnap_reset();	/* DIAGNOSTIC (temporary, Priority 2) */
 	err = esp_wifi_scan_start(NULL, false);
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_scan_start -> %d", (int_t)err);
 
@@ -139,6 +140,7 @@ main_task(EXINF exinf)
 		(void) tslp_tsk(1000000);	/* SCAN_DONEを待つ（最大繰返し） */
 	}
 	wifi_trace_dump();	/* DIAGNOSTIC (temporary): scan完了後まで延長して捕捉 */
+	wifi_regsnap_dump();	/* DIAGNOSTIC (temporary, Priority 2) */
 
 	num = 20;
 	recs = (wifi_ap_record_t *)

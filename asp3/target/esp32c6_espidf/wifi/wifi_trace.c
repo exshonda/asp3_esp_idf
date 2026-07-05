@@ -124,7 +124,6 @@ WIFI_TRACE_WRAP4(esf_buf_setup_static, 6)
 WIFI_TRACE_WRAP4(wdev_set_promis, 7)
 WIFI_TRACE_WRAP4(sta_rx_cb, 8)
 WIFI_TRACE_WRAP4(wifi_recycle_rx_pkt, 9)
-WIFI_TRACE_WRAP4(esf_buf_alloc, 10)
 WIFI_TRACE_WRAP4(esf_buf_alloc_dynamic, 11)
 WIFI_TRACE_WRAP4(wdev_data_init, 12)
 WIFI_TRACE_WRAP4(wifi_set_rx_policy, 13)
@@ -136,3 +135,106 @@ WIFI_TRACE_WRAP4(ieee80211_update_phy_country, 18)
 WIFI_TRACE_WRAP4(wifi_start_process, 19)
 WIFI_TRACE_WRAP4(wifi_set_promis_process, 20)
 WIFI_TRACE_WRAP4(register_chipv7_phy, 21)
+
+/*
+ *  DIAGNOSTIC (temporary，Priority 2)：チャネルホップ毎のレジスタ
+ *  スナップショット．INTMTX_STATUS0/1/2（実施6由来）＋PHY/AGC領域
+ *  （0x600a7000〜0x600a7fff．実施2で単発スポット比較したAGC値
+ *  0x600a7128を含む）を，チャネルホップ確定関数
+ *  `scan_inter_channel_timeout_process`（libnet80211.a．
+ *  scan_next_channelへ内部でtail callする）の呼出し毎に採取する．
+ */
+#define WIFI_REGSNAP_SIZE 32
+#define WIFI_PHY_AGC_BASE 0x600a7000UL
+#define WIFI_PHY_AGC_WORDS 1024U	/* 4KB / 4 */
+#define WIFI_PHY_AGC_SPOT_OFF 0x128UL	/* 実施2のAGC値 */
+#define WIFI_INTMTX_S0 0x60010134UL
+#define WIFI_INTMTX_S1 0x60010138UL
+#define WIFI_INTMTX_S2 0x6001013cUL
+
+typedef struct {
+	uint32_t	t_us_low;
+	uint32_t	intmtx0, intmtx1, intmtx2;
+	uint32_t	agc_spot;
+	uint32_t	phy_agc_sum;
+} wifi_regsnap_t;
+
+static wifi_regsnap_t	regsnap[WIFI_REGSNAP_SIZE];
+static uint32_t			regsnap_pos;
+
+void
+wifi_regsnap_reset(void)
+{
+	regsnap_pos = 0U;
+	memset(regsnap, 0, sizeof(regsnap));
+}
+
+void
+wifi_regsnap_capture(void)
+{
+	uint32_t		pos = regsnap_pos++;
+	wifi_regsnap_t	*e = &regsnap[pos % WIFI_REGSNAP_SIZE];
+	volatile uint32_t *base = (volatile uint32_t *)WIFI_PHY_AGC_BASE;
+	uint32_t		sum = 0U;
+	uint32_t		i;
+
+	e->t_us_low = (uint32_t)esp_shim_time_us();
+	e->intmtx0 = *(volatile uint32_t *)WIFI_INTMTX_S0;
+	e->intmtx1 = *(volatile uint32_t *)WIFI_INTMTX_S1;
+	e->intmtx2 = *(volatile uint32_t *)WIFI_INTMTX_S2;
+	e->agc_spot = *(volatile uint32_t *)(WIFI_PHY_AGC_BASE + WIFI_PHY_AGC_SPOT_OFF);
+	for (i = 0U; i < WIFI_PHY_AGC_WORDS; i++) {
+		sum += base[i];
+	}
+	e->phy_agc_sum = sum;
+}
+
+void
+wifi_regsnap_dump(void)
+{
+	uint32_t	total = regsnap_pos;
+	uint32_t	n = (total < WIFI_REGSNAP_SIZE) ? total : WIFI_REGSNAP_SIZE;
+	uint32_t	start = (total < WIFI_REGSNAP_SIZE) ? 0U : (total % WIFI_REGSNAP_SIZE);
+	uint32_t	i, idx;
+
+	syslog(LOG_NOTICE, "wifi_regsnap: total=%d (showing %d)",
+		   (int_t)total, (int_t)n);
+	for (i = 0U; i < n; i++) {
+		idx = (start + i) % WIFI_REGSNAP_SIZE;
+		syslog(LOG_NOTICE, "wifi_regsnap: [%d] t=%d intmtx=%08x/%08x/%08x",
+			   (int_t)i, (int_t)regsnap[idx].t_us_low,
+			   (unsigned int)regsnap[idx].intmtx0,
+			   (unsigned int)regsnap[idx].intmtx1,
+			   (unsigned int)regsnap[idx].intmtx2);
+		syslog(LOG_NOTICE, "wifi_regsnap:   agc_spot=%08x phy_agc_sum=%08x",
+			   (unsigned int)regsnap[idx].agc_spot,
+			   (unsigned int)regsnap[idx].phy_agc_sum);
+	}
+}
+
+extern long __real_scan_inter_channel_timeout_process(long a0, long a1, long a2, long a3);
+long
+__wrap_scan_inter_channel_timeout_process(long a0, long a1, long a2, long a3)
+{
+	long	ret = __real_scan_inter_channel_timeout_process(a0, a1, a2, a3);
+	wifi_regsnap_capture();
+	return(ret);
+}
+
+/*
+ *  DIAGNOSTIC (temporary，Priority 2)：esf_buf_alloc（プールID a1=2＝
+ *  スキャン中のチャネル毎バッファ）呼出しの度にレジスタスナップ
+ *  ショットを採取する．実測でscan_inter_channel_timeout_processは
+ *  一度も呼ばれない（実施19参照）ため，代わりにこちらを起点にする．
+ */
+extern long __real_esf_buf_alloc(long a0, long a1, long a2, long a3);
+long
+__wrap_esf_buf_alloc(long a0, long a1, long a2, long a3)
+{
+	long	ret = __real_esf_buf_alloc(a0, a1, a2, a3);
+	wifi_trace_push(10U, 0U, (uintptr_t)a0, (uintptr_t)a1, (uintptr_t)ret);
+	if (a1 == 2) {
+		wifi_regsnap_capture();
+	}
+	return(ret);
+}
