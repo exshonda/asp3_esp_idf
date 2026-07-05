@@ -1852,3 +1852,140 @@ NuttX側に同一の`--wrap`セット（`wifi_hw_start`・`wifi_start_process`
 （`g_ic[497]`・`g_wifi_nvs`先頭バイト）が何が違うかを直接比較する
 ことのみ．** ASP3単独でのこれ以上の深掘りは，ツール（デコンパイラ
 等）なしでは収穫逓減と判断する．
+
+## 実施15：NuttX側に同一`--wrap`トレースを適用 → `wifi_hw_start`理論を反証，真の分岐点を特定
+
+コーディネータ指示どおり，実施12〜14でASP3に適用した20シンボルの
+`--wrap`セットを，同一blob（`libpp.a`/`libnet80211.a`）を使う
+NuttXビルド（`/home/honda/.claude/jobs/494f98a3/tmp/nuttx-c6/`）へ
+そのまま適用した．
+
+### 実装
+
+- `arch/risc-v/src/esp32c6/esp_wifi_trace.c`（新規）：ASP3の
+  `wifi_trace.c`と同構造（リングバッファ512件）だが，`syslog`では
+  なく`printf`+`fflush`（`wlerr`/`wlinfo`はこの構成で無効化される
+  ため）．`g_ic`/`g_wifi_nvs`はハードコードアドレスではなく
+  `extern uint8_t g_ic[]; extern void *g_wifi_nvs;`と直接シンボル
+  参照（同一blobなのでシンボル名は共通．リンクアドレスだけが
+  ビルドごとに異なるため）．
+- `arch/risc-v/src/esp32c6/Make.defs`：`CONFIG_ESPRESSIF_WIFI`
+  ブロック内に`CHIP_CSRCS += esp_wifi_trace.c`と`LDFLAGS +=
+  --wrap=<sym>`を20行追加（同ファイル内に`--wrap=bootloader_
+  print_banner`という先例が既にあり，NuttXのMakeビルドが`LDFLAGS`
+  経由の`--wrap`を素で（`-Wl,`prefixなしで）受け付けることを確認
+  した上で追加）．
+- `arch/risc-v/src/common/espressif/esp_wifi_api.c`：
+  `esp_wifi_api_adapter_init()`（`esp_wifi_init`＋
+  `esp_wifi_set_mode(NULL)`を行う関数）と`esp_wifi_api_start()`
+  （実際のmode設定＋`esp_wifi_start()`を行う関数）に
+  `wifi_trace_reset()`／`wifi_trace_peek_state("post-init"
+  /"post-set_mode_null"/"post-set_mode"/"post-start")`／
+  `wifi_trace_dump()`を，ASP3の`wifi_scan.c`と対応する地点に挿入．
+- `arch/risc-v/src/common/espressif/esp_wifi_utils.c`：
+  `esp_wifi_start_scan()`内（既存の実施6由来のINTMTX busy-poll
+  診断コードの直後）に`wifi_trace_dump()`を追加し，スキャン中の
+  イベントも捕捉．
+
+`make CROSSDEV=...`で再ビルド・実機（`/dev/ttyACM0`）へ書込み・
+`wapi scan wlan0`実行．
+
+### 結果1：`esp_wifi_init`→`set_mode`→`esp_wifi_start`まではASP3と完全に同一
+
+```
+post-init         g_ic[497]=1 g_ic[499]=0  nvs[0]=2
+post-set_mode_null g_ic[497]=1 g_ic[499]=0  nvs[0]=0
+post-set_mode(STA) g_ic[497]=1 g_ic[499]=0  nvs[0]=1
+post-start         g_ic[497]=2 g_ic[499]=0  nvs[0]=1
+
+トレース：esf_buf_setup → esf_buf_alloc×4(a1=5) → wDev_Rxbuf_Init(a0=10)
+→ ieee80211_set_hmac_stop×2(ret=1) → wifi_set_rx_policy(a0=0,ret=1)
+→ wifi_mode_set(a0=1,ret=0) → wifi_set_rx_policy(a0=1,ret=1)
+→ ieee80211_update_phy_country(ret=0) → wifi_start_process(ret=0)
+```
+
+**この時点で`wifi_hw_start`は一度も現れない．** これはASP3の実施13
+キャプチャと呼び出し順・引数・戻り値まで完全一致する．
+
+**つまり`wifi_hw_start`が「呼ばれない」ことは，NuttX（実機でAP検出
+に成功する構成）でも全く同じであり，これは異常でも何でもなく，
+init/start段階の正常な振る舞いだった．「wifi_hw_startが呼ばれて
+いないことが根本原因」という仮説（実施12〜14）はこれで反証
+される．**
+
+### 結果2：スキャン中，NuttXは`sta_rx_cb`（RX受信コールバック）が実際に発火する ── ASP3は依然として一切発火しない
+
+`wapi scan wlan0`実行中のトレース（抜粋）：
+
+```
+[13] wifi_set_rx_policy a0=3           （スキャン開始）
+[14] esf_buf_alloc a1=2
+[15] esf_buf_alloc a1=8   ← 新規プールID！
+[16] sta_rx_cb    a0=40830ee0          ← 受信コールバック発火！
+[17] esf_buf_alloc a1=2
+[18] esf_buf_alloc a1=8
+[19] sta_rx_cb
+[20] esf_buf_alloc a1=8
+[21] sta_rx_cb
+[22]-[25] esf_buf_alloc a1=2（チャネルホップ×4）
+[26] esf_buf_alloc a1=8
+[27] sta_rx_cb
+[28] esf_buf_alloc a1=8
+[29] sta_rx_cb
+[30]-[34] esf_buf_alloc a1=2（チャネルホップ×5）
+[35] wifi_set_rx_policy a0=4           （スキャン終了）
+```
+
+同時に取得した`DIAG intmtx`（実施6由来）：
+`status0_or=0x00000001`（MAC割込み実際に発火．ASP3は終始0x0）．
+
+**`esf_buf_alloc`のプールID`a1=8`（RX受信バッファ）と`sta_rx_cb`
+（受信コールバック）が，スキャン中に計5回発火している．ASP3側の
+同一区間キャプチャ（実施14）には，この2つが1回も現れない．**
+
+### 反証実験：`esp_wifi_scan_start(NULL, false)` → 明示的`wifi_scan_config_t`への変更（効果なし）
+
+NuttXは`esp_wifi_scan_start()`に常に非NULL（`kmm_calloc`＋
+`scan_type=WIFI_SCAN_TYPE_ACTIVE`明示設定）の設定を渡すのに対し，
+ASP3の`wifi_scan.c`は`NULL`を渡していた（ヘッダのドキュメント上は
+NULL＝同等のデフォルトのはずだが，念のため実験）．ASP3側を
+NuttXと同じ明示的構造体（`scan_type=WIFI_SCAN_TYPE_ACTIVE`，他
+`memset`で0）に変更し実機再検証したが，**結果は1バイトも変わらず
+`a1=8`/`sta_rx_cb`とも未発火のまま**．この仮説も反証されたため
+変更は取り消した（コミット差分なし）．
+
+### 結論
+
+- `esf_buf_alloc(a1=8)`＋`sta_rx_cb`は，実際に受信した生フレームを
+  MAC割込みハンドラ経由で処理する際に確保・呼び出される，**RX
+  パイプラインの「本体」**である可能性が高い．これが一度も発火
+  しないのは，独立したバグというより，**MAC RX割込みそのものが
+  一度も上がらない（INTMTX_STATUS0終始0）という，実施6以来
+  確立している事実の，より下流での再確認**と見るのが妥当．
+- ソフトウェア呼び出しグラフ（`esp_wifi_init`→`set_mode`→
+  `esp_wifi_start`→スキャン全体）は，呼び出し順・引数・戻り値まで
+  **NuttXと完全に同一**であることが今回確定した．これは大きな
+  前進で，残る差分の候補を大幅に絞り込む：
+  1. ラップした関数**内部**で，さらなる関数呼び出しを経由せず
+     直接レジスタを叩いている箇所（命令レベルトレースでしか
+     見えない）．
+  2. 割込みコントローラ（INTMTX/PLIC_MX）の設定状態そのもの
+     （実施6で静的比較済みだが，スキャン実行中という条件下では
+     未比較の可能性が残る）．
+  3. 純粋なタイミング／レース条件．
+
+### 申し送り
+
+これは非常に長期にわたる調査の末に到達した，きわめて狭い残存
+ギャップである．ソフトウェア呼び出しグラフの一致がここまで確認
+できた以上，ASP3側だけでのさらなる深掘りは，命令レベルの実機
+トレース（本ボードのJTAG/コンソール排他制約下では実現が難しい
+ことが実施13で判明済み）か，何らかの形でのデコンパイラ導入なしに
+は限界と判断する．コーディネータの原案どおり，「ここで一旦精密な
+現状報告として区切る」のが適切な局面と考える．
+
+NuttX側の変更（`esp_wifi_trace.c`新規・`Make.defs`／
+`esp_wifi_api.c`／`esp_wifi_utils.c`の変更）は
+`/home/honda/.claude/jobs/494f98a3/tmp/nuttx-c6/`にのみ存在し
+（asp3_esp_idfリポジトリ外・ジョブ一時領域），再現する場合は本節の
+記述（関数名・挿入位置）を参照して再実装すること．
