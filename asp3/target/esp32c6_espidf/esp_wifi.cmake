@@ -254,6 +254,13 @@ list(APPEND ASP3_LINK_OPTIONS
     -Wl,--wrap=esf_buf_alloc_dynamic
     -Wl,--wrap=wdev_data_init
     -Wl,--wrap=wifi_set_rx_policy
+    -Wl,--wrap=adc2_wifi_acquire
+    -Wl,--wrap=ieee80211_set_hmac_stop
+    -Wl,--wrap=wifi_mode_set
+    -Wl,--wrap=_do_wifi_start
+    -Wl,--wrap=ieee80211_update_phy_country
+    -Wl,--wrap=wifi_start_process
+    -Wl,--wrap=wifi_set_promis_process
 )
 
 list(APPEND ASP3_LINK_OPTIONS

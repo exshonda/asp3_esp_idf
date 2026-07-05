@@ -62,6 +62,13 @@ wifi_trace_name(uint16_t id)
 	case 11: return("esf_buf_alloc_dynamic");
 	case 12: return("wdev_data_init");
 	case 13: return("wifi_set_rx_policy");
+	case 14: return("adc2_wifi_acquire");
+	case 15: return("ieee80211_set_hmac_stop");
+	case 16: return("wifi_mode_set");
+	case 17: return("_do_wifi_start");
+	case 18: return("ieee80211_update_phy_country");
+	case 19: return("wifi_start_process");
+	case 20: return("wifi_set_promis_process");
 	default: return("?");
 	}
 }
@@ -78,10 +85,16 @@ wifi_trace_dump(void)
 		   (int_t)total, (int_t)n, (int_t)WIFI_TRACE_SIZE);
 	for (i = 0U; i < n; i++) {
 		idx = (start + i) % WIFI_TRACE_SIZE;
-		syslog(LOG_NOTICE, "wifi_trace: [%d] t=%d id=%s a0=%08x a1=%08x ret=%08x",
+		/*
+		 *  TOPPERS syslogは1呼出あたりの引数上限がTNUM_LOGPAR=6
+		 *  （t_syslog.h）で，6個ちょうどだと末尾が展開されない
+		 *  （実施12で判明）ため2回に分けて出力する．
+		 */
+		syslog(LOG_NOTICE, "wifi_trace: [%d] t=%d id=%s a0=%08x",
 			   (int_t)i, (int_t)wifi_tr[idx].t_us_low,
 			   wifi_trace_name(wifi_tr[idx].id),
-			   (unsigned int)wifi_tr[idx].a0,
+			   (unsigned int)wifi_tr[idx].a0);
+		syslog(LOG_NOTICE, "wifi_trace:   a1=%08x ret=%08x",
 			   (unsigned int)wifi_tr[idx].a1,
 			   (unsigned int)wifi_tr[idx].ret);
 	}
@@ -114,3 +127,10 @@ WIFI_TRACE_WRAP4(esf_buf_alloc, 10)
 WIFI_TRACE_WRAP4(esf_buf_alloc_dynamic, 11)
 WIFI_TRACE_WRAP4(wdev_data_init, 12)
 WIFI_TRACE_WRAP4(wifi_set_rx_policy, 13)
+WIFI_TRACE_WRAP4(adc2_wifi_acquire, 14)
+WIFI_TRACE_WRAP4(ieee80211_set_hmac_stop, 15)
+WIFI_TRACE_WRAP4(wifi_mode_set, 16)
+WIFI_TRACE_WRAP4(_do_wifi_start, 17)
+WIFI_TRACE_WRAP4(ieee80211_update_phy_country, 18)
+WIFI_TRACE_WRAP4(wifi_start_process, 19)
+WIFI_TRACE_WRAP4(wifi_set_promis_process, 20)

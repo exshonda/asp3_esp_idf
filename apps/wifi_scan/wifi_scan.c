@@ -23,6 +23,36 @@ static volatile bool_t scan_done;
 /* DIAGNOSTIC (temporary, --wrap trace: promiscuous-mode RX test): */
 static volatile uint32_t promisc_rx_count;
 
+/*
+ *  DIAGNOSTIC (temporary): g_ic（libnet80211.aのグローバル状態構造体．
+ *  nmで実機アドレス確認済み＝0x408476b0）のoffset 497/499を直接
+ *  ピークする．wifi_start_process/wifi_set_promis_processが
+ *  wifi_hw_start呼出しをガードする条件がここにある（実施12/13参照）．
+ */
+#define DIAG_G_IC_BASE 0x408476b0UL
+static uint8_t
+diag_g_ic_byte(unsigned int off)
+{
+	return(*(volatile uint8_t *)(DIAG_G_IC_BASE + off));
+}
+
+#define DIAG_G_WIFI_NVS_ADDR 0x40800890UL
+static uint32_t
+diag_wifi_nvs_ptr(void)
+{
+	return(*(volatile uint32_t *)DIAG_G_WIFI_NVS_ADDR);
+}
+
+static uint8_t
+diag_wifi_nvs_byte0(void)
+{
+	uint32_t	p = diag_wifi_nvs_ptr();
+	if (p == 0U) {
+		return(0xEEU);	/* NULLポインタの目印 */
+	}
+	return(*(volatile uint8_t *)p);
+}
+
 static void
 promisc_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 {
@@ -67,13 +97,23 @@ main_task(EXINF exinf)
 	if (err != 0) {
 		return;
 	}
+	syslog(LOG_NOTICE, "wifi_scan: DIAG post-init g_ic[497]=%d g_ic[499]=%d",
+		   (int_t)diag_g_ic_byte(497), (int_t)diag_g_ic_byte(499));
+	syslog(LOG_NOTICE, "wifi_scan: DIAG post-init nvs_ptr=%x nvs[0]=%d",
+		   (int_t)diag_wifi_nvs_ptr(), (int_t)diag_wifi_nvs_byte0());
 
 	(void) esp_wifi_set_mode(WIFI_MODE_STA);
+	syslog(LOG_NOTICE, "wifi_scan: DIAG post-set_mode g_ic[497]=%d g_ic[499]=%d",
+		   (int_t)diag_g_ic_byte(497), (int_t)diag_g_ic_byte(499));
 	(void) esp_wifi_set_storage(WIFI_STORAGE_RAM);
 	(void) esp_wifi_set_ps(WIFI_PS_NONE);
 
 	err = esp_wifi_start();
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_start -> %d", (int_t)err);
+	syslog(LOG_NOTICE, "wifi_scan: DIAG post-start g_ic[497]=%d g_ic[499]=%d",
+		   (int_t)diag_g_ic_byte(497), (int_t)diag_g_ic_byte(499));
+	syslog(LOG_NOTICE, "wifi_scan: DIAG post-start nvs_ptr=%x nvs[0]=%d",
+		   (int_t)diag_wifi_nvs_ptr(), (int_t)diag_wifi_nvs_byte0());
 	if (err != 0) {
 		return;
 	}
@@ -90,7 +130,6 @@ main_task(EXINF exinf)
 		syslog(LOG_NOTICE, "wifi_scan: DIAG promisc_rx_count=%d",
 			   (int_t)promisc_rx_count);
 		(void) esp_wifi_set_promiscuous(false);
-		wifi_trace_dump();
 	}
 
 	err = esp_wifi_scan_start(NULL, false);
@@ -99,6 +138,7 @@ main_task(EXINF exinf)
 	while (!scan_done) {
 		(void) tslp_tsk(1000000);	/* SCAN_DONEを待つ（最大繰返し） */
 	}
+	wifi_trace_dump();	/* DIAGNOSTIC (temporary): scan完了後まで延長して捕捉 */
 
 	num = 20;
 	recs = (wifi_ap_record_t *)

@@ -1691,3 +1691,164 @@ $ objdump -r libnet80211/ieee80211_ioctl.o | grep "R_RISCV_CALL.*wifi_hw_start"
 トレース基盤（`wifi_trace.c`/`.h`・`esp_wifi.cmake`の`--wrap`設定・
 `wifi_scan.c`のプロミスキャステスト）はコミット済み（未push）．
 次回セッションでも再利用できるよう，あえてrevertせず残している．
+
+## 実施13：`wifi_start_process`は「成功」を返しながら`wifi_hw_start`を呼ばずに完了することを確定
+
+前回（実施12）の続きとして，`wifi_start_process`／`wifi_set_promis_process`
+自体・`adc2_wifi_acquire`／`ieee80211_set_hmac_stop`／`wifi_mode_set`／
+`_do_wifi_start`／`ieee80211_update_phy_country`を追加で`--wrap`し
+（計20シンボル），さらに`g_ic`（`0x408476b0`．`nm`で確認）のoffset
+497/499と，`g_wifi_nvs`（`0x40800890`．nvs関連ポインタ変数）が指す
+先の1バイト目を，`esp_wifi_init()`直後・`esp_wifi_set_mode()`直後・
+`esp_wifi_start()`直後の3点でC側から直接ピーク（JTAG不要）する
+診断コードを追加した．またTOPPERS syslogの6引数上限
+（`TNUM_LOGPAR`＝`t_syslog.h`）による`ret`欄未展開バグを，1エントリ
+あたりのログ呼出を2回に分割することで解消した．
+
+### 実機ログ（今回の決定版）
+
+```
+wifi_scan: esp_wifi_init -> 0
+DIAG post-init   g_ic[497]=1 g_ic[499]=0   nvs_ptr=40847fbc nvs[0]=2
+DIAG post-set_mode g_ic[497]=1 g_ic[499]=0
+wifi_scan: esp_wifi_start -> 0
+DIAG post-start  g_ic[497]=2 g_ic[499]=0   nvs_ptr=40847fbc nvs[0]=1
+
+wifi_trace（ret欄も正しく取得）:
+ [6],[7] ieee80211_set_hmac_stop           ret=1  (t=35082,35158)
+ [8]     wifi_set_rx_policy  a0=0          ret=1  (t=119824)
+ [9]     wifi_mode_set       a0=1          ret=0  (t=121797)
+ [10]    wifi_set_rx_policy  a0=1          ret=1  (t=122232)
+ [11]    ieee80211_update_phy_country      ret=0  (t=122496)
+ [12]    wifi_start_process  a0=40803838 a1=8  ret=0  (t=122527)
+ [13]    wdev_set_promis     a0=1          ret=0  (t=126226，esp_wifi_set_promiscuous(true)に対応)
+ [14]    wifi_set_promis_process a0=40803838 a1=8 ret=0 (t=126275)
+ [15][16] wdev_set_promis/wifi_set_promis_process（無効化，3秒後）
+```
+
+`adc2_wifi_acquire`（唯一のWEAKシンボル．他は全てSTRONG=T）・
+`_do_wifi_start`・`wifi_hw_start`は今回も一度も出現しない．
+`wifi_hw_start`・`_do_wifi_start`はSTRONGシンボルであり，同じ関数
+（`wifi_start_process`）内の隣接する`--wrap`（`wifi_mode_set`・
+`ieee80211_update_phy_country`）は正しく捕捉できているため，
+「wrap機構が効いていないだけ」という可能性は排除できる＝**本当に
+呼ばれていない**．
+
+### 確定した事実
+
+1. **`wifi_start_process`は実際に呼ばれ，`ret=0`（成功）を返して
+   正常終了する．** クラッシュでも無限ループでもなく，「関数として
+   正常終了しているが，その中でハードウェア起動（`wifi_hw_start`）
+   だけが行われていない」という状態．
+2. `g_ic[497]`は`esp_wifi_init()`後に1，`esp_wifi_start()`後に2へ
+   遷移する（`wifi_start_process`が自身の完了マーカーとして書き込む
+   値と一致．逆アセンブルで確認した`sb a5,497(s3)`＝`a5=2`のパスに
+   対応）．
+3. `g_wifi_nvs`が指す構造体の1バイト目は，`esp_wifi_init()`後に2，
+   `esp_wifi_start()`後には1へ変化する．この値が`wifi_start_process`
+   内部の分岐条件（s1）に使われている可能性が高いが，**読み出し
+   タイミングの前後関係（wifi_mode_set/ieee80211_update_phy_country
+   が`wifi_start_process`本体より先に呼ばれている＝これらは
+   `wifi_start_process`の内部処理ではなく，呼び出し元の別ステップ
+   であることが今回判明）により，チェック時点の正確な値は特定
+   できていない**．
+4. JTAGでの`wifi_start_process`エントリへのハードウェアブレーク
+   ポイント単一命令ステップは，本ボード特有のJTAG/コンソール排他
+   制約下で試みたが，リセット後のブレークポイントヒット位置が
+   期待値と一致しない不安定な挙動となり，今回は断念した（実機の
+   タイミングに関する既知の制約．`docs/porting/`や過去のBLE調査でも
+   類似の困難が記録されている）．
+
+### 結論・申し送り
+
+`wifi_start_process`が「成功」を返しながら`wifi_hw_start`を一度も
+呼ばずに完了する，という事実は確定した．これは偶発的なエラーでは
+なく，正常系の分岐によるものである可能性が高い（TX/RXが完全に
+沈黙しているのに全APIが成功を返す，という現象全体と整合する）．
+
+次の一手（優先順）：
+1. **同一の`--wrap`セット（20シンボル）をNuttXビルドへ適用**し，
+   同じ地点（`esp_wifi_init`→`set_mode`→`esp_wifi_start`）で
+   `wifi_hw_start`が実際に呼ばれるかどうか・`g_ic[497]`と
+   `g_wifi_nvs`先頭バイトの値がASP3と何が違うかを直接比較する
+   （今回はASP3側のみ．コーディネータの原案どおり，次はNuttX側）．
+2. あるいは，`wifi_hw_start`が「別のイベント（scan開始・接続開始等）
+   をトリガに後から呼ばれる」設計である可能性も残る．
+   `esp_wifi_scan_start()`実行中も同じ`--wrap`トレースを継続
+   （現状のコードは`wifi_trace_dump()`をscan開始前に呼んでいるため，
+   scan中のイベントは捕捉できていない．`wifi_trace_dump()`を
+   scan完了後に移動して再検証する価値がある）．
+3. JTAG単一命令ステップは，タイミングの制約が緩和される条件
+   （例：起動直後にあえて`tslp_tsk()`で長時間停止させ，その間に
+   JTAGアタッチ・ブレークポイント設置・resumeする，など）を
+   見直せば再挑戦の余地がある．
+
+トレース基盤・診断ピークコードは全てコミット済み（未push）で
+維持している．
+
+## 実施14：`wifi_trace_dump()`をscan完了後まで延長 → スキャン中も`wifi_hw_start`は一度も呼ばれないことを確認（チャネル毎の`esf_buf_alloc`は継続）
+
+実施13の申し送り事項2（トレース捕捉範囲をscan完了後まで延長）を
+即座に実施．`wifi_trace_dump()`の呼び出し位置を，プロミスキャス
+テスト直後から`esp_wifi_scan_start()`実行→`SCAN_DONE`待ち後へ移動．
+
+### 結果：スキャン中の挙動が判明
+
+```
+[17] t=3128377  wifi_set_rx_policy a0=3            ret=1  （スキャン開始．新しいpolicy値=3）
+[18] t=3129446  esf_buf_alloc      a1=2  ret=4080acf8
+[19] t=3253674  esf_buf_alloc      a1=2  ret=4080adf0   （+124228us）
+[20] t=3376165  esf_buf_alloc      a1=2  ret=4080af08   （+122491us）
+[21] t=3498408  esf_buf_alloc      a1=2  ret=4080acf8   （+122243us）
+[22] t=3620697  esf_buf_alloc      a1=2  ret=4080ae00   （+122289us）
+[23] t=3742757  esf_buf_alloc      a1=2  ret=4080acf8   （+122060us）
+[24] t=3865172  esf_buf_alloc      a1=2  ret=4080af18   （+122415us）
+[25] t=3987210  esf_buf_alloc      a1=2  ret=4080acf8   （+122038us）
+[26] t=4109966  esf_buf_alloc      a1=2  ret=4080ae00   （+122756us）
+[27] t=4231765  esf_buf_alloc      a1=2  ret=4080acf8   （+121799us）
+[28] t=4353445  esf_buf_alloc      a1=2  ret=4080af18   （+121680us）
+[29] t=5557186  wifi_set_rx_policy a0=4            ret=1  （スキャン終了．policy値=4）
+```
+
+`esf_buf_alloc`（プールID＝a1=2．初期化時のa1=5とは別プール）が
+**約122ms間隔で11回**（チャネル1〜11の2.4GHz全チャネル数と一致）
+呼ばれ続けている．これはスキャンのチャネルホップ機構自体は
+タイマ駆動で正常に動作し続けている証拠．`ret`は数個の固定アドレス
+（`4080acf8`/`4080ae00`/`4080af18`等）を使い回しており，小さな
+バッファプールを再利用している挙動と一致（クラッシュや無限ループは
+していない）．
+
+**しかし`wifi_hw_start`・`_do_wifi_start`・`sta_rx_cb`・
+`wifi_recycle_rx_pkt`は，このチャネルホップの間も含め，スキャン
+開始から完了まで一度も呼ばれない．**
+
+### 最終結論
+
+- ASP3のC6 Wi-Fiは，`esp_wifi_init`→`esp_wifi_set_mode`→
+  `esp_wifi_start`→（プロミスキャス）→`esp_wifi_scan_start`→
+  11チャネル分の待機→`SCAN_DONE`という**ソフトウェア側の状態機械は
+  完全に正常に，タイマ駆動で最後まで動く**．
+- しかしこの全区間を通じて，`wifi_hw_start`（文字通り「Wi-Fi
+  ハードウェアを起動する」関数）は**一度も呼ばれない**．
+- `wifi_start_process`（`esp_wifi_start()`の内部ハンドラ）は実際に
+  呼ばれ，`ret=0`（成功）で正常終了する．クラッシュでも無限ループ
+  でもなく，「正常系の分岐として`wifi_hw_start`を呼ばない経路を
+  通っている」という状態．
+- これは，これまでの全観測（sniffer実験でTX電波皆無・
+  INTMTX_STATUS0終始0・プロミスキャスモードでRX0件・今回のスキャン
+  でAP0件）を単一の具体的なメカニズムで完全に説明する．
+
+ASP3側の静的・動的解析（`nm`/`objdump -r`による呼び出し元特定，
+`--wrap`によるライブトレース，`g_ic`/`g_wifi_nvs`の直接ピーク）は
+実質的にやり尽くした．逆アセンブルだけでは`wifi_start_process`内部の
+正確な分岐条件（S1相当のレジスタが実際にどの値を取り，どちらの
+分岐を通っているか）を確定できず，本ボード特有のJTAG/コンソール
+排他制約下でのライブ単一命令ステップも今回は安定しなかった．
+
+**残された最も直接的な次の一手は，コーディネータの原案どおり
+NuttX側に同一の`--wrap`セット（`wifi_hw_start`・`wifi_start_process`
+・`wifi_mode_set`等，計20シンボル）を適用し，同じ地点で
+`wifi_hw_start`が実際に呼ばれるか，呼ばれる場合とASP3の状態
+（`g_ic[497]`・`g_wifi_nvs`先頭バイト）が何が違うかを直接比較する
+ことのみ．** ASP3単独でのこれ以上の深掘りは，ツール（デコンパイラ
+等）なしでは収穫逓減と判断する．
