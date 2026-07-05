@@ -29,7 +29,7 @@ static volatile uint32_t wifi_tr_pos;
  *  カウントする軽量版．IDあたり1ワードのみ，ダンプ時に
  *  非ゼロのものだけ数行で出力する．
  */
-#define WIFI_TRACE_MAXID 40
+#define WIFI_TRACE_MAXID 44
 static volatile uint32_t wifi_tr_count[WIFI_TRACE_MAXID];
 static const char *wifi_trace_name(uint16_t id);
 
@@ -117,6 +117,10 @@ wifi_trace_name(uint16_t id)
 	case 37: return("i2cmst_reg_init");
 	case 38: return("rxiq_cal_init");
 	case 39: return("set_rx_gain_cal_dc_new");
+	case 40: return("coex_init");
+	case 41: return("coex_schm_process_restart");
+	case 42: return("coex_schm_lock_ENTER");
+	case 43: return("coex_schm_interval_get_ENTER");
 	default: return("?");
 	}
 }
@@ -206,6 +210,43 @@ WIFI_TRACE_WRAP4(restart_cal, 36)
 WIFI_TRACE_WRAP4(i2cmst_reg_init, 37)
 WIFI_TRACE_WRAP4(rxiq_cal_init, 38)
 WIFI_TRACE_WRAP4(set_rx_gain_cal_dc_new, 39)
+WIFI_TRACE_WRAP4(coex_init, 40)
+WIFI_TRACE_WRAP4(coex_schm_process_restart, 41)
+
+/*
+ *  DIAGNOSTIC（実施21続き）：`coex_schm_lock`はROM内部で
+ *  `coex_schm_env_ptr`（NULLだとクラッシュ）を無条件に参照するため，
+ *  呼出し**前**にもpushする（内部でクラッシュしても「呼ばれたこと」
+ *  自体はカウンタに残る．通常のWIFI_TRACE_WRAP4は戻り値を待って
+ *  からpushするためクラッシュ時は記録されない）．
+ */
+extern long __real_coex_schm_lock(long a0, long a1, long a2, long a3);
+long
+__wrap_coex_schm_lock(long a0, long a1, long a2, long a3)
+{
+	extern void *coex_schm_env_ptr;
+
+	wifi_trace_push(42U, 0U, (uintptr_t)a0, (uintptr_t)coex_schm_env_ptr, 0xEEEEEEEEUL);
+	{
+		long ret = __real_coex_schm_lock(a0, a1, a2, a3);
+		wifi_trace_push(42U, 1U, (uintptr_t)a0, (uintptr_t)coex_schm_env_ptr, (uintptr_t)ret);
+		return(ret);
+	}
+}
+
+extern long __real_coex_schm_interval_get(long a0, long a1, long a2, long a3);
+long
+__wrap_coex_schm_interval_get(long a0, long a1, long a2, long a3)
+{
+	extern void *coex_schm_env_ptr;
+
+	wifi_trace_push(43U, 0U, (uintptr_t)a0, (uintptr_t)coex_schm_env_ptr, 0xEEEEEEEEUL);
+	{
+		long ret = __real_coex_schm_interval_get(a0, a1, a2, a3);
+		wifi_trace_push(43U, 1U, (uintptr_t)a0, (uintptr_t)coex_schm_env_ptr, (uintptr_t)ret);
+		return(ret);
+	}
+}
 
 /*
  *  DIAGNOSTIC (temporary，Priority 2)：チャネルホップ毎のレジスタ

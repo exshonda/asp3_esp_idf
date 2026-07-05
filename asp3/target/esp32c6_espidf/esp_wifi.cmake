@@ -281,6 +281,10 @@ list(APPEND ASP3_LINK_OPTIONS
     -Wl,--wrap=i2cmst_reg_init
     -Wl,--wrap=rxiq_cal_init
     -Wl,--wrap=set_rx_gain_cal_dc_new
+    -Wl,--wrap=coex_init
+    -Wl,--wrap=coex_schm_process_restart
+    -Wl,--wrap=coex_schm_lock
+    -Wl,--wrap=coex_schm_interval_get
 )
 
 list(APPEND ASP3_LINK_OPTIONS
