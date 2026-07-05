@@ -2270,3 +2270,178 @@ NuttXと一致するにもかかわらず，PHYチップの中身（AGC/BB/FE回
 報告である：**どこで**（PHY/AGCレジスタ）・**何が**（ASP3では
 凍結・NuttXでは活発）異なるかは完全に特定できたが，**なぜ**
 （どの初期化ステップが欠けているか）は依然未解明．
+
+## 実施20：Priority 2続き（regi2c/ROM常駐PHY関数トレース）— 「決定的な分岐発見」を自己訂正，結論は実施19のみが生存
+
+セカンドオピニオン（Fable＋codex）から，実施19のPHY/AGC凍結所見を
+受けた新ラウンドの4優先度（1＝標準ブートローダA/B・2＝regi2c書込み
+ログ・3＝PHY初期化データ比較・4＝セクション初期化監査）が来た．
+本ラウンドでは優先度2（regi2c書込み・ROM常駐PHY関数の呼出しトレース）
+に着手し，途中で**一度「決定的な新発見」と誤認した箇所を，同じ
+セッション内でJTAGによる再検証により自己訂正した**．経緯を正直に
+記録する．
+
+### 誤った「発見」：`chip_v7_set_chan_ana`がASP3では一度も呼ばれない（→誤り）
+
+`esp32c6.rom.phy.ld`から，`libphy.a`が実際に未解決参照している
+ROM常駐PHY関数（`nm`の`U`シンボルとの突合せで確認）を16個選び，
+既存の`--wrap`基盤に追加した：`chip_v7_set_chan_ana`・
+`set_channel_rfpll_freq`・`set_rfpll_freq`・`write_rfpll_sdm`・
+`wait_rfpll_cal_end`・`enable_agc`・`disable_agc`・`mac_enable_bb`・
+`fe_reg_init`・`fe_txrx_reset`・`phy_bbpll_cal`・`set_rxclk_en`・
+`set_txclk_en`・`write_chan_freq`・`restart_cal`・`i2cmst_reg_init`
+（後に`rxiq_cal_init`・`set_rx_gain_cal_dc_new`も追加，計39シンボル）．
+
+ASP3実機での**syslogベースの詳細トレースダンプ**（`wifi_trace_dump()`）
+を見ると，`chip_v7_set_chan_ana`・`mac_enable_bb`・`fe_reg_init`・
+`i2cmst_reg_init`・`rxiq_cal_init`・`set_rx_gain_cal_dc_new`・
+`set_rfpll_freq`が**一度も出現しない**ように見えた．同一トレースを
+NuttXに適用すると，これらが複数回（`chip_v7_set_chan_ana`は20回等）
+出現した．さらに逆アセンブルで`rxiq_cal_init`冒頭に
+`phy_param+164`のbit10（0x400）による早期return分岐を発見し，
+「この分岐でASP3側だけRX-IQ較正がスキップされている」という
+一見筋の通った仮説を立てた．**この時点でユーザに「調査全体で
+最も具体的な手がかり」と報告した．**
+
+### 反証：`phy_param+164`は両プラットフォームで完全に同一値
+
+しかし`phy_param+164`の実測値をASP3・NuttX双方で確認したところ，
+**`0x0190d6a8`（bit10セット済み）で完全に一致**しており，スキャン中
+の全11チャネルにわたり両者とも一切変化しなかった（`wifi_regsnap_t`に
+`phy_param_flags`フィールドを追加して`esf_buf_alloc`起点で採取）．
+分岐条件そのものは両者で同じ状態であり，これだけでは
+`chip_v7_set_chan_ana`の呼出し有無を説明できないことが判明．
+
+### 真因：syslogのバースト・ロス（ASP3側トレースが実は不完全だった）
+
+`wifi_trace_dump()`のダンプ出力に`total=`ヘッダ行自体が欠落したり，
+「**469 messages are lost**」という損失通知が出現するケースを複数回
+確認した．一方NuttX側の同等ログには損失通知が皆無だった．これは
+ASP3側のsyslog経由の詳細トレースダンプが，**スキャン処理自体が
+生成する大量の診断出力（WIFI_EVENT等）とキューを奪い合い，
+バーストで大量に欠落する**という，本調査と無関係な既知の問題
+（`docs/wifi-shim-c6.md`内の「TNUM_LOGPAR=6」問題とは別）による
+ものであり，「一度も呼ばれない」という結論はこの**欠落の結果生じた
+見せかけ**だったと判明した．
+
+### 修正：JTAGによる呼出し回数カウンタの直接読み出し（serial非依存）
+
+シリアル/syslog経由の詳細ダンプが信頼できないため，`wifi_trace.c`に
+ID別の呼出し回数だけを保持する軽量カウンタ配列
+（`wifi_tr_count[40]`，`WIFI_TRACE_MAXID=40`）を追加し，OpenOCD
+（`adapter serial <MAC>`でC6実機を明示指定）経由で
+`mdw <wifi_tr_countのアドレス> 40`により直接メモリダンプで読み出した
+（シリアル出力を一切経由しないため，バースト・ロスの影響を受けない）．
+
+**ASP3実機（1スキャンサイクル，JTAG直読み）**：
+
+| 関数 | 回数 |
+|---|---|
+| register_chipv7_phy | 1 |
+| chip_v7_set_chan_ana | 10 |
+| set_channel_rfpll_freq | 27 |
+| set_rfpll_freq | 3 |
+| enable_agc | 17 |
+| disable_agc | 16 |
+| mac_enable_bb | 2 |
+| fe_reg_init | 1 |
+| phy_bbpll_cal | 34 |
+| set_rxclk_en | 54 |
+| set_txclk_en | 68 |
+| i2cmst_reg_init | 1 |
+| rxiq_cal_init | 1 |
+| set_rx_gain_cal_dc_new | 3 |
+
+**NuttX（同一`--wrap`シンボル，serial経由．`register_chipv7_phy`が
+2回＝2スキャンサイクル分が累積）との比率**：
+
+`register_chipv7_phy`・`chip_v7_set_chan_ana`・`set_rfpll_freq`・
+`mac_enable_bb`・`fe_reg_init`・`i2cmst_reg_init`・`rxiq_cal_init`・
+`set_rx_gain_cal_dc_new`は**全て正確に2.00倍**（＝1スキャンサイクル
+あたりで完全一致）．一方`set_channel_rfpll_freq`（1.48倍）・
+`enable_agc`（1.18倍）・`disable_agc`（1.12倍）・`phy_bbpll_cal`
+（1.18倍）・`set_rxclk_en`（1.48倍）・`set_txclk_en`（1.59倍）は
+チャネル毎に発火する関数であり，各実行で捕捉したチャネル数の違いに
+起因すると考えられる非整数比（=実データとして無矛盾）．
+
+**結論**：39個の`--wrap`対象シンボル全てについて，ROM常駐PHY関数の
+呼出し有無・回数はASP3・NuttXで（1初期化サイクルあたり）**完全に
+一致**する．実施15〜18で確立した「ソフトウェア呼出しグラフは一致」
+という所見は，ROM常駐PHY内部の較正・RF-PLL・regi2c周辺関数という
+より深い粒度まで拡張して再確認された．**先に報告した
+「`chip_v7_set_chan_ana`がASP3で一度も呼ばれない」という発見は誤りであり，
+撤回する．**
+
+### 生存する結論：実施19のPHY/AGCレジスタ凍結のみが唯一の確定済み乖離
+
+実施19のレジスタスナップショット（`agc_spot`・`phy_agc_sum`）は
+**JTAG不要・regsnap全11エントリが完全に出力**されており（バースト・
+ロスの影響を受けていない），本ラウンドの訂正によって揺らがない．
+現時点でこの調査全体を通じて確定している乖離は依然として
+**実施19の1件のみ**：ソフトウェア呼出しグラフ（引数・戻り値・
+呼出し回数を含め，ROM常駐PHY関数まで含めて）は完全に一致するが，
+PHY/AGCレジスタの実ハードウェア挙動（ASP3では凍結・NuttXでは
+チャネル毎に変動）だけが異なる．
+
+### 方法論上の教訓：syslogベースの「一度も発火しない」という結論は要検証
+
+本調査で**2回目**の「不完全な観測に基づく誤った発見」が発生した
+（1回目は実施10の`CONFIG_IDF_TARGET_ESP32C6`「ABIバグ」誤認）．
+syslogトレースダンプは高負荷時（スキャン処理自体の診断出力と
+競合時）にバーストで大量に行を欠落させることがあり，`total=`
+ヘッダ行や個々のエントリが無警告で消えることがある．**「trace上に
+出現しない＝実際に呼ばれていない」と断定する前に，ロスレスな
+経路（本件ではJTAGによるメモリ直読み，カウンタ配列方式）で
+裏付けを取ること．**
+
+### 優先度1（標準ブートローダA/B）：フィージビリティ調査の結果と設計上の分岐点
+
+実行はせず，フィージビリティのみ調査した．`/home/honda/tools/esp-idf`
+に本物のESP-IDF v5.5一式（`idf.py`含む）が存在し，2ndステージ
+ブートローダの`call_start_cpu0()`（`components/bootloader/subproject/
+main/bootloader_start.c`）には`bootloader_after_init()`という
+**weak関数フック**が用意されている（`custom_bootloader`example向け）．
+これを使えば，本物のブートローダの`bootloader_init()`（クロック／PMU
+／regi2c常時オン設定等の実ハードウェア初期化）を実行させた直後に，
+パーティションテーブル読込み等（ASP3のDirect Bootイメージ形式とは
+非互換）を一切経由せず，直接ASP3のエントリポイントへ分岐させる
+ことが，原理的には比較的小さな変更で可能に見えた．
+
+しかし，**`bootloader_init()`完了後のflash cache/MMUマッピングは
+ブートローダ自身のレイアウト向けに設定されており，ASP3のDirect
+Boot（flash先頭から直接XIP実行）が前提とするマッピングとは異なる**．
+フック経由でASP3のXIPエントリへ単純分岐すると，誤った命令列を
+フェッチする可能性が高い．よって優先度1には設計上の分岐がある：
+
+- (a) フック内でDirect Boot相当のcache/MMUマッピングを追加で
+  再現してから分岐する（比較的小さな変更に見えるが，状態不整合の
+  デバッグに時間を要するリスクあり）．
+- (b) ASP3のビルド出力を正式な`esp_image_header_t`形式のapp imageに
+  変換し，実パーティションテーブル経由で本物のブートローダに正規に
+  ロードさせる（手戻りは大きいが，クリーンで決定的）．
+
+どちらを取るかはコーディネータ／セカンドオピニオンへの申し送り事項
+とし，本ラウンドでは実行していない．
+
+### 変更ファイル
+
+- `asp3/target/esp32c6_espidf/wifi/wifi_trace.c`／`.h`：ROM常駐PHY
+  関数18個の`--wrap`トレース追加（永続インフラとして維持）．
+  `wifi_regsnap_t`に`phy_param_flags`フィールド追加．軽量呼出し
+  カウンタ（`wifi_tr_count[40]`・`wifi_trace_dump_counts()`）追加．
+- `asp3/target/esp32c6_espidf/esp_wifi.cmake`：対応する
+  `-Wl,--wrap=`フラグ18行追加．
+- `apps/wifi_scan/wifi_scan.c`：一時的な`phy_param+164`単発ピーク
+  （regsnapに統合されたため冗長）を追加後にrevert．
+- NuttX側（`/home/honda/.claude/jobs/494f98a3/tmp/nuttx-c6/`．
+  job-scratch，asp3_coreリポジトリ外）：同一の18シンボル`--wrap`と
+  `phy_param_flags`フィールドを追加．
+
+### 検証
+
+- ASP3実機（`/dev/ttyACM0`）：cmake buildクリーン，`test_porting`等の
+  回帰は本ラウンドでは未実行（Wi-Fi診断専用ビルドのため対象外）．
+  JTAGによる`wifi_tr_count[40]`直読み（`mdw 0x40832e88 40`）で
+  上記表の値を確認．
+- NuttX（同一実機で入替えフラッシュ）：serial経由のトレースダンプ
+  （損失通知なし）で確認．

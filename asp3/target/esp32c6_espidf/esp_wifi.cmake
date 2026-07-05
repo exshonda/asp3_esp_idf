@@ -263,6 +263,24 @@ list(APPEND ASP3_LINK_OPTIONS
     -Wl,--wrap=wifi_set_promis_process
     -Wl,--wrap=register_chipv7_phy
     -Wl,--wrap=scan_inter_channel_timeout_process
+    -Wl,--wrap=chip_v7_set_chan_ana
+    -Wl,--wrap=set_channel_rfpll_freq
+    -Wl,--wrap=set_rfpll_freq
+    -Wl,--wrap=write_rfpll_sdm
+    -Wl,--wrap=wait_rfpll_cal_end
+    -Wl,--wrap=enable_agc
+    -Wl,--wrap=disable_agc
+    -Wl,--wrap=mac_enable_bb
+    -Wl,--wrap=fe_reg_init
+    -Wl,--wrap=fe_txrx_reset
+    -Wl,--wrap=phy_bbpll_cal
+    -Wl,--wrap=set_rxclk_en
+    -Wl,--wrap=set_txclk_en
+    -Wl,--wrap=write_chan_freq
+    -Wl,--wrap=restart_cal
+    -Wl,--wrap=i2cmst_reg_init
+    -Wl,--wrap=rxiq_cal_init
+    -Wl,--wrap=set_rx_gain_cal_dc_new
 )
 
 list(APPEND ASP3_LINK_OPTIONS

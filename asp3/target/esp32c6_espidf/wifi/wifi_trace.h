@@ -19,6 +19,7 @@ typedef struct {
 extern void wifi_trace_push(uint16_t id, uint16_t ctx,
 							 uintptr_t a0, uintptr_t a1, uintptr_t ret);
 extern void wifi_trace_dump(void);
+extern void wifi_trace_dump_counts(void);
 extern void wifi_trace_reset(void);
 
 /*

@@ -139,6 +139,7 @@ main_task(EXINF exinf)
 	while (!scan_done) {
 		(void) tslp_tsk(1000000);	/* SCAN_DONEを待つ（最大繰返し） */
 	}
+	wifi_trace_dump_counts();	/* DIAGNOSTIC（実施20）：syslogバースト・ロス回避のため先に集計版 */
 	wifi_trace_dump();	/* DIAGNOSTIC (temporary): scan完了後まで延長して捕捉 */
 	wifi_regsnap_dump();	/* DIAGNOSTIC (temporary, Priority 2) */
 

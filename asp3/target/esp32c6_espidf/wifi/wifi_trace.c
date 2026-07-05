@@ -22,11 +22,23 @@
 static wifi_trace_t	wifi_tr[WIFI_TRACE_SIZE];
 static volatile uint32_t wifi_tr_pos;
 
+/*
+ *  DIAGNOSTIC（実施20）：syslogのバースト・ロス（キュー溢れで
+ *  wifi_trace_dump()自体の行が欠落する事象を実機で確認．
+ *  「44 messages are lost」）を避けるため，呼出し回数だけを
+ *  カウントする軽量版．IDあたり1ワードのみ，ダンプ時に
+ *  非ゼロのものだけ数行で出力する．
+ */
+#define WIFI_TRACE_MAXID 40
+static volatile uint32_t wifi_tr_count[WIFI_TRACE_MAXID];
+static const char *wifi_trace_name(uint16_t id);
+
 void
 wifi_trace_reset(void)
 {
 	wifi_tr_pos = 0U;
 	memset(wifi_tr, 0, sizeof(wifi_tr));
+	memset((void *)wifi_tr_count, 0, sizeof(wifi_tr_count));
 }
 
 void
@@ -36,12 +48,29 @@ wifi_trace_push(uint16_t id, uint16_t ctx,
 	uint32_t	pos = wifi_tr_pos++;
 	wifi_trace_t *ent = &wifi_tr[pos % WIFI_TRACE_SIZE];
 
+	if (id < WIFI_TRACE_MAXID) {
+		wifi_tr_count[id]++;
+	}
 	ent->t_us_low = (uint32_t)esp_shim_time_us();
 	ent->id = id;
 	ent->ctx = ctx;
 	ent->a0 = a0;
 	ent->a1 = a1;
 	ent->ret = ret;
+}
+
+void
+wifi_trace_dump_counts(void)
+{
+	uint16_t	id;
+
+	for (id = 1U; id < WIFI_TRACE_MAXID; id++) {
+		if (wifi_tr_count[id] != 0U) {
+			syslog(LOG_NOTICE, "wifi_trace_cnt: id=%d name=%s count=%d",
+				   (int_t)id, wifi_trace_name(id),
+				   (int_t)wifi_tr_count[id]);
+		}
+	}
 }
 
 /*  ID→シンボル名の対応（wifi_trace_dump()のログ出力専用） */
@@ -70,6 +99,24 @@ wifi_trace_name(uint16_t id)
 	case 19: return("wifi_start_process");
 	case 20: return("wifi_set_promis_process");
 	case 21: return("register_chipv7_phy");
+	case 22: return("chip_v7_set_chan_ana");
+	case 23: return("set_channel_rfpll_freq");
+	case 24: return("set_rfpll_freq");
+	case 25: return("write_rfpll_sdm");
+	case 26: return("wait_rfpll_cal_end");
+	case 27: return("enable_agc");
+	case 28: return("disable_agc");
+	case 29: return("mac_enable_bb");
+	case 30: return("fe_reg_init");
+	case 31: return("fe_txrx_reset");
+	case 32: return("phy_bbpll_cal");
+	case 33: return("set_rxclk_en");
+	case 34: return("set_txclk_en");
+	case 35: return("write_chan_freq");
+	case 36: return("restart_cal");
+	case 37: return("i2cmst_reg_init");
+	case 38: return("rxiq_cal_init");
+	case 39: return("set_rx_gain_cal_dc_new");
 	default: return("?");
 	}
 }
@@ -135,6 +182,30 @@ WIFI_TRACE_WRAP4(ieee80211_update_phy_country, 18)
 WIFI_TRACE_WRAP4(wifi_start_process, 19)
 WIFI_TRACE_WRAP4(wifi_set_promis_process, 20)
 WIFI_TRACE_WRAP4(register_chipv7_phy, 21)
+/*
+ *  DIAGNOSTIC (temporary，Priority 2)：register_chipv7_phy()内部
+ *  （closed-source）が実際に呼ぶROM常駐PHY関数（esp32c6.rom.phy.ld
+ *  由来．libphy.aの未解決参照として`nm`で実在確認済み）を関数粒度で
+ *  トレースする．JTAG単一命令ステップの代替．
+ */
+WIFI_TRACE_WRAP4(chip_v7_set_chan_ana, 22)
+WIFI_TRACE_WRAP4(set_channel_rfpll_freq, 23)
+WIFI_TRACE_WRAP4(set_rfpll_freq, 24)
+WIFI_TRACE_WRAP4(write_rfpll_sdm, 25)
+WIFI_TRACE_WRAP4(wait_rfpll_cal_end, 26)
+WIFI_TRACE_WRAP4(enable_agc, 27)
+WIFI_TRACE_WRAP4(disable_agc, 28)
+WIFI_TRACE_WRAP4(mac_enable_bb, 29)
+WIFI_TRACE_WRAP4(fe_reg_init, 30)
+WIFI_TRACE_WRAP4(fe_txrx_reset, 31)
+WIFI_TRACE_WRAP4(phy_bbpll_cal, 32)
+WIFI_TRACE_WRAP4(set_rxclk_en, 33)
+WIFI_TRACE_WRAP4(set_txclk_en, 34)
+WIFI_TRACE_WRAP4(write_chan_freq, 35)
+WIFI_TRACE_WRAP4(restart_cal, 36)
+WIFI_TRACE_WRAP4(i2cmst_reg_init, 37)
+WIFI_TRACE_WRAP4(rxiq_cal_init, 38)
+WIFI_TRACE_WRAP4(set_rx_gain_cal_dc_new, 39)
 
 /*
  *  DIAGNOSTIC (temporary，Priority 2)：チャネルホップ毎のレジスタ
@@ -152,11 +223,23 @@ WIFI_TRACE_WRAP4(register_chipv7_phy, 21)
 #define WIFI_INTMTX_S1 0x60010138UL
 #define WIFI_INTMTX_S2 0x6001013cUL
 
+/*
+ *  DIAGNOSTIC（実施20）：phy_param（libphy.a）+164のビットマスク．
+ *  bit10（0x400）がセットされているとrxiq_cal_init()が
+ *  chip_v7_set_chan_ana()呼出しを含む全処理をスキップすることを
+ *  逆アセンブルで確認済み．esp_wifi_start()直後の1回読みでは
+ *  ASP3・NuttX間で完全に一致（0x0190d6a8）したため，
+ *  チャンネル毎（regsnap採取毎）に読んで時間変化を追う．
+ */
+extern uint8_t	phy_param[];
+#define WIFI_PHY_PARAM_FLAGS_OFF 164UL
+
 typedef struct {
 	uint32_t	t_us_low;
 	uint32_t	intmtx0, intmtx1, intmtx2;
 	uint32_t	agc_spot;
 	uint32_t	phy_agc_sum;
+	uint32_t	phy_param_flags;
 } wifi_regsnap_t;
 
 static wifi_regsnap_t	regsnap[WIFI_REGSNAP_SIZE];
@@ -187,6 +270,7 @@ wifi_regsnap_capture(void)
 		sum += base[i];
 	}
 	e->phy_agc_sum = sum;
+	e->phy_param_flags = *(volatile uint32_t *)(phy_param + WIFI_PHY_PARAM_FLAGS_OFF);
 }
 
 void
@@ -209,6 +293,8 @@ wifi_regsnap_dump(void)
 		syslog(LOG_NOTICE, "wifi_regsnap:   agc_spot=%08x phy_agc_sum=%08x",
 			   (unsigned int)regsnap[idx].agc_spot,
 			   (unsigned int)regsnap[idx].phy_agc_sum);
+		syslog(LOG_NOTICE, "wifi_regsnap:   phy_param_flags=%08x",
+			   (unsigned int)regsnap[idx].phy_param_flags);
 	}
 }
 
