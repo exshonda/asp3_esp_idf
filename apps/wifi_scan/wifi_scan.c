@@ -94,6 +94,17 @@ main_task(EXINF exinf)
 
 	esp_shim_coex_adapter_register();
 
+#ifdef WIFI_SCAN_PREINIT_SPIN
+	/*
+	 *  DIAGNOSTIC（一時的，実施31）：esp_wifi_init()直前でスピンし，
+	 *  JTAGで全域レジスタダンプを取るための同期点．実験後にrevert．
+	 */
+	syslog(LOG_NOTICE, "wifi_scan: PREINIT_SPIN reached, halting here");
+	while (true) {
+		(void) tslp_tsk(1000000);
+	}
+#endif /* WIFI_SCAN_PREINIT_SPIN */
+
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_init");
 	err = esp_wifi_init(&cfg);
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_init -> %d", (int_t)err);

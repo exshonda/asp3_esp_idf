@@ -3714,3 +3714,139 @@ openocd ... -c "init" -c "mdw 0x600af010" -c "shutdown"
 
 両者とも実機（`/dev/ttyACM0`）・JTAG（`adapter serial`でC6実機指定）
 で確認．ボードは検証後NuttXイメージのまま（次の実施29続行のため）．
+
+## 実施31：pre-init全域ダンプ／diff——LP/PCR/HP_SYSTEM/INTPRI全域は完全一致，しかし同一状態下でもASP3側AGCは凍結したまま（決定的な新知見）
+
+コーディネータから，実施29の「NuttXは`esp_wifi_init()`実行前からAGCが
+自律変動している」という所見に基づく新しい方法論の指示を受けた：
+AGCの自律変動を「即座に判定できるオラクル」として使えば，Wi-Fi
+スタック側の個別仮説検証ではなく，**両OSの`esp_wifi_init()`直前という
+同一同期点でLP側・PCR/HP_SYSTEM/INTPRIの全域をJTAGダンプして比較する」
+という，理論上「答えを含むことが保証された」網羅的な一括比較が可能に
+なる，との指摘だった．
+
+### 同期点の作り方
+
+- **ASP3側**：既存の`apps/wifi_scan/wifi_scan.c`に一時的な診断ゲート
+  `#ifdef WIFI_SCAN_PREINIT_SPIN`を追加し，`esp_shim_coex_adapter_
+  register()`の直後・`esp_wifi_init()`呼出し直前で`tslp_tsk(1000000)`
+  無限ループへ入るようにした．`-DASP3_EXTRA_COMPILE_DEFS=
+  WIFI_SCAN_PREINIT_SPIN -DESP32C6_WIFI=ON`で新規ビルド
+  （`build/c6_preinit_probe`）．JTAGで`halt`すればいつでもこの
+  同期点でのレジスタ状態を読める．
+- **NuttX側**：`esp_wifi_init`のシンボルアドレス（`nm`で
+  `42028ac2`と確認）にJTAGハードウェアブレークポイントを設置し，
+  `reset halt`→`resume`．ブートスクリプトが自動でWi-Fi初期化まで
+  進み，`esp_wifi_init()`の**最初の命令**でブレークポイントに
+  ヒットする（実測でも`PC=0x42028AC2`ヒットを確認．関数はまだ
+  1命令も実行していない状態）．
+
+両者とも「これから`esp_wifi_init()`を呼ぶ／呼ばれる」という
+操作的に同一の意味を持つ同期点で停止できていることを確認した．
+
+### ダンプ対象とサイズ
+
+`soc/reg_base.h`で実ブロック境界を確認し，以下8ブロックを
+`mdw`で全域ダンプ（合計960ワード＝3840バイト）：
+
+| ブロック | ベース | サイズ |
+|---|---|---|
+| PMU | `0x600b0000` | 256語（実施30の再確認） |
+| LP_CLKRST | `0x600b0400` | 256語 |
+| LP_AON | `0x600b1000` | 256語 |
+| LPPERI | `0x600b2800` | 256語 |
+| LP_ANALOG_PERI | `0x600b2c00` | 512語 |
+| HP_SYSTEM | `0x60095000` | 1024語 |
+| PCR | `0x60096000` | 2048語 |
+| INTPRI | `0x600c5000` | 3072語 |
+
+### 結果：960ワード中10ワードのみ差分．全て個別に解明——Wi-Fi/RF系とは無関係
+
+`diff`で10ワードの差分を検出し，それぞれのレジスタ名を
+`*_reg.h`で特定して意味を確認した：
+
+| アドレス | レジスタ名 | ASP3 | NuttX | 判定 |
+|---|---|---|---|---|
+| `0x600b0410` | `LP_CLKRST_RESET_CAUSE_REG` | `0x35` | `0x38` | **ノイズ**：リセット手段が違う（ASP3側はesptool RTSピン経由，NuttX側はOpenOCD JTAGリセット経由）ため異なるのは当然 |
+| `0x600b1004` | `LP_AON_STORE1_REG` | `0x003be31a` | `0x003bbf4d` | **ノイズ**：汎用scratchレジスタ．リセット手段/タイミング依存 |
+| `0x600b2808` | `LPPERI_RNG_DATA_REG` | `0x29407e7f` | `0x38f8734a` | **ノイズ**：ハードウェア乱数生成器の出力そのもの．無意味な差分 |
+| `0x60096000+0x1c` | `PCR_MSPI_CLK_CONF_REG` | `HS_DIV=3`(div4) | `HS_DIV=5`(div6) | **無関係**：SPI Flashアクセスクロック分周．Wi-Fi/RF回路と無関係 |
+| `0x60096000+0x88` | `PCR_TSENS_CLK_CONF_REG` | bit22=1（**default**） | bit22=0 | **無関係**：温度センサ（tsens）のクロック有効化．NuttXが明示的に無効化（省電力目的と推定）．方向も逆（ASP3はデフォルトのまま） |
+| `0x60096000+0xc8` | `PCR_AES_CONF_REG` | bit0=0 | bit0=1 | **無関係**：AES暗号アクセラレータのクロック．NuttXのmbedtls/wpa_supplicant初期化が有効化したと推定．RF回路とは無関係 |
+| `0x600c5000/5400/5800/5c00`（4箇所） | `INTPRI_CORE0_CPU_INT_EIP_STATUS_REG`他 | `bit16=1` | `bit16=0` | **ノイズ**：CPU割込み線の**保留状態を示すステータスレジスタ**（設定値ではない）．停止した瞬間にどの割込みが保留中だったかという純粋なタイミングの偶然 |
+
+**LP_ANALOG_PERI・HP_SYSTEM・PMU（実施30の値と再確認）は1ワードも
+差分なし．** 全10個の差分を個別に確認した結果，**Wi-Fi/PHY/RF系に
+関連する設定は1つも見つからなかった**——リセット原因・乱数・
+割込み保留状態という明白なノイズ，およびSPI Flash速度／温度センサ／
+AES暗号という完全に無関係な周辺クロックのみ．
+
+### しかし最も重要な追加発見：レジスタ状態が完全一致していても，この同期点でASP3のAGCは既に凍結している
+
+この結果を受け，「レジスタ状態がここまで一致しているなら，NuttXで
+`esp_wifi_init()`前からAGCが生きているのと同様，ASP3でもこの
+`WIFI_SCAN_PREINIT_SPIN`停止点で既にAGCが生きているのではないか」
+という自然な疑問が生じた．同じJTAGセッションでASP3を`halt`せずに
+`0x600a7128`（AGCスポットレジスタ）を10ms間隔で200回（2秒間）
+非停止ポーリングした．
+
+**結果：200サンプル全てが同一値（`d20a89ec`）——1ビットも変化なし．**
+実施29 Check1でNuttXが示した「Wi-Fi初期化前から自律的に変動する」
+挙動とは対照的に，**ASP3は全く同一の静的レジスタ状態
+（LP_AON/LP_ANALOG_PERI/LP_CLKRST/LPPERI/PMU/PCR/HP_SYSTEM/INTPRI，
+ノイズ除く）を持ちながら，AGCは凍結したまま**だった．
+
+### 結論：AGCの生死は，読み出し可能などの静的レジスタ値によっても説明できない
+
+これは本調査全体を通じて最も重要な新知見である：
+
+- 「NuttXの起動処理が何らかの**設定レジスタ**をASP3と違う値に
+  しているから」という仮説は，**この10ブロック・960ワードの
+  全域比較で実質的に否定された**（残る差分は全てノイズか無関係な
+  周辺クロック）．
+- にもかかわらず，**同一の（ノイズ除く）静的状態下でNuttXのAGCは
+  生きており，ASP3のAGCは凍結している**．
+
+これが意味するのは：AGC/PHYの生死を分けているのは，MMIOバス経由で
+読み出せる**「最終的な設定値」ではなく**，起動中に一度だけ実行される
+**較正シーケンス／ストローブ（一過性のパルス・トリガ）**である
+可能性が高いということ．例えば：
+
+- `esp_rtc_init()`／`esp_clk_init()`（`esp_system/port/soc/esp32c6/
+  clk.c`．実施30で確認済みの通り，NuttXは`esp_start.c`から実際に
+  これを呼んでいる）内で行われる，RC_FAST/RC32K内部クロック較正・
+  BBPLL再較正（`CONFIG_ESP_SYSTEM_BBPLL_RECALIB`条件下の
+  `recalib_bbpll()`）等——これらは「較正完了」を示す一過性の
+  ステータスビットが（較正完了後は）通常運用に戻ってしまい，
+  静的な事後スナップショットでは「較正が実際に走ったか」を
+  区別できない．
+- regi2c経由の電圧レギュレータ（DBIAS/LDO）較正シーケンスも同様に，
+  一過性の書込み動作であり，最終レジスタ値だけを見ても「本当に
+  較正シーケンスが実行されたか」は分からない．
+
+### 申し送り
+
+次に確認すべきは，**NuttXの`esp_start.c`→`esp_rtc_init()`→
+`esp_clk_init()`が実行する較正系の関数呼出し列**（ROM関数呼出し・
+regi2cシーケンス）を，`--wrap`または命令トレースで洗い出し，ASP3の
+起動処理（`hardware_init_hook`/`target_initialize`．実施29で監査済みの
+通り，現状Wi-Fi/PHY/modem関連には一切触れていない）に**同じ較正
+シーケンスを追加した場合にAGCの自律変動が始まるか**を確認すること．
+静的レジスタ比較はここで実質的に尽きた——次段は「一度きりの
+シーケンス」の突合せに移る．
+
+### 変更ファイル・検証
+
+- `apps/wifi_scan/wifi_scan.c`：`WIFI_SCAN_PREINIT_SPIN`診断ゲート追加
+  （デフォルトOFF．次段の候補シーケンス試験用に維持．使い捨てではなく
+  再利用可能な同期点として残す）．
+- 新規ビルド`build/c6_preinit_probe`（`-DASP3_EXTRA_COMPILE_DEFS=
+  WIFI_SCAN_PREINIT_SPIN -DESP32C6_WIFI=ON`）．
+- 新規ビルド`build/c6_agc_probe`（`apps/agc_probe/`．実施29用に
+  作成した，Wi-Fi初期化を一切呼ばない最小AGC観測アプリ．今回の
+  pre-initダンプでは未使用だが，実施29のクロスカーネル・ハンドオフ
+  実験で使用予定のため保持）．
+- 実機（`/dev/ttyACM0`）・JTAG（`adapter serial`でC6実機指定）で
+  両プラットフォームとも確認．`cmake --build build/c6_preinit_probe`・
+  `cmake --build build/c6_agc_probe`とも成功（既知の`assert`再定義・
+  未初期化変数警告のみ）．
