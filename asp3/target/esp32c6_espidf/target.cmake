@@ -167,6 +167,9 @@ if(ESP32C6_WIFI)
         ${C3_TARGETDIR}/wifi/esp_shim_libc.c
         ${C3_TARGETDIR}/wifi/esp_event_shim.c
         ${C3_TARGETDIR}/wifi/esp_coex_adapter.c
+        #  DIAGNOSTIC (temporary, RX-enable --wrap trace)．
+        #  docs/wifi-shim-c6.md「実施12」参照．調査終了後に削除する．
+        ${TARGETDIR}/wifi/wifi_trace.c
     )
 endif()
 include(${TARGETDIR}/esp_wifi.cmake)

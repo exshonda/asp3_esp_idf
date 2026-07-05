@@ -12,12 +12,23 @@
 
 #include "esp_wifi.h"
 #include "esp_event.h"
+#include "wifi_trace.h"
 
 /*
  *  スキャン完了通知（esp_event_shim経由）
  */
 static ID	main_tskid;
 static volatile bool_t scan_done;
+
+/* DIAGNOSTIC (temporary, --wrap trace: promiscuous-mode RX test): */
+static volatile uint32_t promisc_rx_count;
+
+static void
+promisc_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type)
+{
+	(void) buf; (void) type;
+	promisc_rx_count++;
+}
 
 static void
 wifi_event_handler(void *arg, const char *base, int32_t id, void *data)
@@ -43,6 +54,7 @@ main_task(EXINF exinf)
 
 	syslog(LOG_NOTICE, "wifi_scan: initializing shim");
 	esp_shim_initialize();
+	wifi_trace_reset();
 
 	(void) esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
 									  (void *)wifi_event_handler, NULL);
@@ -64,6 +76,21 @@ main_task(EXINF exinf)
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_start -> %d", (int_t)err);
 	if (err != 0) {
 		return;
+	}
+
+	/* DIAGNOSTIC (temporary, --wrap trace: promiscuous-mode RX test): */
+	{
+		err = esp_wifi_set_promiscuous_rx_cb(promisc_rx_cb);
+		syslog(LOG_NOTICE, "wifi_scan: DIAG set_promiscuous_rx_cb -> %d",
+			   (int_t)err);
+		err = esp_wifi_set_promiscuous(true);
+		syslog(LOG_NOTICE, "wifi_scan: DIAG set_promiscuous(true) -> %d",
+			   (int_t)err);
+		(void) tslp_tsk(3000000);	/* 3秒間，周辺の電波を受信できるか観測 */
+		syslog(LOG_NOTICE, "wifi_scan: DIAG promisc_rx_count=%d",
+			   (int_t)promisc_rx_count);
+		(void) esp_wifi_set_promiscuous(false);
+		wifi_trace_dump();
 	}
 
 	err = esp_wifi_scan_start(NULL, false);

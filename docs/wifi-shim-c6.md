@@ -1580,3 +1580,114 @@ Check 1（PM/retention）・Check 2（config値）ともほぼ消尽．残る
 基盤）が唯一の残された具体的な次の一手．これは新規のインフラ構築
 （シンボル名の実機確認・リングバッファ実装・ASP3とNuttX両方への
 適用）を要する相応の作業量のため，着手前に確認を仰ぐ．
+
+## 実施12：`--wrap`トレース基盤を構築 → `wifi_hw_start`が一度も呼ばれていないことを実機で確認（最有力の手がかり）
+
+### 基盤構築
+
+`nm`/`objdump -r`で`libpp.a`/`libnet80211.a`の内部シンボル（公開
+ヘッダなし）を実機確認し，以下13個を`-Wl,--wrap=<sym>`でラップした
+（`asp3/target/esp32c6_espidf/wifi/wifi_trace.c`／`wifi_trace.h`．
+リングバッファ512件・`t_us_low`/`id`/`a0`/`a1`/`ret`を記録．ISR安全化
+のためsyslogは使わずリングバッファのみ．最後に`wifi_trace_dump()`で
+まとめて出力）：
+
+`wifi_hw_start`・`wifi_hmac_init`・`wifi_lmac_init`・
+`wDev_Rxbuf_Init`・`esf_buf_setup`・`esf_buf_setup_static`・
+`wdev_set_promis`・`sta_rx_cb`・`wifi_recycle_rx_pkt`・
+`esf_buf_alloc`・`esf_buf_alloc_dynamic`・`wdev_data_init`・
+`wifi_set_rx_policy`
+
+全13シンボルとも実際にクロスライブラリの未解決参照として存在し，
+リンクが正常に通ることを確認済み（`--wrap`が機能する条件を満たす）．
+
+### 実機トレース結果（`esp_wifi_init`→`start`→プロミスキャス3秒間）
+
+```
+wifi_trace: total=10 (showing 10, ring=512)
+[0] t=27879   esf_buf_setup        a0=0 a1=0
+[1] t=28074   esf_buf_alloc        a0=0 a1=5
+[2] t=28209   esf_buf_alloc        a0=0 a1=5
+[3] t=28216   esf_buf_alloc        a0=0 a1=5
+[4] t=28221   esf_buf_alloc        a0=0 a1=5
+[5] t=28681   wDev_Rxbuf_Init      a0=10(=static_rx_buf_num) a1=0
+[6] t=121021  wifi_set_rx_policy   a0=0 a1=12
+[7] t=123342  wifi_set_rx_policy   a0=1 a1=12
+[8] t=127354  wdev_set_promis      a0=1（有効化．esp_wifi_set_promiscuous(true)に対応）
+[9] t=3128410 wdev_set_promis      a0=0（無効化．3秒後のfalseに対応）
+```
+
+（`ret`列はTOPPERS syslogの1呼出あたり引数上限＝`TNUM_LOGPAR`=6
+[`t_syslog.h`]に対し本呼出が6個ちょうどでほぼ限界のため，最後の
+`%08x`が展開されず文字列のまま出力される軽微な表示バグが判明．
+`a0`/`a1`/`id`は正しく記録・表示されており，結論への影響はない．
+修正は次回の課題として残す．）
+
+**`wifi_hw_start`・`wifi_hmac_init`・`wifi_lmac_init`・
+`sta_rx_cb`・`wifi_recycle_rx_pkt`・`esf_buf_alloc_dynamic`・
+`esf_buf_setup_static`・`wdev_data_init`は一度も呼ばれていない．**
+
+### `wifi_hw_start`の呼び出し元をobjdumpで直接特定
+
+`esp_wifi_init()`/`esp_wifi_start()`本体はESP-IDF実ソース
+（`esp_wifi/src/wifi_init.c`，ASP3も無改変で採用）だが，`wifi_hw_start`
+自体はどのソースファイルからも参照されておらず（`grep`で該当なし），
+blob内部（`libnet80211.a`）からのみ呼ばれる．`objdump -r`で実際の
+呼び出し元を特定：
+
+```
+$ objdump -r libnet80211/ieee80211_ioctl.o | grep "R_RISCV_CALL.*wifi_hw_start"
+  （呼び出し元セクション＝関数）
+  .text.wifi_hw_mode_switch      （複数回）
+  .text.wifi_set_promis_process  （1回，オフセット0x2a）
+  .text.wifi_start_process       （2回）
+```
+
+つまり：
+- `esp_wifi_start()` → （blob内部）→ **`wifi_start_process`** →
+  `wifi_hw_start`（呼ばれるはずの経路）
+- `esp_wifi_set_promiscuous(true)` → （blob内部）→
+  **`wifi_set_promis_process`** → `wifi_hw_start`（同上）
+
+両方の経路とも，本ポートの実機トレースでは`wifi_hw_start`まで
+到達していない．`wifi_set_promis_process`の逆アセンブルを見ると，
+呼び出し前に条件分岐が2つある：
+
+```asm
+   8:  lbu  a4,8(a0)          # a0＝引数構造体のoffset+8（有効化フラグ？）
+  1c:  lbu  a5,499(s0)        # グローバル状態g_ic＋オフセット499
+  20:  beqz a4,58 <.L553>     # a4==0 なら分岐（無効化系？）
+  24:  beq  a5,s1(=1),4c <.L554>  # a5==1（既に有効化済み？）なら分岐（スキップ）
+  28:  li a0,2
+  2a:  call wifi_hw_start     # 上記2条件を両方すり抜けた場合のみ到達
+```
+
+`wifi_start_process`側にも同様に，グローバル状態（`g_ic`+497の
+バイト値・別の間接ポインタが指す状態バイト）で0/1/2の3値分岐する
+コードがあり，`wifi_hw_start`への到達はこの内部状態機械に依存する．
+
+### 結論
+
+**現時点で最も有力な手がかり．** `wifi_hw_start`（文字通り「Wi-Fi
+ハードウェアを起動する」関数）が，`esp_wifi_start()`からも
+`esp_wifi_set_promiscuous(true)`からも実機では一度も呼ばれておらず，
+かつ両APIとも`err=0`（成功）を返す──これは「MAC RXが一切機能しない
+のに，エラーも割込みも一切出ない」という，これまでの全観測（実施6
+のsniffer実験・INTMTX_STATUS0終始0・今回のプロミスキャス0件）と
+完全に整合する具体的なメカニズムである．
+
+呼び出しを抑制している条件（`g_ic`構造体の特定オフセットの値，
+または`wifi_set_promis_process`第1引数構造体のoffset+8）を，
+シンボルなしの逆アセンブルだけで完全に特定するのは困難．次の
+一手としては：
+1. NuttX側に同じ`--wrap`セットを適用し，同じ地点でトレースを取って
+   `wifi_hw_start`が実際に呼ばれているか・その際の`g_ic`関連状態が
+   ASP3と何が違うかを比較する（コーディネータの原案どおり．今回は
+   時間の都合でASP3側のみ実施）．
+2. または，`g_ic+497`／`g_ic+499`に相当するアドレスをJTAGで実機
+   読み出しし，ASP3で実際にどんな値になっているかを直接確認する
+   （どちらの分岐条件が満たされているのか＝a4/a5の実際の値を特定）．
+
+トレース基盤（`wifi_trace.c`/`.h`・`esp_wifi.cmake`の`--wrap`設定・
+`wifi_scan.c`のプロミスキャステスト）はコミット済み（未push）．
+次回セッションでも再利用できるよう，あえてrevertせず残している．

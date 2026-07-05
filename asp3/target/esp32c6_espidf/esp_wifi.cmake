@@ -235,6 +235,27 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
 #  2. リンクライブラリパス・ライブラリ（Wireless.mk 80-88行目）
 #  ------------------------------------------------------------------
 #
+#  DIAGNOSTIC (temporary，RX-enable --wrapトレース)．nmで発見した
+#  libpp.a／libnet80211.a内部シンボル（公開ヘッダなし）をラップし，
+#  wifi_trace.cのリングバッファへ呼出し回数・引数・戻り値を記録する．
+#  調査終了後にこのブロックごと削除する．docs/wifi-shim-c6.md
+#  「実施12」参照．
+list(APPEND ASP3_LINK_OPTIONS
+    -Wl,--wrap=wifi_hw_start
+    -Wl,--wrap=wifi_hmac_init
+    -Wl,--wrap=wifi_lmac_init
+    -Wl,--wrap=wDev_Rxbuf_Init
+    -Wl,--wrap=esf_buf_setup
+    -Wl,--wrap=esf_buf_setup_static
+    -Wl,--wrap=wdev_set_promis
+    -Wl,--wrap=sta_rx_cb
+    -Wl,--wrap=wifi_recycle_rx_pkt
+    -Wl,--wrap=esf_buf_alloc
+    -Wl,--wrap=esf_buf_alloc_dynamic
+    -Wl,--wrap=wdev_data_init
+    -Wl,--wrap=wifi_set_rx_policy
+)
+
 list(APPEND ASP3_LINK_OPTIONS
     -L${ESP_HAL_DIR}/components/esp_wifi/lib/${WIFI_CHIP_SERIES}
     -L${ESP_HAL_DIR}/components/esp_phy/lib/${WIFI_CHIP_SERIES}
