@@ -400,6 +400,59 @@ wifi_regsnap_dump(void)
 	}
 }
 
+/*
+ *  DIAGNOSTIC（実施26／タイミング感度調査）：`esp_shim_task_delay()`
+ *  （osi `_task_delay`の実体）が呼ばれる度に，要求されたtick引数と
+ *  実際にdly_tskで経過した実時間（us）を記録する専用リングバッファ．
+ *  wifi_trace_push()の512エントリ共有バッファに混ぜると他のIDに
+ *  埋もれてロスする恐れがあるため独立させる．
+ */
+#define WIFI_TASKDELAY_SIZE 128
+typedef struct {
+	uint32_t	tick;
+	uint32_t	t0;
+	uint32_t	elapsed_us;
+} wifi_taskdelay_t;
+static wifi_taskdelay_t	wifi_taskdelay[WIFI_TASKDELAY_SIZE];
+static volatile uint32_t	wifi_taskdelay_pos;
+
+void
+wifi_taskdelay_reset(void)
+{
+	wifi_taskdelay_pos = 0U;
+	memset(wifi_taskdelay, 0, sizeof(wifi_taskdelay));
+}
+
+void
+wifi_taskdelay_capture(uint32_t tick, uint32_t t0, uint32_t elapsed_us)
+{
+	uint32_t			pos = wifi_taskdelay_pos++;
+	wifi_taskdelay_t	*e = &wifi_taskdelay[pos % WIFI_TASKDELAY_SIZE];
+
+	e->tick = tick;
+	e->t0 = t0;
+	e->elapsed_us = elapsed_us;
+}
+
+void
+wifi_taskdelay_dump(void)
+{
+	uint32_t	total = wifi_taskdelay_pos;
+	uint32_t	n = (total < WIFI_TASKDELAY_SIZE) ? total : WIFI_TASKDELAY_SIZE;
+	uint32_t	start = (total < WIFI_TASKDELAY_SIZE) ? 0U : (total % WIFI_TASKDELAY_SIZE);
+	uint32_t	i, idx;
+
+	syslog(LOG_NOTICE, "wifi_taskdelay: total=%d (showing %d)",
+		   (int_t)total, (int_t)n);
+	for (i = 0U; i < n; i++) {
+		idx = (start + i) % WIFI_TASKDELAY_SIZE;
+		syslog(LOG_NOTICE, "wifi_taskdelay: [%d] t0=%d tick=%d elapsed_us=%d",
+			   (int_t)i, (int_t)wifi_taskdelay[idx].t0,
+			   (int_t)wifi_taskdelay[idx].tick,
+			   (int_t)wifi_taskdelay[idx].elapsed_us);
+	}
+}
+
 extern long __real_scan_inter_channel_timeout_process(long a0, long a1, long a2, long a3);
 long
 __wrap_scan_inter_channel_timeout_process(long a0, long a1, long a2, long a3)

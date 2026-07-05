@@ -35,6 +35,7 @@
 #include "esp_shim.h"
 #include "esp_shim_cfg.h"
 #include "target_timer.h"		/* esp32c6_systimer_read */
+#include "wifi_trace.h"			/* DIAGNOSTIC（実施26）：_task_delay計測用 */
 #if defined(TOPPERS_ESP32C3_WIFI) || defined(TOPPERS_ESP32C6_WIFI)
 #include "psa/crypto.h"			/* psa_crypto_init（後述．Wi-Fi固有＝
 								   WPA2ハンドシェイクのPTK/MIC導出に必要．
@@ -655,7 +656,22 @@ esp_shim_task_delete(void *task_handle)
 void
 esp_shim_task_delay(uint32_t tick)
 {
+	/*
+	 *  DIAGNOSTIC（実施26／タイミング感度調査）：blobが要求した
+	 *  tick引数と，実際にdly_tskで経過した実時間（us）を記録する．
+	 *  NuttX側は`_task_ms_to_tick`＝`MSEC2TICK(ms)`（10ms/tick）・
+	 *  `_task_delay`＝`TICK2USEC(tick)`のため，blobが
+	 *  `_task_ms_to_tick`を経由せず直接`_task_delay(N)`を
+	 *  「N＝ms」のつもりで呼ぶ箇所があると，NuttXは実時間で
+	 *  約10倍待つことになる（ASP3は`tick＝1ms`で正確に変換）．
+	 *  実際にどちらの呼び方をしているか，実測して確認する．
+	 */
+	uint32_t	t0 = (uint32_t)esp_shim_time_us();
+	uint32_t	t1;
+
 	(void) dly_tsk((RELTIM)(tick * 1000U));
+	t1 = (uint32_t)esp_shim_time_us();
+	wifi_taskdelay_capture(tick, t0, t1 - t0);
 }
 
 void *

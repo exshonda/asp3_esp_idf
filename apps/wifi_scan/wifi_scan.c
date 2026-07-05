@@ -87,6 +87,7 @@ main_task(EXINF exinf)
 	wifi_trace_reset();
 	wifi_regi2c_reset();	/* DIAGNOSTIC (temporary，実施23／Priority 2) */
 	wifi_regi2c_patch_install();	/* DIAGNOSTIC（実施23）：PHY初期化前に必ずインストール */
+	wifi_taskdelay_reset();	/* DIAGNOSTIC（実施26／タイミング感度調査） */
 
 	(void) esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
 									  (void *)wifi_event_handler, NULL);
@@ -146,6 +147,7 @@ main_task(EXINF exinf)
 	wifi_trace_dump();	/* DIAGNOSTIC (temporary): scan完了後まで延長して捕捉 */
 	wifi_regsnap_dump();	/* DIAGNOSTIC (temporary, Priority 2) */
 	wifi_regi2c_dump();	/* DIAGNOSTIC（実施23／Priority 2） */
+	wifi_taskdelay_dump();	/* DIAGNOSTIC（実施26／タイミング感度調査） */
 
 	num = 20;
 	recs = (wifi_ap_record_t *)

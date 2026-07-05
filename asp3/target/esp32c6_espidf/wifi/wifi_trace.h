@@ -41,4 +41,12 @@ extern void wifi_regi2c_dump(void);
 extern void wifi_regi2c_dump_count(void);
 extern void wifi_regi2c_patch_install(void);
 
+/*
+ *  DIAGNOSTIC（実施26／タイミング感度調査）：`_task_delay`実呼出しの
+ *  tick引数・実経過時間（us）の記録．
+ */
+extern void wifi_taskdelay_reset(void);
+extern void wifi_taskdelay_capture(uint32_t tick, uint32_t t0, uint32_t elapsed_us);
+extern void wifi_taskdelay_dump(void);
+
 #endif /* WIFI_TRACE_H */
