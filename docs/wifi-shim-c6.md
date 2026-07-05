@@ -3850,3 +3850,159 @@ regi2cシーケンス）を，`--wrap`または命令トレースで洗い出し
   両プラットフォームとも確認．`cmake --build build/c6_preinit_probe`・
   `cmake --build build/c6_agc_probe`とも成功（既知の`assert`再定義・
   未初期化変数警告のみ）．
+
+## 実施32：候補1「BBPLL regi2c再較正ストローブ」の実地検証——機構は特定できたが，本題（AGC凍結）とは無関係と判明
+
+実施31の申し送りに従い，コーディネータの指示で「NuttXの`esp_rtc_init()`
+/`esp_clk_init()`が実行する較正系のワンショット処理を洗い出し，ASP3の
+起動処理に無いものを特定し，`agc_probe`で候補を実地検証する」作業を
+行った．
+
+### NuttXの呼出し列を実ソースで追跡：BBPLL再較正ストローブを発見
+
+`esp_system/port/soc/esp32c6/clk.c`の`esp_rtc_init()`は
+`CONFIG_ESP_SYSTEM_BBPLL_RECALIB`ガード下で`recalib_bbpll()`を呼ぶ．
+実機の`sdkconfig.h`を確認したところ**`CONFIG_ESP_SYSTEM_BBPLL_RECALIB 1`
+が実際に定義済み**——このパスは実際にコンパイルされ，かつ`esp_start.c`
+から`esp_rtc_init()`が呼ばれていることも確認済み（実施30）．
+
+`recalib_bbpll()`の実体（コメント原文："Workaround for bootloader not
+calibrated well issue"）は，現在のCPUクロック源がPLLなら一旦XTALへ
+切替え（`rtc_clk_cpu_freq_set_xtal()`），その後元の設定へ戻す
+（`rtc_clk_cpu_freq_set_config()`）．戻す際，内部の
+`rtc_clk_cpu_freq_set_config()`は「現在のソースがPLLでない場合のみ」
+`rtc_clk_bbpll_enable()`+`rtc_clk_bbpll_configure()`を実行し，
+後者が**regi2c経由の実較正ストローブ**
+（`regi2c_ctrl_ll_bbpll_calibration_start/is_done/stop`．
+`esp_hw_support/port/esp32c6/rtc_clk.c`）を踏む．これはまさに「一過性の
+ストローブで，完了後は静的レジスタに較正済みか否かの痕跡が残らない」
+という実施31の予想と一致する，強い候補だった．
+
+### 実地検証：ASP3で同等のストローブを移植して`agc_probe`で試験
+
+`agc_probe`に`AGC_PROBE_BBPLL_RECALIB`診断ゲートを追加し，
+`rtc_clk_cpu_freq_get_config`/`set_xtal`/`set_config`（`esp_wifi.cmake`が
+既にリンクしていた`rtc_clk.c`を利用．ただしC6のROMは
+`esp_rom_regi2c_write/write_mask`を直接エクスポートしないため，
+`esp_hw_support/regi2c_ctrl.c`と対応するソフトウェアパッチ
+（`esp_rom/patches/esp_rom_hp_regi2c_esp32c6.c`）を一時的に追加
+リンクした）を呼び，較正ストローブを強制実行させた．
+
+- 1回目：`old_config.source==PLL`のときだけ実行するガード付きで
+  試したところ，**「pre source=0 freq=40」（XTAL・40MHz）**と表示され
+  ガードで実行がスキップされた——実施6以来「ROMがDirect Boot到達前に
+  SOC_CLK_SEL=SPLL・160MHzへ設定済み」としていた診断と食い違う値
+  だった．
+- 無条件に160MHz PLL設定を強制する形に変更したところ，今度は
+  `rtc_clk_cpu_freq_set_config()`内部の`old_cpu_clk_src`判定が
+  ラン毎に不定（同一イメージで再起動する度にXTAL/PLLどちらの値も
+  観測された）ことが判明——`rtc_clk_cpu_freq_set_xtal()`で強制的に
+  XTALへ落としてからPLLへ戻す形にして，較正ストローブの実行を
+  確実にした．
+- すると**`regi2c_ctrl_ll_bbpll_calibration_is_done()`のポーリングで
+  無限ハング**（JTAGで確認：PCが`rtc_clk.c`内の狭い6バイト範囲を
+  往復し続け，タイマ割込みだけが周期的に入る＝典型的なビジーウェイト
+  固着）．原因はregi2cアクセスの前提となる「アナログI2Cマスタ
+  クロック」（`wifi_clock_enable_wrapper()`が通常`esp_wifi_init()`
+  経由で一度だけ有効化するもの．本テストはそれより前に実行するため
+  未有効化）と判明し，`_regi2c_ctrl_ll_master_enable_clock(true)`+
+  `regi2c_ctrl_ll_master_configure_clock()`を先行実行するよう追加
+  したが，**それでもなお`I2C_MST_BBPLL_CAL_DONE`が立たずハングした
+  ままだった**．
+
+### セカンドオピニオンの指摘で方針転換：「ASP3で再現しない」ことを急いで結論づけず，NuttXをオラクルとして直接比較
+
+行き詰まったためアドバイザに相談したところ，2点の重要な指摘を受けた：
+
+1. `I2C_ANA_MST`全域が（書き込んだはずのビットも含め）ゼロのままなのは
+   「較正が終わらない」という間接証拠ではなく，**その前提クロック
+   （regi2cバス自体，あるいはMODEM_APB等）がそもそも通っていない
+   ことを示す直接証拠**であり，深追いする前にNuttX側の同一同期点
+   （実施31の`esp_wifi_init`直前ブレークポイント）と直接比較すべき．
+2. `PCR_SYSCLK_CONF=SOC_CLK_SEL=XTAL・40MHz`という実測値は，実施6以来の
+   「160MHz」という前提と矛盾するため，**それを前提に実装を進める前に
+   必ず検証すること**（`agc_probe`固有のアーティファクトの可能性）．
+
+### 検証1：クロック源の矛盾を解消——`agc_probe`固有のアーティファクト，実害なし
+
+`WIFI_SCAN_PREINIT_SPIN`ビルド（`esp_shim_initialize()`等，実際の
+起動処理を経由する本来のASP3ビルド）で`PCR_SYSCLK_CONF`
+（`0x60096110`）を読んだところ**`0x28010200`＝`SOC_CLK_SEL=1`
+（SPLL），`HS_DIV=2`（÷3＝160MHz）**——NuttXの同一同期点
+（`esp_wifi_init`直前ブレークポイント）の値**`0x28010200`と完全一致**．
+実施6の「160MHz」診断は正しく，先の「40MHz」表示は`agc_probe`
+（Wi-Fi関連の初期化を一切経由しない最小構成）固有の未確認の副作用
+であり，実運用のビルドには影響しないと判断．深追いはしない．
+
+### 検証2：`I2C_ANA_MST`全域比較——事前は死んでいるが，`esp_wifi_init()`後には両者一致
+
+`WIFI_SCAN_PREINIT_SPIN`（`esp_wifi_init`直前）で`I2C_ANA_MST`
+（`0x600af800`〜）を読むと**全32語ゼロ**．同一同期点のNuttXでは
+**構造化された非ゼロ値**（`00000000 01470561 07000000 07000000
+00000000 40000001 2900e404 00fffeff ...`）——ここだけ見ると
+「ASP3のregi2cマスタ系がNuttXと違って死んでいる」ように見える．
+
+**しかし**，実際に`esp_wifi_init()`が完了しスキャン中の
+`c6_wifi_scan`ビルドで同じ`I2C_ANA_MST`を読むと，**ASP3も構造化
+された非ゼロ値**（`002f0669 0052026b 07000000 07000000 00000000
+40000001 2900e444 00fffff7 ...`）へ変化しており，NuttXの値と
+形状・一部の値（例：offset+0x14の`40000001`）が一致する．つまり
+**ASP3のregi2cマスタ系は「死んでいる」のではなく「NuttXより起動が
+遅い」だけ**——ASP3は`wifi_clock_enable_wrapper()`
+（`esp_wifi_init()`経由，実施6で追加済みの`_regi2c_ctrl_ll_master_
+enable_clock`/`regi2c_ctrl_ll_master_configure_clock`呼出し）で
+規定通り有効化し，スキャン開始までに追いついている．
+
+同様に`MODEM_LPCON_WIFI_LP_CLK_CONF_REG`（`+0xc`）・
+`MODEM_LPCON_I2C_MST_CLK_CONF_REG`（`+0x10`）も，`esp_wifi_init`
+直前ではASP3=0／NuttX=1と食い違うが（NuttXは`esp_perip_clk_init()`
+で起動直後にモデムLPクロック源を選択するのに対し，ASP3は
+`wifi_clock_enable_wrapper()`まで遅延させているだけ），スキャン中は
+両者とも一致（実施24／実施30で確認済みの通り）．
+
+### 結論：「起動順序の違い」は実在するが無害．BBPLL再較正仮説は否定
+
+- **実在する差分**：NuttXはWi-Fi初期化より前（`esp_perip_clk_init`/
+  `esp_rtc_init`）でモデムLPクロック源選択・regi2cマスタクロック
+  有効化・BBPLL再較正を済ませるのに対し，ASP3は全てWi-Fi初期化
+  （`esp_wifi_init`）の中で遅延実行する．これは実施31が「静的
+  レジスタには痕跡が残らない一過性の差分があるはず」と予想した
+  通りの，**実在する，確認済みの起動順序の違い**である．
+- **しかし無害**：実際にスキャンが始まる時点では，regi2cマスタ系
+  （`I2C_ANA_MST`）・モデムLPクロック選択とも両者一致する．つまり
+  この起動順序の違いは，PHY/AGCが実際に稼働を始める前に解消されて
+  しまう——**実施19で確定した「スキャン中のAGC凍結」を説明できない**．
+- **BBPLL再較正ストローブ自体の要否は未決着のまま**（ASP3側で
+  実際に踏ませようとするとregi2cマスタクロックの前提を満たしても
+  なお`I2C_MST_BBPLL_CAL_DONE`が立たずハングした．これは
+  `agc_probe`という最小環境固有の未解明な前提不足である可能性が高く，
+  実運用の`wifi_scan`ビルドでこのストローブが必要かどうかは，
+  この実験だけでは判定できない）．ただし，**たとえこのストローブを
+  ASP3が欠いていたとしても，regi2cマスタ系が最終的にNuttXと同じ
+  状態に収束する以上，それがAGC凍結の直接原因である可能性は低い**．
+
+### 後片付け
+
+- `agc_probe.c`の`AGC_PROBE_BBPLL_RECALIB`診断ゲート・
+  `esp_wifi.cmake`への`regi2c_ctrl.c`／
+  `esp_rom_hp_regi2c_esp32c6.c`追加リンクは，本仮説が否定された
+  ため全てrevertした（`rtc_clk.c`自体は元々リンク済みだったため
+  そのまま）．
+- `build/c6_agc_probe_recalib`（本実験専用のビルドディレクトリ）は
+  削除．`build/c6_wifi_scan`・`build/c6_agc_probe`は再ビルドして
+  revert後も問題なく成功することを確認済み．
+
+### 申し送り
+
+実施19（AGC凍結）以来，レジスタ値・書込みシーケンス・タイミング・
+PMU・LP側/PCR/HP_SYSTEM/INTPRIの静的状態・（今回）regi2cマスタ系の
+起動順序と，考えられる観測可能な差分はほぼ尽くしたが，**スキャン開始
+時点で観測可能な限りの状態はASP3・NuttXで一致するにもかかわらず，
+AGCだけが凍結する**という実施19の核心は依然未解明．次に検討すべきは，
+実施19自身が最後に挙げた「ソフトウェアでは観測できない領域」
+（`register_chipv7_phy()`内部の命令レベルトレース，あるいはロジック
+アナライザ等によるRFフロントエンド配線の直接観測）に立ち返ることか，
+もしくは実施29（NuttX実行中からのクロスカーネル・ハンドオフ実験．
+プリフライトチェック完了・本体未着手）を完遂して「ASP3のランタイムが
+既に生きているPHYを抑制するか」を実地で確認することの2択になる．
+コーディネータの判断を仰ぐ．
