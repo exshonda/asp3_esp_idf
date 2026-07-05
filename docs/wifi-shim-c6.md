@@ -2092,3 +2092,68 @@ sniffer: heartbeat: total_frames=3150→5324（継続的に増加＝周辺の
 
 診断コードは完全にrevert済み（コミット差分なし．実機は既存のコミット
 状態へ再書込み済み）．
+
+## 実施18：Priority 4（PHY較正戻り値・delay精度）— 両方とも反証
+
+### delay精度：ROM関数そのもの，チェック不要と判断
+
+`esp_rom_delay_us`は`hal/components/esp_rom/esp32c6/ld/
+esp32c6.rom.api.ld`で`PROVIDE(esp_rom_delay_us = ets_delay_us)`と
+定義され，`nm`で実機シンボルが`40000040 A esp_rom_delay_us`（ROM
+本体のアドレスそのもの）であることを確認．ASP3独自の再実装は
+存在しない（`grep`で該当なし）．同一の生シリコンROMコードが
+NuttX/ESP-IDFとも共通で実行されるため，C6の実クロック（160MHz，
+既にPhase Aで確認・較正済み）に対する精度はASP3固有の問題になり
+得ない．静的確認のみで終了（実機テスト不要と判断）．
+
+### PHY較正戻り値：`register_chipv7_phy()`の戻り値を`--wrap`トレースへ追加（21個目）
+
+`esp_phy/src/phy_init.c`（ASP3も無改変で採用する実ソース）の
+実際のコードパス（`CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE`
+未定義＝`nvs_enable=0`のため）は
+
+```c
+#else
+    register_chipv7_phy(init_data, cal_data, PHY_RF_CAL_FULL);
+#endif
+```
+
+で戻り値を完全に破棄しており，これまで一度も確認されていなかった．
+既存の`--wrap`トレース基盤に21個目のシンボルとして追加し実測．
+
+**ASP3の実機結果：`register_chipv7_phy` ret=1
+（`ESP_CAL_DATA_CHECK_FAIL`）**
+
+一見エラーに見えるが，NuttX側に同一の`--wrap`を追加して同一地点
+（`esp_wifi_init`→`esp_wifi_start`）で実測したところ，
+**NuttXも全く同じ`ret=1`を返す**（両者とも`nvs_enable=0`・
+`PHY_RF_CAL_FULL`モードでの，保存済み較正データなしの新規較正
+という同一条件のため）．
+
+### 結論：Priority 4も両方とも反証（差分なし）
+
+`docs/errors.md`相当のESP-IDFヘッダコメントが示す「チェックサム
+失敗または較正データが古い」という意味は，そもそも保存済み
+データが存在しない新規較正では常に成立する当然の戻り値であり，
+異常ではない．delay精度・PHY較正戻り値とも，ASP3とNuttXの間に
+一切の差分が見られなかった．
+
+## 実施15〜18のまとめ：Fable第6ラウンドの4優先度すべてに具体的な差分なし
+
+| 優先度 | 内容 | 結果 |
+|---|---|---|
+| 1 | ROM占有RAM領域との重複 | 重複なし（63KB以上の余裕） |
+| 2 | アクティブスキャン中のレジスタスナップショット | **未実施**（労力大） |
+| 3 | 生TX注入テスト | TXは根底から死んでいる（スキャン非依存を確認） |
+| 4 | PHY較正戻り値・delay精度 | 両方ともNuttXと完全一致 |
+
+Priority 1・3・4はいずれも「ASP3とNuttXの間に差はない」という
+結果に終わり，実施15（`--wrap`トレース比較）で確立した「ソフト
+ウェア呼び出しグラフは呼び出し順・引数・戻り値まで完全に一致する」
+という事実を，さらに広い範囲（PHY較正・TX注入パス）で補強する
+形となった．唯一実施していないPriority 2（アクティブスキャン中の
+MAC内部レジスタ／PHY・AGC/BB/FEレジスタ／regi2c読み戻しのスナップ
+ショット比較）が，残された最後の具体的な次の一手である．これは
+新たなwrap関数（チャネルホップ関数．未特定）へのレジスタ読み出し
+埋め込みと，ASP3・NuttX両方への適用を要する，相応の実装量を伴う
+作業．
