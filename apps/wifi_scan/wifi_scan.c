@@ -160,6 +160,7 @@ main_task(EXINF exinf)
 	wifi_regi2c_dump();	/* DIAGNOSTIC（実施23／Priority 2） */
 	wifi_taskdelay_dump();	/* DIAGNOSTIC（実施26／タイミング感度調査） */
 	wifi_phyinit_dump();	/* DIAGNOSTIC（実施36／phy_init呼出し境界の一点スナップショット） */
+	wifi_trace_dump_addr();	/* DIAGNOSTIC（実施37／JTAG生読み用アドレス確認） */
 
 	num = 20;
 	recs = (wifi_ap_record_t *)

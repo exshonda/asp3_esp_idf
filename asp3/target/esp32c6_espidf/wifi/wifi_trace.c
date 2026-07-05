@@ -17,10 +17,11 @@
 #include "wifi_trace.h"
 #include "esp_shim.h"
 
-#define WIFI_TRACE_SIZE  512
+#define WIFI_TRACE_SIZE  1024
 
-static wifi_trace_t	wifi_tr[WIFI_TRACE_SIZE];
-static volatile uint32_t wifi_tr_pos;
+wifi_trace_t	wifi_tr[WIFI_TRACE_SIZE];
+volatile uint32_t wifi_tr_pos;
+volatile uint8_t wifi_trace_frozen;
 
 /*
  *  DIAGNOSTIC（実施20）：syslogのバースト・ロス（キュー溢れで
@@ -37,16 +38,25 @@ void
 wifi_trace_reset(void)
 {
 	wifi_tr_pos = 0U;
+	wifi_trace_frozen = 0U;
 	memset(wifi_tr, 0, sizeof(wifi_tr));
 	memset((void *)wifi_tr_count, 0, sizeof(wifi_tr_count));
 }
 
 void
 wifi_trace_push(uint16_t id, uint16_t ctx,
-				uintptr_t a0, uintptr_t a1, uintptr_t ret)
+				uintptr_t a0, uintptr_t a1,
+				uintptr_t a2, uintptr_t a3, uintptr_t ret)
 {
-	uint32_t	pos = wifi_tr_pos++;
-	wifi_trace_t *ent = &wifi_tr[pos % WIFI_TRACE_SIZE];
+	uint32_t	pos;
+	wifi_trace_t *ent;
+
+	if (wifi_trace_frozen != 0U) {
+		return;
+	}
+
+	pos = wifi_tr_pos++;
+	ent = &wifi_tr[pos % WIFI_TRACE_SIZE];
 
 	if (id < WIFI_TRACE_MAXID) {
 		wifi_tr_count[id]++;
@@ -56,6 +66,8 @@ wifi_trace_push(uint16_t id, uint16_t ctx,
 	ent->ctx = ctx;
 	ent->a0 = a0;
 	ent->a1 = a1;
+	ent->a2 = a2;
+	ent->a3 = a3;
 	ent->ret = ret;
 }
 
@@ -146,10 +158,29 @@ wifi_trace_dump(void)
 			   (int_t)i, (int_t)wifi_tr[idx].t_us_low,
 			   wifi_trace_name(wifi_tr[idx].id),
 			   (unsigned int)wifi_tr[idx].a0);
-		syslog(LOG_NOTICE, "wifi_trace:   a1=%08x ret=%08x",
+		syslog(LOG_NOTICE, "wifi_trace:   a1=%08x a2=%08x a3=%08x ret=%08x",
 			   (unsigned int)wifi_tr[idx].a1,
+			   (unsigned int)wifi_tr[idx].a2,
+			   (unsigned int)wifi_tr[idx].a3,
 			   (unsigned int)wifi_tr[idx].ret);
 	}
+}
+
+/*
+ *  実施37：JTAGでの生メモリ直読み用に，`wifi_tr`配列本体・
+ *  `wifi_tr_pos`・エントリサイズを一度だけsyslogへ出力する
+ *  （アドレス確認の裏取り用．配列自体は`nm`でも確認可能だが，
+ *  実行時の実際の値との突合せのため）．
+ */
+void
+wifi_trace_dump_addr(void)
+{
+	syslog(LOG_NOTICE, "wifi_trace_addr: wifi_tr=%08x wifi_tr_pos=%08x",
+		   (unsigned int)(uintptr_t)wifi_tr,
+		   (unsigned int)(uintptr_t)&wifi_tr_pos);
+	syslog(LOG_NOTICE, "wifi_trace_addr: sizeof(entry)=%d pos=%d frozen=%d",
+		   (int_t)sizeof(wifi_trace_t), (int_t)wifi_tr_pos,
+		   (int_t)wifi_trace_frozen);
 }
 
 /*
@@ -162,7 +193,8 @@ wifi_trace_dump(void)
 	long __wrap_##name(long a0, long a1, long a2, long a3) \
 	{ \
 		long ret = __real_##name(a0, a1, a2, a3); \
-		wifi_trace_push((id), 0U, (uintptr_t)a0, (uintptr_t)a1, (uintptr_t)ret); \
+		wifi_trace_push((id), 0U, (uintptr_t)a0, (uintptr_t)a1, \
+						 (uintptr_t)a2, (uintptr_t)a3, (uintptr_t)ret); \
 		return(ret); \
 	}
 
@@ -198,7 +230,17 @@ __wrap_register_chipv7_phy(long a0, long a1, long a2, long a3)
 
 	wifi_phyinit_capture_entry();
 	ret = __real_register_chipv7_phy(a0, a1, a2, a3);
-	wifi_trace_push(21U, 0U, (uintptr_t)a0, (uintptr_t)a1, (uintptr_t)ret);
+	wifi_trace_push(21U, 0U, (uintptr_t)a0, (uintptr_t)a1,
+					 (uintptr_t)a2, (uintptr_t)a3, (uintptr_t)ret);
+	/*
+	 *  実施37（コーディネータ指示）：ここでリングバッファを凍結する．
+	 *  以降（esp_wifi_start()・チャネルホップスキャン等）の呼出しは
+	 *  一切記録しない．これにより，`wifi_tr`はesp_wifi_init()開始から
+	 *  phy_init完了までの呼出し列**だけ**を保持し続ける（後続の
+	 *  スキャン活動で上書きされない）——JTAGでいつ読みに行っても
+	 *  この境界内の完全な列がロスレスに残っている．
+	 */
+	wifi_trace_frozen = 1U;
 	return(ret);
 }
 /*
@@ -241,10 +283,12 @@ __wrap_coex_schm_lock(long a0, long a1, long a2, long a3)
 {
 	extern void *coex_schm_env_ptr;
 
-	wifi_trace_push(42U, 0U, (uintptr_t)a0, (uintptr_t)coex_schm_env_ptr, 0xEEEEEEEEUL);
+	wifi_trace_push(42U, 0U, (uintptr_t)a0, (uintptr_t)coex_schm_env_ptr,
+					 (uintptr_t)a2, (uintptr_t)a3, 0xEEEEEEEEUL);
 	{
 		long ret = __real_coex_schm_lock(a0, a1, a2, a3);
-		wifi_trace_push(42U, 1U, (uintptr_t)a0, (uintptr_t)coex_schm_env_ptr, (uintptr_t)ret);
+		wifi_trace_push(42U, 1U, (uintptr_t)a0, (uintptr_t)coex_schm_env_ptr,
+						 (uintptr_t)a2, (uintptr_t)a3, (uintptr_t)ret);
 		return(ret);
 	}
 }
@@ -255,10 +299,12 @@ __wrap_coex_schm_interval_get(long a0, long a1, long a2, long a3)
 {
 	extern void *coex_schm_env_ptr;
 
-	wifi_trace_push(43U, 0U, (uintptr_t)a0, (uintptr_t)coex_schm_env_ptr, 0xEEEEEEEEUL);
+	wifi_trace_push(43U, 0U, (uintptr_t)a0, (uintptr_t)coex_schm_env_ptr,
+					 (uintptr_t)a2, (uintptr_t)a3, 0xEEEEEEEEUL);
 	{
 		long ret = __real_coex_schm_interval_get(a0, a1, a2, a3);
-		wifi_trace_push(43U, 1U, (uintptr_t)a0, (uintptr_t)coex_schm_env_ptr, (uintptr_t)ret);
+		wifi_trace_push(43U, 1U, (uintptr_t)a0, (uintptr_t)coex_schm_env_ptr,
+						 (uintptr_t)a2, (uintptr_t)a3, (uintptr_t)ret);
 		return(ret);
 	}
 }
@@ -488,7 +534,8 @@ long
 __wrap_esf_buf_alloc(long a0, long a1, long a2, long a3)
 {
 	long	ret = __real_esf_buf_alloc(a0, a1, a2, a3);
-	wifi_trace_push(10U, 0U, (uintptr_t)a0, (uintptr_t)a1, (uintptr_t)ret);
+	wifi_trace_push(10U, 0U, (uintptr_t)a0, (uintptr_t)a1,
+					 (uintptr_t)a2, (uintptr_t)a3, (uintptr_t)ret);
 	if (a1 == 2) {
 		wifi_regsnap_capture();
 	}

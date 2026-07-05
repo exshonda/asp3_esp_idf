@@ -13,14 +13,28 @@ typedef struct {
 	uint32_t	t_us_low;
 	uint16_t	id;
 	uint16_t	ctx;
-	uintptr_t	a0, a1, ret;
+	uintptr_t	a0, a1, a2, a3, ret;
 } wifi_trace_t;
 
 extern void wifi_trace_push(uint16_t id, uint16_t ctx,
-							 uintptr_t a0, uintptr_t a1, uintptr_t ret);
+							 uintptr_t a0, uintptr_t a1,
+							 uintptr_t a2, uintptr_t a3, uintptr_t ret);
 extern void wifi_trace_dump(void);
 extern void wifi_trace_dump_counts(void);
+extern void wifi_trace_dump_addr(void);
 extern void wifi_trace_reset(void);
+
+/*
+ *  DIAGNOSTIC（実施37／コーディネータ指示：39シンボルの引数・戻り値の
+ *  シーケンス比較）：`register_chipv7_phy()`が戻った時点でトレース
+ *  記録を凍結する（以降の`wifi_trace_push()`はno-op）．これにより
+ *  リングバッファには「esp_wifi_init()開始からphy_init完了まで」の
+ *  呼出し列だけが，後続のチャネルホップ・スキャン活動で上書き
+ *  されずに残る．syslog経由のダンプはバースト・ロスの実績がある
+ *  （実施20）ため，JTAGによる生メモリ直読み（`wifi_tr`配列本体・
+ *  `wifi_tr_pos`）でのロスレス比較を主手段とする．
+ */
+extern volatile uint8_t wifi_trace_frozen;
 
 /*
  *  DIAGNOSTIC (temporary, Priority 2)：チャネルホップ毎の
