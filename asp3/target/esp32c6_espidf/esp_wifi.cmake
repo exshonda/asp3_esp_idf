@@ -202,18 +202,19 @@ list(APPEND ASP3_COMPILE_DEFS
     #  `#if CONFIG_IDF_TARGET_ESP32C6 || ...C5 || ...C61`で
     #  _regdma_link_set_write_wait_content／
     #  _sleep_retention_find_link_by_idの2フィールドを条件付き
-    #  追加する（C6/C5/C61専用のsleep retention連携）．本マクロ
-    #  未定義のままだとASP3が計算する構造体レイアウトがこの2
-    #  フィールド分（RV32で8バイト）短くなり，それ以降の全フィールド
-    #  （_coex_schm_flexible_period_set/get・_coex_schm_get_phase_by_idx・
-    #  末尾の_magic）が，C6向けにビルドされたblob（当然本マクロ
-    #  定義済み前提でリンクされている．NuttXの生成sdkconfig.hでも
-    #  `#define CONFIG_IDF_TARGET_ESP32C6 1`を確認済み）が期待する
-    #  オフセットとずれる＝構造体ABI不一致．blobがosi_funcsテーブルを
-    #  誤ったオフセットで読み，特に末尾の_magicチェックが不正な値
-    #  （実際には別フィールドの関数ポインタ）を参照する可能性が高い．
-    #  hal/配下は編集禁止のため，コンパイル定義でNuttX/ESP-IDF本来の
-    #  ターゲット識別マクロを補う（docs/wifi-shim-c6.md「実施10」参照）．
+    #  追加する（C6/C5/C61専用のsleep retention連携）．
+    #  【訂正】当初はこのマクロがどこにも定義されておらず構造体ABIが
+    #  不整合を起こしていると判断したが，実際には
+    #  hal/nuttx/esp32c6/include/sdkconfig.h（esp_attr.h経由で全ファイル
+    #  から到達可能）が既に`#define CONFIG_IDF_TARGET_ESP32C6 1`を
+    #  提供しており，このコンパイル定義を追加する前から構造体サイズは
+    #  既に0x1e8バイト（2フィールド込み）だった．実際に本行を
+    #  一時的にコメントアウトして再ビルド・nm確認し，サイズが変化
+    #  しない（0x1e8のまま）ことを検証済み＝ABI不整合は最初から
+    #  存在しなかった（誤判定．詳細はdocs/wifi-shim-c6.md「実施10」
+    #  訂正部分参照）．本行は実害はないが，ヘッダ側の暗黙のinclude
+    #  経由ではなくこのビルドの意図を明示するドキュメント目的として
+    #  残す（冗長だが害はない）．
     CONFIG_IDF_TARGET_ESP32C6=1
 )
 
