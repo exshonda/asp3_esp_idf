@@ -30,7 +30,7 @@ volatile uint8_t wifi_trace_frozen;
  *  カウントする軽量版．IDあたり1ワードのみ，ダンプ時に
  *  非ゼロのものだけ数行で出力する．
  */
-#define WIFI_TRACE_MAXID 44
+#define WIFI_TRACE_MAXID 48
 static volatile uint32_t wifi_tr_count[WIFI_TRACE_MAXID];
 static const char *wifi_trace_name(uint16_t id);
 
@@ -133,6 +133,9 @@ wifi_trace_name(uint16_t id)
 	case 41: return("coex_schm_process_restart");
 	case 42: return("coex_schm_lock_ENTER");
 	case 43: return("coex_schm_interval_get_ENTER");
+	case 44: return("pbus_rx_dco_cal_1step_new");
+	case 45: return("ram_pbus_force_mode");
+	case 46: return("rx_pbus_reset");
 	default: return("?");
 	}
 }
@@ -269,6 +272,28 @@ WIFI_TRACE_WRAP4(rxiq_cal_init, 38)
 WIFI_TRACE_WRAP4(set_rx_gain_cal_dc_new, 39)
 WIFI_TRACE_WRAP4(coex_init, 40)
 WIFI_TRACE_WRAP4(coex_schm_process_restart, 41)
+/*
+ *  実施38（コーディネータ指示）：set_rx_gain_cal_dc_new()内部で実際に
+ *  呼ばれるROM常駐PBUSヘルパを直接--wrapする．手動逆アセンブルで
+ *  一度誤り（別イメージのシンボルテーブルで突合せ・エピローグの
+ *  読み違い）を犯したため，確実なリングバッファトレースに切り替える．
+ *  pbus_rx_dco_cal_1step_newは実引数5個（a0-a4）——呼出し箇所の逆
+ *  アセンブルで確認済み．generic WIFI_TRACE_WRAP4（4引数固定）では
+ *  a4が転送されず壊れるため，専用の5引数版を用意する．a4はポインタ
+ *  （出力先）のため，トレースにはa3までを記録する．
+ */
+extern long __real_pbus_rx_dco_cal_1step_new(long a0, long a1, long a2,
+											  long a3, long a4);
+long
+__wrap_pbus_rx_dco_cal_1step_new(long a0, long a1, long a2, long a3, long a4)
+{
+	long	ret = __real_pbus_rx_dco_cal_1step_new(a0, a1, a2, a3, a4);
+	wifi_trace_push(44U, 0U, (uintptr_t)a0, (uintptr_t)a1,
+					 (uintptr_t)a2, (uintptr_t)a3, (uintptr_t)ret);
+	return(ret);
+}
+WIFI_TRACE_WRAP4(ram_pbus_force_mode, 45)
+WIFI_TRACE_WRAP4(rx_pbus_reset, 46)
 
 /*
  *  DIAGNOSTIC（実施21続き）：`coex_schm_lock`はROM内部で

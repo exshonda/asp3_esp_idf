@@ -285,6 +285,10 @@ list(APPEND ASP3_LINK_OPTIONS
     -Wl,--wrap=coex_schm_process_restart
     -Wl,--wrap=coex_schm_lock
     -Wl,--wrap=coex_schm_interval_get
+    #  実施38：set_rx_gain_cal_dc_new()内部呼出しの直接トレース
+    -Wl,--wrap=pbus_rx_dco_cal_1step_new
+    -Wl,--wrap=ram_pbus_force_mode
+    -Wl,--wrap=rx_pbus_reset
 )
 
 list(APPEND ASP3_LINK_OPTIONS
