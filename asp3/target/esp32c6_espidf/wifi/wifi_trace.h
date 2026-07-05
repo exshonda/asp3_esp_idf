@@ -30,4 +30,15 @@ extern void wifi_regsnap_reset(void);
 extern void wifi_regsnap_dump(void);
 extern void wifi_regsnap_capture(void);
 
+/*
+ *  DIAGNOSTIC (temporary，実施23／Priority 2)：g_phyFuns（PHYブロブが
+ *  ROM regi2cアクセサを呼ぶための関数ポインタテーブル）の
+ *  write/write_mask枠を差し替え，実際のregi2c書込み
+ *  (block,host_id,reg_add[,msb,lsb],data)を記録する．
+ */
+extern void wifi_regi2c_reset(void);
+extern void wifi_regi2c_dump(void);
+extern void wifi_regi2c_dump_count(void);
+extern void wifi_regi2c_patch_install(void);
+
 #endif /* WIFI_TRACE_H */

@@ -365,3 +365,153 @@ __wrap_esf_buf_alloc(long a0, long a1, long a2, long a3)
 	}
 	return(ret);
 }
+
+/*
+ *  DIAGNOSTIC（実施23／Priority 2）：regi2c書込みの実測ログ．
+ *
+ *  `rom_i2c_writeReg`/`rom_i2c_writeReg_Mask`は`--wrap`では捕捉
+ *  できない（`coex_schm_lock`と同様，blob内部の関数ポインタ
+ *  テーブル`g_phyFuns`経由の間接呼出しのため．リンク時シンボル
+ *  解決に依存する`--wrap`は原理的に無力——実施22で確認した手法と
+ *  同じ制約）．
+ *
+ *  `g_phyFuns`はJTAGで実測して構造を特定済み（`register_chipv7_phy`
+ *  →`phy_get_romfunc_addr()`の戻り値がそのままg_phyFuns代入元）：
+ *    offset  76 (idx19): rom_chip_i2c_readReg
+ *    offset  80 (idx20): rom_i2c_readReg
+ *    offset  84 (idx21): rom_chip_i2c_writeReg
+ *    offset  88 (idx22): rom_i2c_writeReg      ← phy_i2c_init1/2が実際に使用
+ *    offset  92 (idx23): rom_i2c_readReg_Mask
+ *    offset  96 (idx24): rom_i2c_writeReg_Mask
+ *
+ *  `phy_get_romfunc_addr`はROM常駐だが通常のcall命令で参照される
+ *  （function-pointer間接ではない）ため`--wrap`可能．戻り値
+ *  （=テーブル本体へのポインタ）を横取りし，write/write_mask枠だけ
+ *  自前のトレース関数へ差し替えてから返す．
+ */
+#define WIFI_REGI2C_SIZE 1024
+
+typedef struct {
+	uint32_t	t_us_low;
+	uint8_t		block, host_id, reg_add, data;
+	uint8_t		msb, lsb;	/* write_mask以外は0xFFを格納 */
+} wifi_regi2c_t;
+
+static wifi_regi2c_t	wifi_regi2c[WIFI_REGI2C_SIZE];
+static volatile uint32_t wifi_regi2c_pos;
+
+typedef void (*wifi_regi2c_write_fn_t)(uint8_t, uint8_t, uint8_t, uint8_t);
+typedef void (*wifi_regi2c_write_mask_fn_t)(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+
+static wifi_regi2c_write_fn_t		wifi_regi2c_orig_write;
+static wifi_regi2c_write_mask_fn_t	wifi_regi2c_orig_write_mask;
+
+void
+wifi_regi2c_reset(void)
+{
+	wifi_regi2c_pos = 0U;
+	memset(wifi_regi2c, 0, sizeof(wifi_regi2c));
+}
+
+static void
+wifi_regi2c_traced_write(uint8_t block, uint8_t host_id, uint8_t reg_add, uint8_t data)
+{
+	uint32_t		pos = wifi_regi2c_pos++;
+	wifi_regi2c_t	*e = &wifi_regi2c[pos % WIFI_REGI2C_SIZE];
+
+	e->t_us_low = (uint32_t)esp_shim_time_us();
+	e->block = block;
+	e->host_id = host_id;
+	e->reg_add = reg_add;
+	e->data = data;
+	e->msb = 0xFFU;
+	e->lsb = 0xFFU;
+	if (wifi_regi2c_orig_write != NULL) {
+		wifi_regi2c_orig_write(block, host_id, reg_add, data);
+	}
+}
+
+static void
+wifi_regi2c_traced_write_mask(uint8_t block, uint8_t host_id, uint8_t reg_add,
+							   uint8_t msb, uint8_t lsb, uint8_t data)
+{
+	uint32_t		pos = wifi_regi2c_pos++;
+	wifi_regi2c_t	*e = &wifi_regi2c[pos % WIFI_REGI2C_SIZE];
+
+	e->t_us_low = (uint32_t)esp_shim_time_us();
+	e->block = block;
+	e->host_id = host_id;
+	e->reg_add = reg_add;
+	e->data = data;
+	e->msb = msb;
+	e->lsb = lsb;
+	if (wifi_regi2c_orig_write_mask != NULL) {
+		wifi_regi2c_orig_write_mask(block, host_id, reg_add, msb, lsb, data);
+	}
+}
+
+/*
+ *  当初`phy_get_romfunc_addr`（`register_chipv7_phy`が呼ぶ，ROM常駐
+ *  テーブルへのポインタを返す関数）を`--wrap`する案だったが，
+ *  リンク後`__wrap_phy_get_romfunc_addr`が結線されないことが判明．
+ *  原因：呼出し元`register_chipv7_phy`と`phy_get_romfunc_addr`の
+ *  定義が**同一オブジェクトファイル（libphy.aの同一.o）内**にあり，
+ *  この呼出しはコンパイラが直接のローカル参照として解決してしまう
+ *  ため，リンカのグローバルシンボル解決を経由せず`--wrap`が原理的に
+ *  効かない（`coex_schm_lock`とは別種の制約）．
+ *
+ *  代替案：呼出し先テーブル自体はROM起動時（Direct Bootでの
+ *  `_flash_entry`到達前）に既に固定アドレスへ格納済みであることを
+ *  実機JTAGで確認済み（`esp_wifi_init()`を呼ぶ前，起動直後でも
+ *  同じROM関数アドレス列が読める＝実行時にphy_get_romfunc_addr()が
+ *  都度書き込んでいるのではなく，ROM側が起動時に用意する固定
+ *  テーブル）．よってアドレスは既知・固定であり，起動の可能な限り
+ *  早い時点で直接パッチしてよい．
+ *  `g_phyFuns`（ASP3側リンクの大域ポインタ変数．そのVALUEがこの
+ *  固定テーブルを指す）とは無関係にテーブル自体へ直接書き込む．
+ */
+#define WIFI_ROM_PHYFUNS_TABLE_ADDR  0x4087f954UL
+#define WIFI_PHYFUNS_IDX_I2C_WRITE       22U
+#define WIFI_PHYFUNS_IDX_I2C_WRITE_MASK  24U
+
+void
+wifi_regi2c_patch_install(void)
+{
+	uint32_t	*tbl = (uint32_t *)WIFI_ROM_PHYFUNS_TABLE_ADDR;
+
+	wifi_regi2c_orig_write =
+		(wifi_regi2c_write_fn_t)(uintptr_t)tbl[WIFI_PHYFUNS_IDX_I2C_WRITE];
+	wifi_regi2c_orig_write_mask =
+		(wifi_regi2c_write_mask_fn_t)(uintptr_t)tbl[WIFI_PHYFUNS_IDX_I2C_WRITE_MASK];
+	tbl[WIFI_PHYFUNS_IDX_I2C_WRITE] = (uint32_t)(uintptr_t)wifi_regi2c_traced_write;
+	tbl[WIFI_PHYFUNS_IDX_I2C_WRITE_MASK] = (uint32_t)(uintptr_t)wifi_regi2c_traced_write_mask;
+}
+
+void
+wifi_regi2c_dump(void)
+{
+	uint32_t	total = wifi_regi2c_pos;
+	uint32_t	n = (total < WIFI_REGI2C_SIZE) ? total : WIFI_REGI2C_SIZE;
+	uint32_t	start = (total < WIFI_REGI2C_SIZE) ? 0U : (total % WIFI_REGI2C_SIZE);
+	uint32_t	i, idx;
+
+	syslog(LOG_NOTICE, "wifi_regi2c: total=%d (showing %d)", (int_t)total, (int_t)n);
+	for (i = 0U; i < n; i++) {
+		idx = (start + i) % WIFI_REGI2C_SIZE;
+		syslog(LOG_NOTICE, "wifi_regi2c: [%d] t=%d block=%02x host=%d reg=%02x",
+			   (int_t)i, (int_t)wifi_regi2c[idx].t_us_low,
+			   (unsigned int)wifi_regi2c[idx].block,
+			   (int_t)wifi_regi2c[idx].host_id,
+			   (unsigned int)wifi_regi2c[idx].reg_add);
+		syslog(LOG_NOTICE, "wifi_regi2c:   data=%02x msb=%d lsb=%d",
+			   (unsigned int)wifi_regi2c[idx].data,
+			   (int_t)wifi_regi2c[idx].msb,
+			   (int_t)wifi_regi2c[idx].lsb);
+	}
+}
+
+void
+wifi_regi2c_dump_count(void)
+{
+	syslog(LOG_NOTICE, "wifi_regi2c_cnt: total=%d", (int_t)wifi_regi2c_pos);
+}
