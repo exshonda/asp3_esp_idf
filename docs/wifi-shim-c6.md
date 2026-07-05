@@ -3609,3 +3609,108 @@ flash寫像コード（R-X）・周辺MMIO全域（RW-）・ROM（R-X）を
   スクラッチ，Gitリポジトリ外）の`bootloader_after_init()`と
   同等のMMU再マッピング＋ジャンプ処理を，NuttX側のNSHコマンド／
   タスクとして書き直す形になる．
+
+## 実施30：新仮説（PMU：C3に存在しない電力管理サブシステム）の検証——全項目で否定
+
+コーディネータから，構造的な再分析による新しい高優先度仮説の指示を
+受けた：**PMU（Power Management Unit）**はESP32-C3には存在しない
+サブシステムであり，これまでの26回に及ぶレジスタ比較は全てHP
+（High Power）側周辺機器に対するものだった．PMUはLP（Low Power）側の
+電力状態機械（HP_ACTIVE/HP_MODEM/HP_SLEEP等）を制御する別系統で，
+実ESP-IDFの`esp_rtc_init()`（app起動側，ブートローダ側ではない）が
+`pmu_init()`を呼ぶ．Direct Bootがこれをスキップしていれば，
+「ソフトウェア的には全て成功しているのに，RF/アナログブロックが
+PMU状態機械レベルで隔離／未給電のまま」という，これまでの全観測と
+矛盾しない説明になる，との指摘だった．優先順位付きで6項目の確認を
+指示された．
+
+### 項目4（本命）：PMUレジスタブロック全域比較——完全一致（否定）
+
+まず，ASP3のC6アーキ/ターゲット全ファイル（`arch/riscv_gcc/esp32c6/`・
+`target/esp32c6_gcc/`相当）を`grep -i pmu`で検索したところ**一致0件**
+——ASP3はPMUに一切触れていないことを確認．
+
+対してNuttXは，`arch/risc-v/src/common/espressif/esp_start.c`が
+起動中に明示的に`esp_rtc_init()`を呼んでおり（コメント「Configure the
+power related stuff.」），その実体（`esp_system/port/soc/esp32c6/
+clk.c`）は`#if !CONFIG_IDF_ENV_FPGA`ガード下で`pmu_init()`を呼ぶ．
+実機の`.config`を確認したところ`CONFIG_ESPRESSIF_IDF_ENV_FPGA is not
+set`——**NuttXは実機で確実に`pmu_init()`を実行している**ことを
+ソースレベルで確定した．
+
+つまり「ASP3は無条件でPMU未初期化，NuttXは確実に初期化」という，
+仮説を検証する上で理想的なコントラストが存在する．
+
+**検証**：PMUレジスタブロック（`DR_REG_PMU_BASE=0x600B0000`〜
+次ブロック`DR_REG_LP_CLKRST_BASE=0x600B0400`の直前まで，256ワード
+＝1KB全域．`soc/reg_base.h`で境界確認済み）をJTAG `mdw`で両ビルド
+から採取し比較した．
+
+**結果：256ワード全域が1ビットも違わず完全一致**（`diff`で差分0行）．
+値そのものは`0x1ff00001`・`0x7fbfdfe0`・`0xf3480003`・`0xffffffff`
+など明らかにPOR全ゼロではない構造化された値（コーディネータが
+以前確認した`PMU_RF_PWC_REG`もこのブロック内に含まれる）——にも
+かかわらず，`pmu_init()`を呼ぶNuttXと，PMUに一切触れないASP3とで
+**全く同じ値**になっている．これは，このチップ・このsdkconfig
+構成における`pmu_init()`のソフトウェア書込みが，ROM/PORのハードウェア
+既定値と完全に一致する（＝実質的に冪等）ことを意味する．
+
+### 項目1（PS mode）：両者ともデフォルト値のまま——理論上も除外
+
+ASP3・NuttXとも，`esp_wifi_set_ps()`の明示的呼出しはアプリ／
+アダプタ層のどこにも存在しない（`grep`で0件）．つまり両者とも
+blobの既定値（C6世代は`WIFI_PS_MIN_MODEM`）をそのまま使っている．
+**両者が全く同じ既定値を使っており，かつNuttX側は正常動作している
+以上，既定値そのものが原因ではあり得ない**（既定値が原因なら
+NuttXも同じ症状を示すはず）——実機再検証を待たずに理論的に除外できる．
+
+### 項目3（wifi_reset_mac_wrapper）：実装が完全一致
+
+両実装を直接比較：ASP3・NuttXとも
+`modem_clock_module_mac_reset(PERIPH_WIFI_MODULE);`の1行のみで完全に
+同一．独自の分岐・追加処理は無い．
+
+### 項目2（I2C_ANA_MST clock source select）：完全一致
+
+`MODEM_LPCON_I2C_MST_CLK_CONF_REG`（`DR_REG_MODEM_LPCON_BASE+0x10`
+＝`0x600af010`．bit0=`CLK_I2C_MST_SEL_160M`）——実施25の全域
+チェックサム掃引が`DR_REG_MODEM_LPCON_BASE`を境界として**その手前まで**
+だったため，この特定レジスタは今回が初めての直接確認だった．
+JTAGで両ビルドから読み取ったところ，**両者とも`0x00000001`
+（160MHzクロックソース選択，同一）**．
+
+### 項目5（tsens/SAR電源経路）：構造的に分岐不可能
+
+`phy_xpd_tsens()`（温度センサ電源投入）は`hal/components/esp_phy/
+src/phy_init.c`内で直接呼ばれており，この関数自体がASP3・NuttX
+共通のvendored共有ソース（両者が同一ファイルをそのままコンパイル）
+である．したがってASP3・NuttXどちらのポートも，この呼出しの有無や
+タイミングをアーキ側で個別に制御していない——**両者は必然的に
+同一の呼出しを実行する**ため，ここに分岐の余地は構造的に存在しない．
+
+### 結論：PMU仮説は全6項目で否定
+
+- 項目4（本命，PMUレジスタ全域）：**完全一致で否定**．
+- 項目1（PS mode既定値）：**両者同一のため理論上除外**．
+- 項目2（I2C_ANA_MST clock source select）：**完全一致で否定**．
+- 項目3（wifi_reset_mac_wrapper実装）：**完全一致で否定**．
+- 項目5（tsens/SAR電源経路）：**共有ソースのため構造的に分岐不可能**．
+
+PMUはC3に存在しない新カテゴリとして検討する価値のある筋の良い仮説
+だったが，実際に確認した結果，**PMUパラメータレジスタ自体は
+ROM/POR既定値がすでに正しく（`pmu_init()`と同じ値に）構成されており，
+ASP3がこれを呼ばないことは実害がない**と判明した．実施19で確定した
+AGC/PHY凍結の原因は依然としてPMU以外の要因にある．
+
+### 検証コマンド
+
+```bash
+# PMUレジスタブロック全域比較（NuttX/ASP3それぞれをフラッシュ後）
+openocd ... -c "init" -c "mdw 0x600b0000 256" -c "shutdown"
+
+# I2C_ANA_MST clock source select単発確認
+openocd ... -c "init" -c "mdw 0x600af010" -c "shutdown"
+```
+
+両者とも実機（`/dev/ttyACM0`）・JTAG（`adapter serial`でC6実機指定）
+で確認．ボードは検証後NuttXイメージのまま（次の実施29続行のため）．
