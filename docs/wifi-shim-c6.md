@@ -1989,3 +1989,63 @@ NuttX側の変更（`esp_wifi_trace.c`新規・`Make.defs`／
 `/home/honda/.claude/jobs/494f98a3/tmp/nuttx-c6/`にのみ存在し
 （asp3_esp_idfリポジトリ外・ジョブ一時領域），再現する場合は本節の
 記述（関数名・挿入位置）を参照して再実装すること．
+
+## 実施16：セカンドオピニオン第6ラウンド（Fable）— Priority 1（ROM占有RAM領域の重複監査）を実施・反証
+
+「ソフトウェア呼び出しグラフが完全一致する以上，差分は『呼ばれるか
+否か』ではなく『同じ呼び出しの効果』にある」という整理のもと，
+最優先（静的解析のみ・実機不要）としてROM占有RAM領域との重複を
+監査した．これは`clk_wifipwr_en`・`clk_i2c_mst_en`・（反証済みの）
+`CONFIG_IDF_TARGET_ESP32C6`に続く「Direct Bootがブートローダ側の
+副作用を再現できていない」という同型バグの4件目の可能性という
+指摘．
+
+### 手法
+
+`hal/components/esp_rom/esp32c6/ld/esp32c6.rom.*.ld`全ファイルから
+「Data (.data, .bss, .rodata)」セクションのアドレスを機械的に抽出．
+ROM独自のグローバル状態（関数ポインタテーブル・coex/net80211/pp/
+heap/spiflash等の内部管理構造体）が置かれる固定アドレス群が3つの
+クラスタに分かれることを確認：
+
+1. `0x40000280`〜`0x40000390`：ROM本体のコード/データ領域内
+   （SRAM外．無関係）．
+2. `0x4004fd40`〜`0x4004ffe0`：ROM専用の別RAM領域（同じくアプリ
+   SRAM＝`0x40800000`〜とは無関係）．
+3. **`0x4087fce8`〜`0x4087ffe8`（約4.5KB）：アプリSRAM領域内**．
+   `coex_env_ptr`・`g_scan`・`g_chm`・`net80211_funcs`・
+   `pTxRx`・`lmacConfMib_ptr`・`heap_tlsf_table_ptr`・
+   `rom_spiflash_legacy_funcs`等，Wi-Fi/coex/heap関連のROM内部
+   状態がまさにこの領域に集中している．
+
+C6の実SRAM総容量は`soc.h`の`SOC_DRAM_LOW=0x40800000`・
+`SOC_DRAM_HIGH=0x40880000`から512KB（0x80000）．
+
+### ASP3の実際のRAM使用範囲
+
+`asp3/target/esp32c6_espidf/esp32c6.ld`の`MEMORY`宣言：
+
+```
+RAM(rwx) : ORIGIN = 0x40800000, LENGTH = 448k    /* = 0x40870000まで */
+```
+
+**448KBは実SRAM512KBより64KB少ない．** つまりASP3は最初から
+ハードウェア上限（0x40880000）ではなく，そこから64KB手前
+（0x40870000）までしかRAM領域として宣言しておらず，リンカが
+`.data`/`.bss`をこの範囲を超えて配置することは（リンクエラーに
+なるため）原理的に不可能．
+
+実際のビルド（`build/c6_wifi_scan/asp.elf`）で検証：
+`__bss_end = 0x4084aac8`（448KB宣言のうち実際に使っているのは
+先頭から約301KBのみ）．ROM占有クラスタの下端`0x4087fce8`まで
+は，ASP3の宣言済みRAM上限（`0x40870000`）からもなお約63KBの
+余裕があり，実際の`__bss_end`からは約215KBの余裕がある．
+
+### 結論：**重複なし．Priority 1は反証**
+
+`clk_wifipwr_en`／`clk_i2c_mst_en`のケースとは異なり，本件は
+ASP3が「知らずに安全側に倒れていた」ケース（448kという数値の
+由来は不明だが，結果として実SRAM総量より一貫して小さく，ROM
+占有領域の下端まで数十KBの余裕を持って収まっている）．スタック
+オーバーフロー等の動的な要因を除けば，静的な意味でのROM状態破壊は
+発生し得ない．この方向の追求はここで打ち切る．
