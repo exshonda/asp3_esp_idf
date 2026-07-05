@@ -159,6 +159,7 @@ main_task(EXINF exinf)
 	wifi_regsnap_dump();	/* DIAGNOSTIC (temporary, Priority 2) */
 	wifi_regi2c_dump();	/* DIAGNOSTIC（実施23／Priority 2） */
 	wifi_taskdelay_dump();	/* DIAGNOSTIC（実施26／タイミング感度調査） */
+	wifi_phyinit_dump();	/* DIAGNOSTIC（実施36／phy_init呼出し境界の一点スナップショット） */
 
 	num = 20;
 	recs = (wifi_ap_record_t *)

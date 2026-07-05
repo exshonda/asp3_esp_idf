@@ -185,7 +185,22 @@ WIFI_TRACE_WRAP4(_do_wifi_start, 17)
 WIFI_TRACE_WRAP4(ieee80211_update_phy_country, 18)
 WIFI_TRACE_WRAP4(wifi_start_process, 19)
 WIFI_TRACE_WRAP4(wifi_set_promis_process, 20)
-WIFI_TRACE_WRAP4(register_chipv7_phy, 21)
+/*
+ *  register_chipv7_phyは呼出し**直前**（実施36スナップショット）に
+ *  加え，通常どおり戻り値もトレースする（実施36の下でカスタム実装に
+ *  差し替え．generic WIFI_TRACE_WRAP4は使わない）．
+ */
+extern long __real_register_chipv7_phy(long a0, long a1, long a2, long a3);
+long
+__wrap_register_chipv7_phy(long a0, long a1, long a2, long a3)
+{
+	long	ret;
+
+	wifi_phyinit_capture_entry();
+	ret = __real_register_chipv7_phy(a0, a1, a2, a3);
+	wifi_trace_push(21U, 0U, (uintptr_t)a0, (uintptr_t)a1, (uintptr_t)ret);
+	return(ret);
+}
 /*
  *  DIAGNOSTIC (temporary，Priority 2)：register_chipv7_phy()内部
  *  （closed-source）が実際に呼ぶROM常駐PHY関数（esp32c6.rom.phy.ld
@@ -628,4 +643,93 @@ void
 wifi_regi2c_dump_count(void)
 {
 	syslog(LOG_NOTICE, "wifi_regi2c_cnt: total=%d", (int_t)wifi_regi2c_pos);
+}
+
+/*
+ *  DIAGNOSTIC（実施36／コーディネータ指示：phy_init呼出し境界の
+ *  一点スナップショット）．BBPLLロック/較正ステータス
+ *  （I2C_BBPLL block=0x66,hostid=0,reg_add=8: bit7=OR_LOCK,
+ *  bit6=OR_CAL_END,bit5=OR_CAL_OVF．soc/regi2c_bbpll.h）はregi2c経由
+ *  でしか読めないため，wifi_regi2c_patch_install()と同じROM常駐
+ *  関数ポインタテーブル（起動時に固定済み．実施23で実証済み）から
+ *  read_mask枠（idx23=rom_i2c_readReg_Mask）を取得して直接呼ぶ．
+ *  write枠のパッチ（差し替え）とは異なり，読み出しは横取りせず
+ *  素通しで良いため，パッチインストール不要．
+ */
+#define WIFI_PHYFUNS_IDX_I2C_READ_MASK 23U
+
+typedef uint8_t (*wifi_regi2c_read_mask_fn_t)(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+
+static wifi_phyinit_snap_t	wifi_phyinit_snap;
+
+void
+wifi_phyinit_capture_entry(void)
+{
+	volatile uint32_t	*agc_base = (volatile uint32_t *)WIFI_PHY_AGC_BASE;
+	uint32_t			sum = 0U;
+	uint32_t			i;
+	uint32_t			*romtbl = (uint32_t *)WIFI_ROM_PHYFUNS_TABLE_ADDR;
+	wifi_regi2c_read_mask_fn_t read_mask_fn =
+		(wifi_regi2c_read_mask_fn_t)(uintptr_t)romtbl[WIFI_PHYFUNS_IDX_I2C_READ_MASK];
+
+	if (wifi_phyinit_snap.captured != 0U) {
+		/* 既に採取済み（2回目以降の呼出しは無視．最初の1回のみ記録） */
+		return;
+	}
+
+	wifi_phyinit_snap.t_us_low = (uint32_t)esp_shim_time_us();
+
+	wifi_phyinit_snap.agc_spot =
+		*(volatile uint32_t *)(WIFI_PHY_AGC_BASE + WIFI_PHY_AGC_SPOT_OFF);
+	for (i = 0U; i < WIFI_PHY_AGC_WORDS; i++) {
+		sum += agc_base[i];
+	}
+	wifi_phyinit_snap.phy_agc_sum = sum;
+
+	wifi_phyinit_snap.modem_lpcon_clk_conf =
+		*(volatile uint32_t *)0x600af018UL;	/* MODEM_LPCON_CLK_CONF_REG */
+	wifi_phyinit_snap.modem_syscon_clk_conf =
+		*(volatile uint32_t *)WIFI_MODEM_SYSCON_CLK_CONF_REG;
+	wifi_phyinit_snap.modem_syscon_rst_conf =
+		*(volatile uint32_t *)WIFI_MODEM_SYSCON_RST_CONF_REG;
+	wifi_phyinit_snap.modem_syscon_wifi_bb_cfg =
+		*(volatile uint32_t *)WIFI_MODEM_SYSCON_WIFI_BB_CFG_REG;
+
+	wifi_phyinit_snap.pmu_icg_modem =
+		*(volatile uint32_t *)0x6009600cUL;	/* PMU_HP_ACTIVE_ICG_MODEM_REG */
+	wifi_phyinit_snap.pmu_hp_regulator0 =
+		*(volatile uint32_t *)0x60096028UL;	/* PMU_HP_ACTIVE_HP_REGULATOR0_REG */
+
+	/* I2C_BBPLL=0x66, hostid=0, reg_add=8, bit7/6/5 */
+	wifi_phyinit_snap.bbpll_or_lock    = read_mask_fn(0x66U, 0U, 8U, 7U, 7U);
+	wifi_phyinit_snap.bbpll_or_cal_end = read_mask_fn(0x66U, 0U, 8U, 6U, 6U);
+	wifi_phyinit_snap.bbpll_or_cal_ovf = read_mask_fn(0x66U, 0U, 8U, 5U, 5U);
+
+	wifi_phyinit_snap.captured = 1U;
+}
+
+void
+wifi_phyinit_dump(void)
+{
+	if (wifi_phyinit_snap.captured == 0U) {
+		syslog(LOG_NOTICE, "wifi_phyinit: NOT CAPTURED (register_chipv7_phy never entered)");
+		return;
+	}
+	syslog(LOG_NOTICE, "wifi_phyinit: t=%d agc_spot=%08x phy_agc_sum=%08x",
+		   (int_t)wifi_phyinit_snap.t_us_low,
+		   (unsigned int)wifi_phyinit_snap.agc_spot,
+		   (unsigned int)wifi_phyinit_snap.phy_agc_sum);
+	syslog(LOG_NOTICE, "wifi_phyinit: lpcon_clk_conf=%08x syscon_clk_conf=%08x",
+		   (unsigned int)wifi_phyinit_snap.modem_lpcon_clk_conf,
+		   (unsigned int)wifi_phyinit_snap.modem_syscon_clk_conf);
+	syslog(LOG_NOTICE, "wifi_phyinit: syscon_rst_conf=%08x syscon_wifi_bb_cfg=%08x",
+		   (unsigned int)wifi_phyinit_snap.modem_syscon_rst_conf,
+		   (unsigned int)wifi_phyinit_snap.modem_syscon_wifi_bb_cfg);
+	syslog(LOG_NOTICE, "wifi_phyinit: pmu_icg_modem=%08x pmu_hp_regulator0=%08x",
+		   (unsigned int)wifi_phyinit_snap.pmu_icg_modem,
+		   (unsigned int)wifi_phyinit_snap.pmu_hp_regulator0);
+	syslog(LOG_NOTICE, "wifi_phyinit: bbpll_or_lock=%d or_cal_end=%d or_cal_ovf=%d",
+		   (int_t)wifi_phyinit_snap.bbpll_or_lock,
+		   (int_t)wifi_phyinit_snap.bbpll_or_cal_end,
+		   (int_t)wifi_phyinit_snap.bbpll_or_cal_ovf);
 }
