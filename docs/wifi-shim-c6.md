@@ -1524,5 +1524,59 @@ wifi_scan: DIAG promisc_rx_count=0
   `pp_tx_pkt`）ではなく，**RXイネーブル・MAC起動シーケンス自体**
   （`wifi_hw_start`相当・MACのRX許可ビット・RXデスクリプタ／
   `esf_buf`供給）を最優先で追うべき．
-- 次点でCheck 2の値レベル監査（`wifi_init_config_t`の
-  `sta_disconnected_pm`等）は未実施のまま残っている．
+## 実施11：Check 2（`wifi_init_config_t`値レベル監査）完了 — RXバッファ数は一致，PM系に軽微な差分1件
+
+`wifi_scan.c`は`WIFI_INIT_CONFIG_DEFAULT()`を使用（C3から流用の手書き
+構成ではない）．実体は`CONFIG_ESP_WIFI_*`→（`hal/nuttx/esp32c6/
+include/sdkconfig.h`経由で）`CONFIG_ESPRESSIF_WIFI_*`という別名連鎖
+だが，肝心の数値定義は`hal/nuttx/esp32c6/include/sdkconfig.h`自体には
+存在せず，`asp3/target/esp32c3_espidf/hal_stub/include/nuttx/
+config.h`（C3時代に手書きされたASP3独自スタブ．C6でも共用）が
+実際の値を提供している．これをNuttXの実ビルド`.config`（実施6で
+実機AP検出に成功した構成そのもの）と1件ずつ突き合わせた：
+
+| フィールド | ASP3（hal_stub） | NuttX実`.config` | 一致 |
+|---|---|---|---|
+| static_rx_buf_num | 10 | 10 | ○ |
+| dynamic_rx_buf_num | 32 | 32 | ○ |
+| rx_mgmt_buf_num | 5 | 5 | ○ |
+| rx_mgmt_buf_type | 0 | 0 | ○ |
+| rx_ba_win | 6 | 6 | ○ |
+| ampdu_rx_enable | 1 | （未確認だが既定1） | ○相当 |
+| tx_buf_type | 1（動的） | 1（動的） | ○ |
+| dynamic_tx_buf_num | 32 | 32 | ○ |
+| static_tx_buf_num | **0** | **16** | **✗不一致** |
+| sta_disconnected_pm | **false(0)** | **true(y)** | **✗不一致** |
+
+**RX関連バッファ数（static/dynamic RXバッファ・RX管理バッファ・
+RX BA窓）は全てNuttXと完全一致**．Check 2が懸念していた「C3流用の
+手書き構成でC6向けの値が0や過小になっている」という仮説は，RXに
+関しては反証された．
+
+2件の不一致を発見：
+- `static_tx_buf_num`（0 vs 16）：`tx_buf_type=1`（動的バッファ）が
+  両者で選択されており，ESP-IDFの設計上この場合`static_tx_buf_num`
+  は使われない値のはず（`WIFI_STATIC_TX_BUFFER_NUM`マクロも
+  `CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM`未定義時は0が既定）．TX
+  経路の差分であり，かつ動的モードでは無関係な可能性が高いため，
+  現在最優先のRX問題の説明にはならないと判断．
+- `sta_disconnected_pm`（false vs true）：「未接続状態での省電力
+  管理」のON/OFF．本テストは終始未接続（スキャンのみ）のためこの
+  設定が有効域に入るが，**ASP3はfalse（無効）側**＝省電力で無線を
+  間欠停止させない，より「常時オン」に近い設定．もしこれが原因なら
+  むしろNuttX側（true＝間欠的に省電力へ入る）の方がRXに穴が空き
+  やすいはずで，方向性が逆．RX完全ゼロの説明として弱いと判断し，
+  優先度を下げる（真逆方向の設定でASP3の方が「常時受信」に近いのに
+  0件という事実の方が重い）．
+
+### 結論・申し送り（更新）
+
+Check 1（PM/retention）・Check 2（config値）ともほぼ消尽．残る
+デジタル比較の余地は乏しく，静的比較で説明できる範囲はここまで．
+次段はコーディネータ提案の`--wrap`リンカトリック（`chip_v7_set_chan`
+ではなくRXイネーブル/`esf_buf_alloc`相当・`hal_init`相当・
+`_malloc`/`_calloc`/`_queue_send`/`_queue_recv`等FreeRTOS互換
+ラッパーの呼び出し回数・引数・戻り値をNuttXと突き合わせるトレース
+基盤）が唯一の残された具体的な次の一手．これは新規のインフラ構築
+（シンボル名の実機確認・リングバッファ実装・ASP3とNuttX両方への
+適用）を要する相応の作業量のため，着手前に確認を仰ぐ．
