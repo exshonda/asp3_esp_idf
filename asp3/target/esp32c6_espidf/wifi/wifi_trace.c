@@ -298,6 +298,17 @@ __wrap_coex_schm_interval_get(long a0, long a1, long a2, long a3)
 #define WIFI_MODEM_SYSCON_WIFI_BB_CFG_REG 0x600a981cUL
 
 /*
+ *  実施25で，FE領域（0x600a0000〜0x600a3000）・MODEM_SYSCON領域
+ *  （0x600a9800〜0x600af000）の全域チェックサムを試したが，(1)未文書化
+ *  領域の一部読出しが1ワードあたり数百usという異常な遅延を示し
+ *  （120ms/チャネルだったチェックポイント間隔が1.8秒/チャネルまで
+ *  悪化），(2)チェックサム自体はASP3・NuttX双方で同一パターン
+ *  （約4MHzのフリーランカウンタらしき値が支配的．frozen-vs-varying
+ *  ではない＝陰性）だったため，コストに見合わず本体には残さず
+ *  revertした．詳細はdocs/wifi-shim-c6.md 実施25参照．
+ */
+
+/*
  *  DIAGNOSTIC（実施20）：phy_param（libphy.a）+164のビットマスク．
  *  bit10（0x400）がセットされているとrxiq_cal_init()が
  *  chip_v7_set_chan_ana()呼出しを含む全処理をスキップすることを
