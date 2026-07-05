@@ -4334,3 +4334,206 @@ NuttX側で前段の`bootloader_hardware_init()`を保持したまま後段の
   読出しプローブは残置）の状態でフラッシュされたまま——次回セッション
   で継続する場合はこのビルドを再利用するか，必要に応じて再フラッシュ
   すること．
+
+## 実施35：`rtc_clk_init()`内部の切り分け（ICG map preinit発見）→ ICG+BBPLLキャリブレーション完走も陰性 → phy_init未実行だとNuttXでもAGCが恒久凍結することを確認（決定的リフレーム）
+
+### 背景
+
+コーディネータの指示：「`rtc_clk_init()`を①RTC clock source選択と
+②regi2c経由のBBPLLキャリブレーションの2つの概念的パーツに分離し，
+①単体で十分か，②が必要ならなぜ単独では毎回ハングするのか（NuttX
+実起動時にのみ成功する前提条件が別にあるはず）を調べ，見つかった
+前提条件込みでASP3へ移植して実証すること」．
+
+### `rtc_clk_init()`実体の精読で見つかった第3のピース：モデムクロック
+ドメインICG（Instant Clock Gating）map preinit
+
+`esp_hw_support/port/esp32c6/rtc_clk_init.c`を1行ずつ読んだところ，
+コーディネータが想定した2ピース（clock source選択／BBPLLキャリブ
+レーション）より**前**に，第3のピースが存在することを発見した：
+
+```c
+void rtc_clk_init(rtc_clk_config_t cfg)
+{
+    rtc_cpu_freq_config_t old_config, new_config;
+
+    rtc_clk_modem_clock_domain_active_state_icg_map_preinit();   /* ← これ */
+    ...
+    REGI2C_WRITE_MASK(...);           /* clock tuning */
+    ...
+    rtc_clk_cpu_freq_set_config(&new_config);   /* ← BBPLLキャリブレーション */
+    ...
+    rtc_clk_fast_src_set(cfg.fast_clk_src);      /* ← clock source選択 */
+    rtc_clk_slow_src_set(cfg.slow_clk_src);
+}
+```
+
+`rtc_clk_modem_clock_domain_active_state_icg_map_preinit()`自身の
+コメントが「システム起動処理でi2cマスタペリフェラルが必要になる
+ため，MODEM_APB／I2C_MST／LP_APBクロックドメインのPMU_ACTIVE状態
+でのICG（クロックゲート）を解除する」と明記しており，実施32以来
+繰り返し観測してきたregi2c/BBPLLキャリブレーション待ちループの
+ハングと直接関係しそうな内容だった．
+
+`asp3/`配下をgrepしたところ，この関数系列（`pmu_ll_hp_set_icg_modem`・
+`modem_syscon_ll_set_modem_apb_icg_bitmap`・`modem_lpcon_ll_set_i2c_
+master_icg_bitmap`・`pmu_ll_imm_update_dig_icg_*`）は**一度も**呼ばれて
+いないことを確認（ゼロ件）．一方，ASP3の`esp_wifi_adapter.c`
+（`wifi_clock_enable_wrapper()`）は，これとは**別系統**のクロック
+イネーブルビット（`modem_lpcon.clk_conf.clk_i2c_mst_en`等，実施6・
+実施31で既に対応済み）は正しく再現していた．ICG mapという，PMU電源
+モードに応じてこのイネーブルビットの実効果自体をマスクする，より
+上位のソフトウェアゲートには初めて気づいた形になる．
+
+### 減算法によるNuttX側テスト①：ICG preinit単体をスキップ
+
+`rtc_clk_init()`冒頭のこの1行だけをスキップする減算テストを実施．
+
+結果：**boot自体がハング**（`CKPT: post_rtc_init`より後の進行がなく，
+`rst:0x7 (TG0_WDT_HPSYS)`による無限リブートループに陥る——実施34で
+`bootloader_clock_configure()`丸ごとスキップした時と同一の症状）．
+これにより，このICG preinitが，regi2c/BBPLLキャリブレーション
+待ちループが実際にハングせず完走するための**前提条件**であることが
+決定的に確認された（実施32・実施34で繰り返し観測してきたハングの
+真因）．
+
+### ASP3側での直接検証：ICG preinit単体では不十分，ICG+BBPLLキャリブレーション完走の組合せも陰性
+
+`agc_probe`アプリに`rtc_clk_modem_clock_domain_active_state_icg_map_
+preinit()`を丸ごと移植し（`AGC_PROBE_ICG_PREINIT`ゲート），ASP3の
+早期起動（タスク起動直後）で単体実行．
+
+結果：**AGCは相変わらず凍結**（実行前後で同一値`d20b79f8`）．ICG
+preinit単体はAGCを起こすのに不十分．
+
+続けて，ICG preinitに加えて実際のCPU周波数/BBPLLキャリブレーション
+切替え（`rtc_clk_cpu_freq_mhz_to_config`+`rtc_clk_cpu_freq_set_config`.
+実施34のstep4で試してハングしていたのと同じコード）を組み合わせて
+再試行（`AGC_PROBE_BBPLL_CAL`ゲート．リンクには`regi2c_ctrl.c`・
+`esp_rom_hp_regi2c_esp32c6.c`が必要で一時的に`esp_wifi.cmake`へ追加）．
+
+結果：**今度はハングせず完走した**（`BBPLL_CAL step2 ok=1`・
+`BBPLL_CAL done`とも出力，regi2cキャリブレーション待ちループを実際に
+抜けたことを確認）——ICG preinitが確かにこのハングの前提条件で
+あったことの直接確認．**しかしAGCは依然として凍結したまま**
+（同一値`d20b79f8`のまま50サンプル変化なし）．
+
+これは決定的な陰性結果である：コーディネータが指示した`rtc_clk_
+init()`の系統的切り分け（clock source選択・BBPLLキャリブレーション・
+ICG preinit）を，個別にも組合せても全て試し終え，**いずれもAGCの
+有効化とは無関係**であることが確定した．ICG preinitはBBPLL
+キャリブレーションが完走するための前提条件としては確かに機能する
+（実施34の「ハングという交絡」の謎を解いた）が，このハング自体は
+AGCとは別の現象であり，「skip bootloader_clock_configure()すると
+AGCが凍結する」という実施34の観測は，「その関数が本質的に必要」
+ためではなく，「boot自体がハングして，どこか別の場所にある本当の
+enablerに到達できなかっただけ」という交絡だったことになる．
+
+### アドバイザへの相談とフレーム転換：AGCの生死はphy_init実行そのものに紐づく可能性
+
+ここまでの`rtc_clk_init()`系統の徹底的な陰性結果を報告したところ，
+根本的な指摘を受けた：**「NuttXでAGCがt=0.2sという早期から
+『生きている』ように見えるのは，本当に早期起動由来なのか，それとも
+単にAGC（Automatic Gain Control）がその物理的性質上，PHYの
+RX較正・稼働（phy_init／enable_agc）が実際に走っている間だけ
+変動する信号であり，早期起動とは無関係なのではないか？」**という，
+本セッションでこれまで一度も統制していなかった交絡．`agc_probe`は
+esp_wifi_init/startを一切呼ばないため，この仮説の下では**原理的に
+AGCを起こせないアプリ**であり，実施34・実施35のすべての「Xを足しても
+凍結のまま」という結果は，「Xが無関係」なのか「agc_probe自体が
+phy_initを never runするため何をやっても無駄」なのか，これまで
+区別できていなかったことになる．
+
+### 決定的な統制実験：NuttXで`board_wlan_init()`（phy_init一式）を
+無効化してAGCを観測
+
+`esp32c6_bringup.c`の`board_wlan_init()`呼出しを`#ifdef AGC_SKIP_
+WLAN_INIT`でスキップ（Wi-Fi/wpa_supplicant/mbedtls一式がgc-sections
+でリンクから丸ごと脱落．FLASH使用量が987KB→452KBへ激減し，実際に
+一切コンパイル・リンクされていないことを確認）．`asp3_jump`カーネル
+スレッドの起動も同様にスキップ（この統制実験にジャンプ実験を混在
+させないため）．
+
+結果：
+- ブート自体は正常にNuttShell (NSH)まで到達（CKPT4件とも正常出力，
+  クラッシュ・ハングなし）．
+- シリアルログに`enable_agc`・`phy_bbpll_cal`・`wifi_trace`・
+  `register_chipv7_phy`のいずれも一切出現せず（0件）——phy_initが
+  本当に一度も走っていないことを確認．
+- **非停止JTAGポーリング（`0x600a7128`，10ms間隔，起動直後から
+  13.8秒間，1200サンプル）：全サンプルが同一値`d20b79f8`——
+  遷移0回．NSH到達後も含め，観測窓全体を通じてAGCは完全に凍結**
+  していた．
+
+この`d20b79f8`という値は，本セッションを通じてASP3側の複数の
+テスト（ICG_PREINIT単体・ICG+BBPLL_CAL）で観測してきた凍結値と
+**完全に一致**する．
+
+### 結論：AGCの生死はphy_init（`register_chipv7_phy`/`enable_agc`）
+の実行そのものに紐づく．早期起動・クロック初期化とは無関係
+
+これにより，本セッション（実施34・実施35）で行ってきた早期起動
+シーケンスの系統的bisection（`esp_clk_init()`・
+`hardware_init_hook()`・ICG preinit・BBPLLキャリブレーション，
+個別にも組合せても全て陰性）は，**そもそも探索する場所が違って
+いた**ことが確定した．実施29の「Priority A」で観測した「NuttX起動
+中，t=0.2s付近からAGCが自律的に変動している」という所見自体は
+事実として正しいが，その原因は早期ブートの特定の一手順ではなく，
+**そのビルドが（今回のような意図的無効化なしに）通常どおりWi-Fi
+初期化＝`board_wlan_init()`を実行し，phy_init／`enable_agc`が
+実際に走った結果**だった（本セッション最初の方でJTAGポーリングを
+行っていたビルドは全て`CONFIG_ESPRESSIF_WIFI`有効かつ
+`board_wlan_init()`を無効化していない構成であり，t=3s付近で
+Wi-Fi初期化が自動的に走っていたことをwifi_traceログで確認済み——
+気づかずにこの交絡下で計測を続けていたことになる）．
+
+**したがって，今後の探索すべき問いは「NuttXの起動シーケンスの
+どの一手順がAGCを有効化するか」ではなく，「ASP3もNuttXも同一の
+`libphy.a`ブロブ（`register_chipv7_phy`・`enable_agc`・
+`phy_bbpll_cal`等，本セッション前半のwifi_traceログで実際に呼ばれて
+いることを既に確認済み）を実行するにもかかわらず，なぜNuttX側では
+これがAGCを実際に稼働させ，ASP3側では稼働させないのか——両者の
+`phy_init`実行時点における実行コンテキスト（レジスタ状態）の差分」
+である**．これは実施26・実施27（FE/BB enable/reset/clock-gate
+checkpoint・全域チェックサムスイープ）が既に部分的に着手していた
+方向性だが，「起動時クロック初期化」という誤った土俵で再検証を
+繰り返していた点を修正し，「phy_init呼出し**直前・直後**のレジスタ
+スナップショット比較」という，より的を絞った形で再開する必要がある．
+
+### 変更ファイル（すべてスクラッチ／一時ゲート．テスト後は元の状態に完全復元済み）
+
+- NuttXスクラッチツリー（Gitリポジトリ外）：
+  - `esp_hw_support/port/esp32c6/rtc_clk_init.c`：一時的に
+    `AGC_SKIP_MODEM_ICG_PREINIT`ガードを追加してICG preinit単体を
+    スキップするテストに使用——**テスト後，元の無条件呼出しに
+    完全復元済み**．
+  - `boards/risc-v/esp32c6/esp32c6-devkitc/src/esp32c6_bringup.c`：
+    `AGC_SKIP_WLAN_INIT`定義を追加し，`board_wlan_init()`呼出しと
+    `asp3_jump`カーネルスレッド起動の両方をこのマクロでガード
+    （決定的統制実験用．現在も有効＝次回セッションでこのビルドを
+    再利用する場合はWi-Fi無効状態のままである点に注意．元に戻すには
+    冒頭の`#define AGC_SKIP_WLAN_INIT 1`を削除して再ビルドすること）．
+- `asp3_esp_idf`リポジトリ側（Gitで追跡）：
+  - `apps/agc_probe/agc_probe.c`：`AGC_PROBE_ICG_PREINIT`・
+    `AGC_PROBE_BBPLL_CAL`の2ゲートを一時的に追加してテスト——
+    **テスト後，`git checkout`で完全復元済み（差分ゼロ確認済み）**．
+  - `asp3/target/esp32c6_espidf/esp_wifi.cmake`：`regi2c_ctrl.c`・
+    `esp_rom_hp_regi2c_esp32c6.c`を一時的にソースリストへ追加——
+    **テスト後，`git checkout`で完全復元済み（差分ゼロ確認済み）**．
+
+### 検証
+
+- NuttXスクラッチビルド：ICG preinit単体スキップ・ICG+BBPLL_CAL
+  組合せ・`board_wlan_init()`無効化，いずれも`make CROSSDEV=...`で
+  ビルド成功．
+- ASP3側：`c6_agc_probe_icg`（ICG preinit単体）・`c6_agc_probe_bbpll`
+  （ICG+BBPLL_CAL組合せ）とも`cmake --build`成功，実機フラッシュ・
+  シリアル観測で上記結果を確認．
+- `board_wlan_init()`無効化統制実験：非停止JTAGポーリング
+  （`0x600a7128`，10ms間隔，13.8秒，1200サンプル）で凍結を確認．
+  シリアルログでphy/wifi関連文字列0件を確認（`grep -c`）．
+- ボードは現在，`board_wlan_init()`無効化状態のNuttX
+  （`AGCPROBE`早期読出しプローブも残置）でフラッシュされたまま．
+  次回セッションでWi-Fi初期化ありの通常NuttXへ戻す場合は
+  `AGC_SKIP_WLAN_INIT`定義を削除して再ビルド・再フラッシュする
+  こと．
