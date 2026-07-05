@@ -265,6 +265,39 @@ __wrap_coex_schm_interval_get(long a0, long a1, long a2, long a3)
 #define WIFI_INTMTX_S2 0x6001013cUL
 
 /*
+ *  DIAGNOSTIC（実施24／Priority 2続き）：FE/BBのenable/reset/
+ *  clock-gate系レジスタ．コーディネータの指示により，AGCスポット
+ *  レジスタだけでなくこの種のビットを追加でスナップショットする．
+ *
+ *  ROM ELF（esp32c6_rev0_rom.elf）の`enable_agc`/`disable_agc`/
+ *  `fe_txrx_reset`/`mac_enable_bb`を逆アセンブルして特定：
+ *
+ *  - 0x600a7030（AGC領域内．公開ヘッダ未収録）：bit29が
+ *    enable_agc/disable_agcが直接トグルするAGC本体のenableビット
+ *    （disable_agcはセット＝無効化，enable_agcはクリア＝有効化）．
+ *  - 0x600a0460（FE領域内．公開ヘッダ未収録）：bit25-26を
+ *    fe_txrx_resetがクリア→セットの順で叩く．典型的な
+ *    reset assert/deassertパルスパターン．
+ *  - MODEM_SYSCON_CLK_CONF_REG（0x600a9804，公開ヘッダで確認済み）：
+ *    bit0-8=WIFIBBの各クロック速度enable，bit9=WIFIMAC_EN，
+ *    bit10=WIFI_APB_EN．PCR_MODEM_APB_CLK_EN（既に反証済み・別
+ *    モジュール）とは異なる，MODEM_SYSCONモジュール側のクロック
+ *    ゲートで，本ラウンドまで未確認だった経路．
+ *  - MODEM_SYSCON_MODEM_RST_CONF_REG（0x600a9810，公開ヘッダで
+ *    確認済み）：bit8=RST_WIFIBB，bit10=RST_WIFIMAC，bit14=RST_FE．
+ *    いずれかがASP3側だけ1（reset assert状態）に固定されていれば，
+ *    デジタルBB/MAC/FEが完全に沈黙する説明として筋が通る．
+ *  - MODEM_SYSCON_WIFI_BB_CFG_REG（0x600a981c，公開ヘッダで
+ *    確認済み．`mac_enable_bb`のbit16/1，`bb_bss_cbw40_dig`の
+ *    bit2が書き込む対象）．
+ */
+#define WIFI_AGC_ENABLE_REG 0x600a7030UL	/* enable_agc/disable_agc: bit29 */
+#define WIFI_FE_TXRX_RESET_REG 0x600a0460UL	/* fe_txrx_reset: bit25-26 */
+#define WIFI_MODEM_SYSCON_CLK_CONF_REG 0x600a9804UL
+#define WIFI_MODEM_SYSCON_RST_CONF_REG 0x600a9810UL
+#define WIFI_MODEM_SYSCON_WIFI_BB_CFG_REG 0x600a981cUL
+
+/*
  *  DIAGNOSTIC（実施20）：phy_param（libphy.a）+164のビットマスク．
  *  bit10（0x400）がセットされているとrxiq_cal_init()が
  *  chip_v7_set_chan_ana()呼出しを含む全処理をスキップすることを
@@ -281,6 +314,11 @@ typedef struct {
 	uint32_t	agc_spot;
 	uint32_t	phy_agc_sum;
 	uint32_t	phy_param_flags;
+	uint32_t	agc_enable_reg;
+	uint32_t	fe_txrx_reset_reg;
+	uint32_t	modem_clk_conf;
+	uint32_t	modem_rst_conf;
+	uint32_t	modem_wifi_bb_cfg;
 } wifi_regsnap_t;
 
 static wifi_regsnap_t	regsnap[WIFI_REGSNAP_SIZE];
@@ -312,6 +350,11 @@ wifi_regsnap_capture(void)
 	}
 	e->phy_agc_sum = sum;
 	e->phy_param_flags = *(volatile uint32_t *)(phy_param + WIFI_PHY_PARAM_FLAGS_OFF);
+	e->agc_enable_reg = *(volatile uint32_t *)WIFI_AGC_ENABLE_REG;
+	e->fe_txrx_reset_reg = *(volatile uint32_t *)WIFI_FE_TXRX_RESET_REG;
+	e->modem_clk_conf = *(volatile uint32_t *)WIFI_MODEM_SYSCON_CLK_CONF_REG;
+	e->modem_rst_conf = *(volatile uint32_t *)WIFI_MODEM_SYSCON_RST_CONF_REG;
+	e->modem_wifi_bb_cfg = *(volatile uint32_t *)WIFI_MODEM_SYSCON_WIFI_BB_CFG_REG;
 }
 
 void
@@ -336,6 +379,13 @@ wifi_regsnap_dump(void)
 			   (unsigned int)regsnap[idx].phy_agc_sum);
 		syslog(LOG_NOTICE, "wifi_regsnap:   phy_param_flags=%08x",
 			   (unsigned int)regsnap[idx].phy_param_flags);
+		syslog(LOG_NOTICE, "wifi_regsnap:   agc_en=%08x fe_txrx_rst=%08x",
+			   (unsigned int)regsnap[idx].agc_enable_reg,
+			   (unsigned int)regsnap[idx].fe_txrx_reset_reg);
+		syslog(LOG_NOTICE, "wifi_regsnap:   clk_conf=%08x rst_conf=%08x bb_cfg=%08x",
+			   (unsigned int)regsnap[idx].modem_clk_conf,
+			   (unsigned int)regsnap[idx].modem_rst_conf,
+			   (unsigned int)regsnap[idx].modem_wifi_bb_cfg);
 	}
 }
 
