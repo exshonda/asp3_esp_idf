@@ -261,6 +261,7 @@ list(APPEND ASP3_LINK_OPTIONS
     -Wl,--wrap=ieee80211_update_phy_country
     -Wl,--wrap=wifi_start_process
     -Wl,--wrap=wifi_set_promis_process
+    -Wl,--wrap=register_chipv7_phy
 )
 
 list(APPEND ASP3_LINK_OPTIONS

@@ -69,6 +69,7 @@ wifi_trace_name(uint16_t id)
 	case 18: return("ieee80211_update_phy_country");
 	case 19: return("wifi_start_process");
 	case 20: return("wifi_set_promis_process");
+	case 21: return("register_chipv7_phy");
 	default: return("?");
 	}
 }
@@ -134,3 +135,4 @@ WIFI_TRACE_WRAP4(_do_wifi_start, 17)
 WIFI_TRACE_WRAP4(ieee80211_update_phy_country, 18)
 WIFI_TRACE_WRAP4(wifi_start_process, 19)
 WIFI_TRACE_WRAP4(wifi_set_promis_process, 20)
+WIFI_TRACE_WRAP4(register_chipv7_phy, 21)
