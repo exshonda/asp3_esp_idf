@@ -12,7 +12,9 @@
 
 #include "esp_wifi.h"
 #include "esp_event.h"
-#include "wifi_trace.h"
+#ifdef TOPPERS_ESP32C6_WIFI
+#include "wifi_trace.h"	/* C6 AGC調査専用の診断計装（wifi_trace.c／esp32c6_espidfのみ） */
+#endif /* TOPPERS_ESP32C6_WIFI */
 
 /*
  *  スキャン完了通知（esp_event_shim経由）
@@ -84,10 +86,12 @@ main_task(EXINF exinf)
 
 	syslog(LOG_NOTICE, "wifi_scan: initializing shim");
 	esp_shim_initialize();
+#ifdef TOPPERS_ESP32C6_WIFI
 	wifi_trace_reset();
 	wifi_regi2c_reset();	/* DIAGNOSTIC (temporary，実施23／Priority 2) */
 	wifi_regi2c_patch_install();	/* DIAGNOSTIC（実施23）：PHY初期化前に必ずインストール */
 	wifi_taskdelay_reset();	/* DIAGNOSTIC（実施26／タイミング感度調査） */
+#endif /* TOPPERS_ESP32C6_WIFI */
 
 	(void) esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
 									  (void *)wifi_event_handler, NULL);
@@ -146,13 +150,16 @@ main_task(EXINF exinf)
 		(void) esp_wifi_set_promiscuous(false);
 	}
 
+#ifdef TOPPERS_ESP32C6_WIFI
 	wifi_regsnap_reset();	/* DIAGNOSTIC (temporary, Priority 2) */
+#endif /* TOPPERS_ESP32C6_WIFI */
 	err = esp_wifi_scan_start(NULL, false);
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_scan_start -> %d", (int_t)err);
 
 	while (!scan_done) {
 		(void) tslp_tsk(1000000);	/* SCAN_DONEを待つ（最大繰返し） */
 	}
+#ifdef TOPPERS_ESP32C6_WIFI
 	wifi_trace_dump_counts();	/* DIAGNOSTIC（実施20）：syslogバースト・ロス回避のため先に集計版 */
 	wifi_regi2c_dump_count();	/* DIAGNOSTIC（実施23）：同上，先に集計版 */
 	wifi_trace_dump();	/* DIAGNOSTIC (temporary): scan完了後まで延長して捕捉 */
@@ -161,6 +168,7 @@ main_task(EXINF exinf)
 	wifi_taskdelay_dump();	/* DIAGNOSTIC（実施26／タイミング感度調査） */
 	wifi_phyinit_dump();	/* DIAGNOSTIC（実施36／phy_init呼出し境界の一点スナップショット） */
 	wifi_trace_dump_addr();	/* DIAGNOSTIC（実施37／JTAG生読み用アドレス確認） */
+#endif /* TOPPERS_ESP32C6_WIFI */
 
 	num = 20;
 	recs = (wifi_ap_record_t *)
