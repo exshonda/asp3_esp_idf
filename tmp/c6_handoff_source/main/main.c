@@ -165,18 +165,40 @@ app_main(void)
 		num = 20;
 		err = esp_wifi_scan_get_ap_records(&num, recs);
 		{
-			/*  追記12：ASP3と同じRF較正regi2c読み戻し→RTC[16..](0x50000040)．*/
-			uint32_t *romtbl = (uint32_t *)0x4087f954U;
-			uint8_t (*rd)(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t) =
-				(uint8_t (*)(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t))
-					(uintptr_t)romtbl[23];
+			/*  追記12/16：ASP3と同じRF較正regi2c読み戻し→RTC[16..](0x50000040)．
+			 *  g_phyFuns経由・ROM固定関数とも全0x77＝IDFはregi2cバスを
+			 *  トランザクション毎にrefcountでenable/disableするため素の呼出し
+			 *  ではクロック窓外＝ゴミ．IDF正規経路 regi2c_ctrl_read_reg_mask
+			 *  （enable/クリティカルセクション込み・native ELFにリンク済み）を使う． */
+			extern uint8_t regi2c_ctrl_read_reg_mask(uint8_t block, uint8_t host_id,
+													 uint8_t reg_add, uint8_t msb, uint8_t lsb);
 			volatile uint8_t *out = (volatile uint8_t *)0x50000040U;
 			static const uint8_t blk[4] = {0x6b, 0x6a, 0x66, 0x6d};
 			static const uint8_t hst[4] = {1, 1, 0, 1};
 			int bi, r, o = 0;
 			for (bi = 0; bi < 4; bi++) {
+				if (blk[bi] == 0x6b) {
+					/*  0x6b(RF)はIDF regi2c_ctrlのenable_block switch対象外．
+					 *  テーブル照合の結果 idx23=0x4000412c は両ビルド同一の
+					 *  ROM関数＝失敗要因は関数でなくバス状態．ANA_CONF2の
+					 *  bit13-16(ASP3=set/native=clear＝IDFドライバがclearする
+					 *  ROMデフォルト)を一時セットして g_phyFuns[23] で読む． */
+					extern uint32_t *g_phyFuns;
+					uint8_t (*rdm)(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t) =
+						(uint8_t (*)(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t))
+							(uintptr_t)g_phyFuns[23];
+					volatile uint32_t *conf2 = (volatile uint32_t *)0x600AF820U;
+					uint32_t save = *conf2;
+					*conf2 = save | 0x0001e000U;	/* bit13-16をASP3同等に */
+					for (r = 0; r < 16; r++) {
+						out[o++] = rdm(0x6b, hst[bi], (uint8_t) r, 7, 0);
+					}
+					*conf2 = save;
+					continue;
+				}
 				for (r = 0; r < 16; r++) {
-					out[o++] = rd(blk[bi], hst[bi], (uint8_t) r, 7, 0);
+					out[o++] = regi2c_ctrl_read_reg_mask(blk[bi], hst[bi],
+														 (uint8_t) r, 7, 0);
 				}
 			}
 		}

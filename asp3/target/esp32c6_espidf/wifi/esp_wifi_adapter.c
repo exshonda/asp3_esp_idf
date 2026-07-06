@@ -576,7 +576,11 @@ phy_enable_wrapper(void)
 	 *  native値に合わせる（COEX_LP_CLK_CONF等．LP系だが検証のため）． */
 	*(volatile uint32_t *)0x600af008U = 0x314U;	/* MODEM_LPCON_COEX_LP_CLK_CONF */
 	*(volatile uint32_t *)0x600af048U = 0x314U;	/* MODEM_LPCON +0x48 */
+	/*  追記19：phy_enable呼出しの実測（RTC[32]=0x50000080がwrapper入場数，
+	 *  RTC[33]=0x50000084がesp_phy_enable復帰マーカ）． */
+	(*(volatile uint32_t *)0x50000080U)++;
 	esp_phy_enable(PHY_MODEM_WIFI);
+	*(volatile uint32_t *)0x50000084U = 0xE0E0E0E0U;
 	phy_wifi_enable_set(1U);
 }
 

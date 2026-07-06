@@ -291,11 +291,26 @@ list(APPEND ASP3_LINK_OPTIONS
     -Wl,--wrap=rx_pbus_reset
 )
 
-list(APPEND ASP3_LINK_OPTIONS
-    -L${ESP_HAL_DIR}/components/esp_wifi/lib/${WIFI_CHIP_SERIES}
-    -L${ESP_HAL_DIR}/components/esp_phy/lib/${WIFI_CHIP_SERIES}
-    -L${ESP_HAL_DIR}/components/esp_coex/lib/${WIFI_CHIP_SERIES}
-)
+#
+#  DIAGNOSTIC（追記19・一時）：blob版差の因果検証．native(IDF v6.1)は
+#  受信できるがASP3(esp-hal-3rdparty)は0 AP．全blob(.a)がバージョン違い
+#  （md5相違）のため，IDF v6.1のblobへリンクを差し替えて受信するか確認．
+#  osiアダプタ版不一致ならesp_wifi_initが即エラー＝それ自体が判定材料．
+#  ASP3_WIFI_BLOB_DIR未定義なら従来どおりesp-hal-3rdpartyのblobを使う．
+#
+if(DEFINED ASP3_WIFI_BLOB_IDF)
+    list(APPEND ASP3_LINK_OPTIONS
+        -L${ASP3_WIFI_BLOB_IDF}/components/esp_wifi/lib/${WIFI_CHIP_SERIES}
+        -L${ASP3_WIFI_BLOB_IDF}/components/esp_phy/lib/${WIFI_CHIP_SERIES}
+        -L${ASP3_WIFI_BLOB_IDF}/components/esp_coex/lib/${WIFI_CHIP_SERIES}
+    )
+else()
+    list(APPEND ASP3_LINK_OPTIONS
+        -L${ESP_HAL_DIR}/components/esp_wifi/lib/${WIFI_CHIP_SERIES}
+        -L${ESP_HAL_DIR}/components/esp_phy/lib/${WIFI_CHIP_SERIES}
+        -L${ESP_HAL_DIR}/components/esp_coex/lib/${WIFI_CHIP_SERIES}
+    )
+endif()
 
 list(APPEND ASP3_LINK_LIBS
     phy

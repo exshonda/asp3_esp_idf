@@ -891,3 +891,335 @@ FULL較正の入力前提（RFアナログbias・LDO・XTAL・PLL等）をnative
 比較。ASP3のregi2c読み戻し(block 0x6b/0x66/0x6d実値)をnativeと比較する
 ためのツール（phy funsテーブルのビルド依存アドレス＝native g_phyFuns
 0x4081d188）修正が入口。
+
+---
+
+## 追記15（2026-07-06）：Codex(GPT-5)相談＋PMU/アナログ電源のnative diff＝Codex最有力仮説(PMU DBIAS/regulator)はrefuted
+
+Codex CLI(codex:codex-rescueプラグイン, GPT-5系)にRF較正前提を相談。Codexは
+GitHub経由でESP-IDF/Zephyr/NuttXの実ソースをfile:line付きで照合し、
+「Direct BootがPMU regulator/DBIAS/analog power stateを未初期化(rtc_clk_init/
+pmu_initを飛ばす)」を最有力(確信度#1)とした。これをJTAGで検証：
+
+### PMU/アナログ電源レジスタ native vs ASP3（scan中halt）
+| reg | native | asp3 | |
+|---|---|---|---|
+| 0x600B0014 HP_ACTIVE_HP_CK_POWER | 70000000 | 70000000 | 一致 |
+| 0x600B0018 HP_ACTIVE_BIAS | 02000000 | 02000000 | 一致 |
+| 0x600B0028 HP_ACTIVE_HP_REGULATOR0 | d0047180 | d0047180 | 一致 |
+| 0x600B0048 HP_MODEM_HP_CK_POWER | 70000000 | 70000000 | 一致 |
+| 0x600B004c HP_MODEM_BIAS | 00000000 | 00000000 | 一致 |
+| 0x600B005c HP_MODEM_HP_REGULATOR0 | d0040000 | d0040000 | 一致 |
+| 0x600AF818 ANA_CONF0(bit24 BBPLL_CAL_DONE) | 2900e444 | 2900e444 | 一致 |
+
+→ **Codex#1(PMU DBIAS/regulator/電源)はrefuted＝完全一致**。PMU電源状態は
+本丸ではない。
+
+### 差分は I2C_ANA_MST(regi2cバス)のみ（ただし動的/undocumented）
+- 0x600af81c ANA_CONF1: native=fffff7 vs asp3=fffbff。ROMパッチ
+  (esp_rom_regi2c)よりANA_CONF1は**regi2c読み出しごとに書くデバイス選択
+  マスク(~BIT(n))＝動的**。asp3=~BIT(10)=DIG_REG(0x6d)を最後に読んだ状態，
+  native=~BIT(3)＝別ブロック。**レッドヘリング**。
+- 0x600af820 ANA_CONF2: native=001f04 vs asp3=01ff04。_MST_SEL(bit8-12=
+  BIAS/BBPLL/ULP/SAR/DIG_REG)は**両方とも全セット＝一致**。差はbit13-16
+  (undocumented)でasp3=set/native=clear。意味不明・要調査。
+
+### 現状（さらに絞り込み）
+PMU電源/DBIAS/regulator も除外。残る本丸候補：regi2cの**較正VALUE自体**
+(block 0x6b/0x66/0x6d の内容)がnativeと違うか。Codexが提示したnative側
+読み戻し法＝native ELFの g_phyFuns シンボル(info address g_phyFuns)を
+JTAGで解決して[23]=read_maskを呼ぶ、または regi2c_ctrl_read_reg_mask()
+(0x6bはswitch非対応なのでg_phyFuns経由)。ANA_CONF2 bit13-16の意味も要確認。
+
+### Codex相談の運用メモ
+- Codexサンドボックス(bwrap)はloopback初期化失敗でローカルシェル不可＝
+  github.fetch_fileでpush済みGitHubファイルのみ読める。→ 診断コミットは
+  push必須(eb4d547をpush済み)。参照実装はGitHub repo+path(apache/nuttx,
+  zephyrproject-rtos/hal_espressif 等)で渡す。自己完結ブリーフィングが安全。
+- codex CLIは ~/.npm-global/bin(sudo無し)＋~/.local/bin にsymlink，~/.bashrc
+  にPATH追加済み。認証はChatGPTログイン(exshinya.honda@gmail.com)。
+
+---
+
+## 追記16（2026-07-06）：regi2c較正VALUEのnative比較＝BBPLL(0x66)/DIG_REG(0x6d)は完全一致。残る未比較はRFシンセ(0x6b)のみ
+
+Codex再相談（Q1回答＝0x4087f954はg_phyFunsが指すテーブル実体でビルド固有）を
+踏まえ、native側regi2c読み戻しツールを段階的に修正して較正VALUE比較を実施。
+
+### native側読み戻しの試行錯誤（ツール知見）
+1. g_phyFunsシンボル経由（extern uint32_t *g_phyFuns→[23]）→全0x77。
+   nativeのESP-IDFはROMのSRAM最上部領域をheap回収するため、および/または
+   libphyバージョン差（IDF v6.1 vs esp-hal-3rdparty）でテーブルidx23が
+   read_maskでない可能性。
+2. ROM固定関数 rom_chip_i2c_readReg_org=0x400012b4（esp32c6.rom.phy.ldの
+   PROVIDE。Codexの「固定ROMエントリ無し」は rom.phy.ld を見落とし）→全0x77。
+   IDFはregi2cバスをトランザクション毎にrefcountでenable/disableするため
+   素の呼出しはクロック窓外。
+3. **IDF正規経路 regi2c_ctrl_read_reg_mask（native ELFにリンク済み、
+   enable/クリティカルセクション込み）→ 0x66/0x6a/0x6d が読めた**。
+   0x6bはenable_block switchに無く全0xff（Codex警告通り）。
+4. 0x6b手動読み（ANA_CONF1=~BIT(3)推定＋ROM readReg）→全0x77＝失敗。
+   RFブロックのデバイスenableはblob管理でANA_CONF1 bit3仮説だけでは不足。
+
+### 較正VALUE比較結果（scan完了後halt、reg0-15）
+| block | native | asp3 | 判定 |
+|---|---|---|---|
+| 0x66 BBPLL | 08502518 0073806b 000396c2 00000000 | 同一 | ✅完全一致 |
+| 0x6d DIG_REG | 048004f0 98989898 04000f1f 00804216 | 同一 | ✅完全一致 |
+| 0x6a BIAS | reg2-15一致（reg0,1はnative読みアーチファクト0x77） | | ほぼ一致 |
+| **0x6b RFシンセ** | **native読取不能（3手法とも）** | 3b510200 b78802c4 39a80081 821e2680 | **未比較＝残る本丸** |
+
+### 副産物
+- nativeのANA_CONF1アイドル値~BIT(3)＝**RFデバイスの選択ビットはbit3**
+  （の可能性）。ASP3の~BIT(10)は自分の読み戻しループが最後に0x6d=BIT(10)を
+  読んだ痕跡＝追記15のANA_CONF1差分はレッドヘリング確定。
+- ANA_CONF2 bit13-16差分：bit16=ANA_I2C_SAR_FORCE_PU(regi2c_defs.h)、
+  bit13-15はundocumented。RF MST選択ではなく低優先度（Codex Q2）。
+
+### 到達点
+較正値も BBPLL/DIG_REG/BIAS(ほぼ) まで**nativeと一致**。残る未比較は
+**RFシンセ(0x6b)の較正値のみ**。これが違えばRF較正結果が本丸確定、
+同じなら「PHY init後のRX enable/MAC filter/coex/antenna selectの動的状態」
+へ（Codex Q3の分岐）。
+
+### 次の一手（native側0x6bを読む）
+nativeのg_phyFunsテーブル(*(0x4081d188))とASP3のテーブル(0x4087f954)を
+JTAGで両方dumpし、関数ポインタパターン照合でnative側のread_mask相当
+エントリindexを特定する（libphyバージョン差でidxが違う仮説の検証）。
+または blobが0x6bを読む瞬間のANA_CONF1/2設定をJTAGウォッチで捕捉。
+
+---
+
+## 追記17（2026-07-06）：phyFunsテーブル照合＝idx23は両ビルド同一ROM関数(0x4000412c)。0x6bのnative読取は4手法とも失敗＝blob管理のRF i2cアクセスの解明が次の鍵
+
+### テーブル照合結果（native/ASP3とも g_phyFuns→0x4087f954＝同一アドレス）
+- **idx23(read_mask)=0x4000412c＝両ビルド完全同一のROM関数**。native失敗の
+  原因は関数ではなく呼び出し時のバス/デバイスenable状態。
+- ASP3がパッチした箇所: idx22(0x420031be)/24/26＝wifi_trace.cの
+  traced_write系（自前パッチ・想定通り）。
+- **nativeがパッチした箇所: idx12(0x420314bc flash・ASP3はROM 0x400059e6)、
+  idx13/14(0x4080221e/2c RAM=IRAM)**＝IDFがROM PHY関数をバグフィックス
+  パッチしている。ASP3は素のROM版を使用＝**このROMパッチ差が別の火種の
+  可能性（要調査：idx12/13/14が何の関数か）**。
+- その他の差分はlibphyビルド差（IDF v6.1 vs esp-hal-3rdparty）の
+  flash/RAMアドレス違いで正常。
+
+### 0x6bのnative読取（4手法とも0x77＝失敗）
+1. g_phyFunsテーブルidx23素呼び → 0x77
+2. ROM固定 rom_chip_i2c_readReg_org(0x400012b4) → 0x77
+3. 2 + ANA_CONF1=~BIT(3)手動 → 0x77
+4. idx23 + ANA_CONF2 |=0x01e000（ASP3同等のbit13-16）→ 0x77
+→ ANA_CONF1/CONF2仮説では説明できず。**RFブロック(0x6b, host_id=1)は
+   HPのI2C_ANA_MST(0x600AF800)ではなく別経路（LP_I2C_ANA_MST=0x600B2400？
+   host_idがHP/LPマスタ選択？）の可能性**。ASP3では常時アクセス可・
+   nativeではIDF/blobが管理しCPUの素アクセスを閉じている，と整合する仮説。
+
+### 次セッションの具体手順（0x6b比較の決着）
+1. **JTAGウォッチポイント**：native scan中に 0x600AF81C/820（または
+   0x600B24xx）への書込みをwatchし、blob自身がRFブロックを読む瞬間の
+   enable列を捕捉→再現。
+2. ROM 0x4000412c（read_mask）を逆アセンブルし、block/host_idの分岐で
+   どのマスタ（HP/LP ana i2c）へ行くか特定。
+3. LPPERI/LP_I2C_ANA_MSTのクロックenable状態を native vs ASP3 で比較。
+4. 代替：ASP3側0x6b値の妥当性検証（2回読んで安定性、scan前後で変化）．
+
+### セッション总括（本丸の現在地）
+- 較正VALUE：BBPLL(0x66)/DIG_REG(0x6d)完全一致・BIAS(0x6a)ほぼ一致。
+- **未比較はRFシンセ(0x6b)のみ**（ASP3側は取得済: 3b510200 b78802c4
+  39a80081 821e2680）。
+- 新しい容疑（テーブル照合の副産物）：**IDFのROM PHY関数パッチ
+  （idx12/13/14）をASP3が持っていない**＝素のROM版のバグを踏んでいる
+  可能性。0x6b比較と並行して要調査。
+
+---
+
+## 追記18（2026-07-06）★決定的★：RFシンセ(0x6b)に安定した較正/設定差5レジスタを発見（生JTAGトランザクション法を確立）
+
+### 手法の確立（ROM逆アセンブルから）
+- read_maskの呼び出し鎖はROMで両ビルド完全同一（idx23→idx20→idx19→フック
+  idx13/15/17/18）。0x77失敗の原因は**フック実装差**（native=IDF IRAMパッチ、
+  ASP3=libphy実装）＝アプリ文脈からの読みはフック文脈に依存する。
+- ROM idx21(writeReg)の逆アセンブルからHWインタフェース特定：
+  **I2C_ANA_MST I2Cn_CTRL(0x600AF800+host*4)へ cmd=(reg<<8)|block を書き，
+  bit25(busy)待ち，データはCTRL[23:16]に返る**。
+- → **OpenOCDのmww/mdw/read_memoryだけで生regi2cトランザクションを駆動**
+  できる（フック・アプリ・並行性と無関係）。TCLスクリプト
+  ($CLAUDE_JOB_DIR/tmp/read6b.tcl)化。
+- 検証：native生読みreg2=0x31はblob自身の直前トランザクション残値と一致。
+  ASP3のscan中生読みはblob読み(read_mask)と一致（reg2のみ51/52揺れ）。
+- 制約：**RFデバイスはscan中のみ応答**（scan後はパワーダウン/非選択で全0xff）
+  →比較は両方scan中にhaltして行う。
+
+### チャネル変動の除外（native3回スナップショット＋ASP3 raw/blob 2点）
+reg7はnative内で変動(b5→b8)＝チャネル依存として除外。他は全て安定。
+
+### ★安定差分（RFシンセ block 0x6b・チャネル非依存）★
+| reg | native(RX OK) | ASP3(0 AP) | ビット差 |
+|---|---|---|---|
+| 2 | 0x31 | 0x51 | native bit5 ↔ asp3 bit6 |
+| 4 | 0xa4 | 0xc4 | native bit5 ↔ asp3 bit6（同パターン） |
+| 11 | 0x29 | 0x39 | asp3 +bit4 |
+| 13 | 0x06 | 0x26 | asp3 +bit5 |
+| 14 | 0x3f | 0x1e | bit0/bit5 反転 |
+他11レジスタは完全一致。
+
+### 解釈と注意
+- **「RF較正層の差」の実体を初めて具体値で捕捉**。シンセ設定はRX LO/VCO/
+  分周に直結＝受信不能の直接原因である可能性が高い。
+- ただし交絡因子：**libphyのバージョンが違う**（native=IDF v6.1、ASP3=
+  esp-hal-3rdparty）。差が「較正の失敗」ではなく「libphy版の設計差」の
+  可能性も残る。テーブル照合で判明した**IDFのROM PHY関数パッチ
+  (idx12/13/14)をASP3が持たない**事実と併せ、次の焦点：
+  1. reg2/4のbit5↔bit6・reg11/13/14の意味（undocumented．ROM/libphy逆アセ
+     ンブルか、nativeの該当regへのwrite箇所をwifi_regi2cトレースで捕捉）
+  2. ASP3側でこれら5レジスタを**nativeの値に生JTAGで上書きしてscan**
+     （受信できればRFシンセ設定が根因と確定＝最短の因果検証）
+  3. phy_versionの比較（get_phy_version_str）とlibphy版差の切り分け
+
+### 次セッションの最短手順（因果検証）
+ASP3をboot→scan中(リセット後~2.5s)にhalt→生JTAGで
+reg2=0x31/reg4=0xa4/reg11=0x29/reg13=0x06/reg14=0x3f を書き込み
+（cmd=0x05000000|(data<<16)|(reg<<8)|0x6b をI2C1_CTRLへ）→resume→
+次scanでAPが出るか。※scanは2秒で終わるためASP3側をループscanに改造
+してから行うのが現実的。
+
+---
+
+## 追記19（2026-07-06）：因果検証3連発＝(a)RFシンセ4reg上書き→効果なし・reg14はRO status，(b)FULL較正は実行されていた（RTC計測で実証），(c)blob世代差が最重要容疑に＝IDF v6.1 blob差し替えはABI非互換でesp_wifi_init失敗→hal submodule bumpが本命
+
+### (a) RFシンセ因果検証（追記18の5レジスタ）
+ASP3を再scanループ化し，scan中にJTAG生トランザクションで
+reg2=0x31/reg4=0xa4/reg11=0x29/reg13=0x06 をnative値へ上書き
+（write cmd=0x05000000|(data<<16)|(reg<<8)|0x6b，VERIFYで書込み成功・
+数十scan跨ぎで永続も確認）。**reg14(0x3f書込み)は値が変わらず＝リード
+オンリーのステータスレジスタ**（native=0x3f vs asp3=0x1e は「状態」の
+反映＝症状であって原因ではない可能性）。
+→ **4reg一致でもRESCAN 0 APsのまま**＝RFシンセ設定regは根因ではない。
+BB regs(0x600a7428/78d0)のnative合わせも効果なし（78d0は既に一致して
+いた＝状態依存）。
+
+### (b) 「FULL較正が走っていない」仮説の実測却下（重要な教訓つき）
+phy_versionログがASP3に無い＋wrapカウンタ全ゼロから「esp_phy_load_cal_
+and_init未実行」を疑ったが，RTC-RAM直接カウンタ（nm/ログ非依存）で実測：
+```
+phy_enable_wrapper入場=1 / esp_phy_enable復帰マーカ=OK /
+register_chipv7_phy入場=1 / ret=1(ESP_CAL_DATA_CHECK_FAIL=FULL calの正常値)
+```
+→ **FULL較正はASP3でも実行されている**。phy_versionログ欠落はシムの
+ログレベルフィルタ，カウンタ全ゼロは古いnmアドレスの読み誤り。
+（教訓：nm由来アドレスはビルド毎に変わる．RTC-RAM固定番地計測が確実）
+
+### (c) blob世代差の因果検証＝ABI非互換で不成立→hal bumpが本命
+- **全blob(.a)がmd5相違**：libphy/libpp/libnet80211/libcoexist/libcore
+  とも esp-hal-3rdparty(ASP3) と IDF v6.1(native) で別物。
+- esp_wifi.cmakeに `ASP3_WIFI_BLOB_IDF` 変数を追加しIDF v6.1のlibへ
+  リンク差し替え実験。シンボル差2件（esp_wifi_skip_supp_pmkcaching／
+  printf）はweakシムで解消しリンク成功。
+- 実行結果：**esp_wifi_initが即失敗**「E wifi_init: Failed to deinit
+  Wi-Fi (0x30xx)」＝osiアダプタ/glue層（hal側でコンパイルする
+  wifi_init.c等）と新blobのABI不一致。blobだけの差し替えは不可。
+- → **正攻法＝esp-hal-3rdparty submoduleを新blob世代へbump**
+  （glue含め整合が取れる）。C6の受信不能はblob版（旧libphy/libppの
+  C6実機での不具合 or 要ROMパッチ）に起因する可能性が最有力に。
+  テーブル照合で判明した「IDFはROM PHY関数(idx12/13/14)をパッチ・
+  ASP3は素のROM」もこの文脈で整合。
+
+### 本日の最終結論（Step0全体）
+1. SWD-key修正でC6 Wi-Fiはinit/start/scan完走まで到達（恒久fix）
+2. MODEM_LPCONクロック欠落を修正（恒久fix）
+3. 割込み/タイマ/クロック/電源/ICG/PHY較正実行/較正値(BBPLL/DIG_REG/
+   BIAS/RFシンセ4reg)を**全てnative一致まで潰した**が受信せず
+4. 残る差＝**blob世代**（全lib別物・ROMパッチ有無・RO status reg14）
+5. **次の一手＝esp-hal-3rdparty submoduleのbump**（新blob世代へ）。
+   それでもRX不能なら，残るは「旧blobでは受信不能」という結論に近い。
+
+### 観測資産（今日確立・再利用可）
+- 生JTAG regi2cトランザクション（read/write）：read6b.tcl/write6b.tcl
+- RTC-RAM固定番地計測（0x50000080-8C：phy_enable/register_chipv7_phy）
+- ASP3再scanループ（wifi_scan.c RESCAN）／native再scanループ
+- ABI差シム（weak esp_wifi_skip_supp_pmkcaching/printf）と
+  ASP3_WIFI_BLOB_IDF cmake変数（将来のblob実験用）
+
+---
+
+## 追記20（2026-07-06）★方向修正★：blob世代仮説は否定＝NuttXは同一halコミット・同一ボードで6 AP検出済み。RXブロッカーはASP3のshim/glue内に確定
+
+ユーザ指摘「NuttXやZephyrは旧blobで動いている？」の検証結果：
+
+### 事実
+- **NuttX(master)のesp-hal-3rdpartyピン = b90b1837cb5ad24747deb4c895246037cc206ce5
+  ＝ASP3のhal submoduleと完全同一コミット**（ASP3のhalブランチ名は
+  sync/master.c-nuttx-20260428＝NuttX向けsyncそのもの）。
+- libphy版：ASP3/NuttX世代=Nov 14 2025ビルド，IDF v6.1=Apr 10 2026
+  （phy_version 344）＝約5ヶ月差はあるが…
+- **docs/wifi-shim-c6.md:737（過去セッション実機記録）：「NuttXは同じ
+  ボードで実際に6件のAPを検出」**（<SSID-2G>含む）。
+
+### 結論
+**同一blob・同一hal・同一ボードでNuttXは受信できる**→
+- 追記19(c)の「blob世代が本命／hal bumpが次の一手」は**否定**。
+- RXブロッカーは**ASP3のshim/glue/使い方**に確定的に局在。
+- native-IDF比較でHW状態がほぼ全一致だった事実とも整合（HWは正しく
+  セットアップされている．違いはblobを「使う側」の何か）。
+
+### 次セッションの焦点（NuttX vs ASP3の行単位比較）
+1. NuttX esp_wifi_adapter.c（クローン済）とASP3 esp_wifi_adapter.c/
+   esp_shim.c の**未実装/挙動差のあるosiエントリ**の総当たり比較。
+   特にRX経路に効くもの：queue/semaphoreのISRバリアント，
+   task_yield_from_isr，event_group系，get_time/timestamp系，
+   rand/random，read_mac，nvs系のエラー値，coex系のデフォルト値。
+2. 過去実施の未決着項目の再訪：NuttXは`esp_wifi_scan_start()`に
+   常に非NULLの明示config（scan_type=ACTIVE等）を渡す
+   （wifi-shim-c6.md:1948）—ASP3はNULL。実施でも触れたが決着したか？
+3. ビルド構成差：NuttXのesp_wifi関連CONFIG（sdkconfig相当）と
+   ASP3のesp_wifi.cmakeのdefine差（CONFIG_ESP_WIFI_*）。
+   特にRXバッファ設定（static_rx_buf_num等のwifi_init_config）。
+4. Zephyr blobは別系（hal_espressifが独自lib同梱）＝参考程度。
+
+### 教訓
+「動く参照」が複数あるとき，どの参照と何が同じ/違うか（blob・hal・
+board・glue）のマトリクスを最初に固定すべきだった。native-IDFは
+blob版が違う参照，NuttXは同一blobの参照＝**NuttXこそ本命の比較対象**。
+
+---
+
+## 追記21（2026-07-06）★ブレークスルー★：MAC/WDEVレジスタ移植でMAC割込みが発火開始（11固定→170/秒）。RXブロッカーはMAC空間の未設定レジスタと確定
+
+ユーザ提案「動作するバイナリでwifi初期化した後にASP3を動かす」の
+実行可能形＝**レジスタ移植**（ソフトhandoffはstale-pointerで不可能
+[追記2]のため，native動作中のHW状態をJTAGでdump→ASP3実行中に書き込み）。
+
+### MAC/WDEV空間の特定と差分
+- libppのlui命令頻度解析でblobが叩くMMIO＝**0x600A4xxx/0x600A5xxx/
+  0x600A6xxx(WiFi MAC/WDEV)/0x600ADxxx**と特定（未文書化・未探索だった）。
+- stable-diff（native/ASP3各2スナップショット・scan中）で**42個の安定差分**。
+  目を引くもの：
+  - 0x600a4300: native=ffffffff / asp3=0（enable/filterマスク全closed？）
+  - 0x600a4318: 3ff/0，0x600a42fc: 70/0，0x600a433c: 5/0
+  - 0x600a4408..442c: 12エントリのテーブル（asp3は中バイト全0）
+  - 0x600a4430/4434/4438，0x600a4dd0/4dd4（native=55777555等/asp3=0）
+  - 0x600ad070/470: 77ef vs 3f7cd
+
+### 移植結果（42個全てをASP3実行中にnative値へ書込み）
+- **esp_shim_int_count[1]（MAC線ディスパッチ）が11固定→561→913→1265と
+  約170/秒で増加開始**＝MAC割込みが実際に発火し始めた（ビーコン数百/s
+  と整合するレート）。
+- ただし**RESCANは依然0 APs**＝割込みは届くがフレーム→scan結果の
+  データパス（DMA/sta_rx_cb/結果蓄積）が未達，または別種割込みの可能性。
+
+### 意味
+- **「ASP3のglue/blobが設定しない（できない）MACレジスタが存在し，
+  それがRXブロッカー」がほぼ確定**。NuttX同一blobで動く事実（追記20）
+  とも整合＝NuttXでは何かがこれらを設定する。
+- 次の決定打：**42個の二分探索**で効いたレジスタを特定→そのレジスタを
+  設定するはずの経路（blob内部のwdev init？glueのosi？NuttXのみが
+  提供する何か？）を逆引き。
+
+### 次セッションの手順
+1. 42個を半分ずつ書き込み→int_count[1]の増加有無で二分探索
+   （TCL: $CLAUDE_JOB_DIR/tmp/poke_mac.tcl を分割）。
+2. 効いたレジスタ特定後：全42移植状態でsta_rx_cb/promisc_rx_countも
+   確認（フレームがデータパスに乗るか）。0 APが続く場合は残りの
+   カスケード（DMAディスクリプタ等RAM側状態）も疑う。
+3. 特定レジスタのアドレスからNuttX/blobの設定経路を逆引き
+   （libpp逆アセンブル・NuttXソース）。

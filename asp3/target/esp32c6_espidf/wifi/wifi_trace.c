@@ -231,8 +231,12 @@ __wrap_register_chipv7_phy(long a0, long a1, long a2, long a3)
 {
 	long	ret;
 
+	/*  追記19：RF FULL較正の実行実測（RTC[34]=0x50000088が入場数，
+	 *  RTC[35]=0x5000008Cが復帰時のret）．nm/ログ非依存の確実な計測． */
+	(*(volatile uint32_t *)0x50000088U)++;
 	wifi_phyinit_capture_entry();
 	ret = __real_register_chipv7_phy(a0, a1, a2, a3);
+	*(volatile uint32_t *)0x5000008CU = (uint32_t)ret ^ 0xA5A5A5A5U;
 	wifi_trace_push(21U, 0U, (uintptr_t)a0, (uintptr_t)a1,
 					 (uintptr_t)a2, (uintptr_t)a3, (uintptr_t)ret);
 	/*
@@ -804,4 +808,24 @@ wifi_phyinit_dump(void)
 		   (int_t)wifi_phyinit_snap.bbpll_or_lock,
 		   (int_t)wifi_phyinit_snap.bbpll_or_cal_end,
 		   (int_t)wifi_phyinit_snap.bbpll_or_cal_ovf);
+}
+
+/*
+ *  DIAGNOSTIC（追記19・一時）：IDF v6.1 blob差し替え実験用のABIシム．
+ *  新blob世代とhal側コンパイル済みソースのシンボル差を埋める．
+ *  - esp_wifi_skip_supp_pmkcaching：旧libnet80211が提供・新は無し．
+ *    wpa_supplicant(wpa.c)が参照．false（PMKキャッシュ使用）を返す．
+ *  - printf：新libcoexistが直接参照．lib_printf相当へ（簡易に破棄）．
+ */
+/*  weak：旧blob(libnet80211)は本物を提供＝多重定義を回避．新blob使用時
+ *  のみこのweak実装が使われる．falseはデフォルト挙動（PMKキャッシュ使用）． */
+int __attribute__((weak)) esp_wifi_skip_supp_pmkcaching(void)
+{
+	return(0);	/* false: PMKキャッシュを使用 */
+}
+
+int __attribute__((weak)) printf(const char *fmt, ...)
+{
+	(void)fmt;
+	return(0);
 }

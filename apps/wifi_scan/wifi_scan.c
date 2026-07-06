@@ -304,4 +304,27 @@ main_task(EXINF exinf)
 	}
 	esp_shim_free(recs);
 	syslog(LOG_NOTICE, "wifi_scan: done");
+
+	/*  DIAGNOSTIC（追記19・一時）：因果検証用の再scanループ．
+	 *  JTAGでRFシンセ(0x6b)のreg2/4/11/13/14をnative値に上書きした後，
+	 *  後続scanでAPが出るかを見る．native側GT-REGDIFFループと同形． */
+	{
+		wifi_ap_record_t	rec1;
+		uint16_t			n1;
+		for (;;) {
+			scan_done = false;
+			err = esp_wifi_scan_start(NULL, false);
+			while (!scan_done) {
+				(void) tslp_tsk(500000);
+			}
+			{
+				uint16_t total = 0;
+				(void) esp_wifi_scan_get_ap_num(&total);
+				n1 = 1;
+				err = esp_wifi_scan_get_ap_records(&n1, &rec1);	/* 結果flush */
+				syslog(LOG_NOTICE, "wifi_scan: RESCAN %d APs (err=%d)",
+					   (int_t)total, (int_t)err);
+			}
+		}
+	}
 }
