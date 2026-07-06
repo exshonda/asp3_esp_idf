@@ -203,23 +203,31 @@ semphr_delete_wrapper(void *semphr)
  *  GROUND-TRUTH比較用カウンタ（ASP3 shim側・一時的診断）．
  *  Direct BootのASP3 wifi_scanで各osi呼び出しの頻度を採取し，
  *  ネイティブESP-IDF（qRecv59/qSend77/semTake40 per s）と比較する．
- *  388Hzがどの呼び出しか，空振りループかを確定する．調査後revert．
+ *  esp_wifi_init中にLP Super WDTでリブートループするため，カウンタを
+ *  RTC RAM(0x50000000〜・WDTリセットを跨いで保持)に置き，リブートを
+ *  またいで累積する（option2）．レイアウト：
+ *    +0x00 magic  +0x04 boot#  +0x08 semTake  +0x0C semGive
+ *    +0x10 qRecv  +0x14 qSend  +0x18 qSendISR +0x1C timerArm
+ *  調査後revert．
  */
-volatile uint32_t g_asp_semtake = 0, g_asp_semgive = 0;
-volatile uint32_t g_asp_qrecv = 0, g_asp_qsend = 0, g_asp_qsendisr = 0;
-volatile uint32_t g_asp_timerarm = 0;
+#define GT_SEMTAKE   (*(volatile uint32_t *)0x50000008U)
+#define GT_SEMGIVE   (*(volatile uint32_t *)0x5000000CU)
+#define GT_QRECV     (*(volatile uint32_t *)0x50000010U)
+#define GT_QSEND     (*(volatile uint32_t *)0x50000014U)
+#define GT_QSENDISR  (*(volatile uint32_t *)0x50000018U)
+#define GT_TIMERARM  (*(volatile uint32_t *)0x5000001CU)
 
 static int32_t
 semphr_take_wrapper(void *semphr, uint32_t block_time_tick)
 {
-	g_asp_semtake++;
+	GT_SEMTAKE++;
 	return(esp_shim_sem_take(semphr, block_time_tick));
 }
 
 static int32_t
 semphr_give_wrapper(void *semphr)
 {
-	g_asp_semgive++;
+	GT_SEMGIVE++;
 	return(esp_shim_sem_give(semphr));
 }
 
@@ -273,14 +281,14 @@ queue_delete_wrapper(void *queue)
 static int32_t
 queue_send_wrapper(void *queue, void *item, uint32_t block_time_tick)
 {
-	g_asp_qsend++;
+	GT_QSEND++;
 	return(esp_shim_queue_send(queue, item, block_time_tick, false));
 }
 
 static int32_t IRAM_ATTR
 queue_send_from_isr_wrapper(void *queue, void *item, void *hptw)
 {
-	g_asp_qsendisr++;
+	GT_QSENDISR++;
 	if (hptw != NULL) {
 		*(int *)hptw = 0;	/* higher priority task woken：ASP3では不要 */
 	}
@@ -302,7 +310,7 @@ queue_send_to_front_wrapper(void *queue, void *item, uint32_t block_time_tick)
 static int32_t
 queue_recv_wrapper(void *queue, void *item, uint32_t block_time_tick)
 {
-	g_asp_qrecv++;
+	GT_QRECV++;
 	return(esp_shim_queue_recv(queue, item, block_time_tick));
 }
 
@@ -665,7 +673,7 @@ slowclk_cal_get_wrapper(void)
 static void
 timer_arm_wrapper(void *timer, uint32_t tmout, bool repeat)
 {
-	g_asp_timerarm++;
+	GT_TIMERARM++;
 	esp_shim_timer_arm_us(timer, tmout * 1000U, repeat);
 }
 
