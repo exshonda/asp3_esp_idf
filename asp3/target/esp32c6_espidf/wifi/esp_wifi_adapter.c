@@ -199,15 +199,27 @@ semphr_delete_wrapper(void *semphr)
 	esp_shim_sem_delete(semphr);
 }
 
+/*
+ *  GROUND-TRUTH比較用カウンタ（ASP3 shim側・一時的診断）．
+ *  Direct BootのASP3 wifi_scanで各osi呼び出しの頻度を採取し，
+ *  ネイティブESP-IDF（qRecv59/qSend77/semTake40 per s）と比較する．
+ *  388Hzがどの呼び出しか，空振りループかを確定する．調査後revert．
+ */
+volatile uint32_t g_asp_semtake = 0, g_asp_semgive = 0;
+volatile uint32_t g_asp_qrecv = 0, g_asp_qsend = 0, g_asp_qsendisr = 0;
+volatile uint32_t g_asp_timerarm = 0;
+
 static int32_t
 semphr_take_wrapper(void *semphr, uint32_t block_time_tick)
 {
+	g_asp_semtake++;
 	return(esp_shim_sem_take(semphr, block_time_tick));
 }
 
 static int32_t
 semphr_give_wrapper(void *semphr)
 {
+	g_asp_semgive++;
 	return(esp_shim_sem_give(semphr));
 }
 
@@ -261,12 +273,14 @@ queue_delete_wrapper(void *queue)
 static int32_t
 queue_send_wrapper(void *queue, void *item, uint32_t block_time_tick)
 {
+	g_asp_qsend++;
 	return(esp_shim_queue_send(queue, item, block_time_tick, false));
 }
 
 static int32_t IRAM_ATTR
 queue_send_from_isr_wrapper(void *queue, void *item, void *hptw)
 {
+	g_asp_qsendisr++;
 	if (hptw != NULL) {
 		*(int *)hptw = 0;	/* higher priority task woken：ASP3では不要 */
 	}
@@ -288,6 +302,7 @@ queue_send_to_front_wrapper(void *queue, void *item, uint32_t block_time_tick)
 static int32_t
 queue_recv_wrapper(void *queue, void *item, uint32_t block_time_tick)
 {
+	g_asp_qrecv++;
 	return(esp_shim_queue_recv(queue, item, block_time_tick));
 }
 
@@ -650,6 +665,7 @@ slowclk_cal_get_wrapper(void)
 static void
 timer_arm_wrapper(void *timer, uint32_t tmout, bool repeat)
 {
+	g_asp_timerarm++;
 	esp_shim_timer_arm_us(timer, tmout * 1000U, repeat);
 }
 

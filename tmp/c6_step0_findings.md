@@ -289,3 +289,37 @@ C6根本問題（AGC凍結でスキャンが実データを受信しない＝発
 2. 388/sが「タイムアウト空振り」なら，イベントが来ない理由＝AGC/RX経路
    （元のC6根本問題）へ回帰．「値が同じだが起床しない＝wake取りこぼし」
    なら shim の sem give/isr 経路を監査．
+
+---
+
+## 追記4（2026-07-06）：ASP3側osi測定はDirect Boot wifi_scanのLP Super WDTリブートに阻まれる
+
+ground truth（native）採取後，比較のためASP3側shim（`esp_wifi_adapter.c`の
+semphr_take/queue_recv/queue_send/from_isr/timer_arm）にカウンタを追加し，
+wifi_scan.cにスキャン中2秒のGT-ASP3頻度ダンプを入れて，**Direct Boot**の
+ASP3 wifi_scanで実測を試みた（RAMは通常配置0x40800000/448kへ戻した）．
+
+### 結果：esp_wifi_init中にリブートループ（rst:0x12 LP_SWDT_SYS）
+
+Direct Boot ASP3 wifi_scanは
+`initializing shim`→`esp_wifi_init`→`net80211 rom`→`wifi driver task`まで
+進むが，`W (122) rtc_clk: invalid RTC_XTAL_FREQ_REG value, assume 40MHz`の
+直後に **LP Super Watchdog リセット（rst:0x12）** で約122ms周期のリブート
+ループに陥り，スキャン（＝GT-ASP3測定点）に到達しない．
+
+`hardware_init_hook`でSWDをauto-feed＋`SWD_DISABLE(bit30)`にしても解消せず
+＝**esp_wifi_init中にblob（rtc_clk/phy）がSuper WDTを再武装**し，ASP3には
+ESP-IDFのようなWDT給餌タスクが無いため発火する，と判断．これは元の
+未解決C6 Wi-Fi調査（blob統合）の領域．過去の388Hz計測がJTAG mdw経由
+だったのも，このコンソール/スキャンの不安定さと整合する．
+
+### 現状の到達点と次の選択肢
+
+- ✅ ground truth（native ESP-IDF）：qRecv 59/s・qSend 77/s・semTake 40/s（確定・コミット済）
+- ⬜ ASP3側実測：Direct Bootのsuper-WDTリブートで未達
+- 次の選択肢：
+  1. blobがsuper-WDTを再武装する箇所を特定し，恒久的に無効化 or 周期給餌タスクを追加
+  2. カウンタをRTC RAM(0x50000000・リセット保持)に置き，リブートループの
+     各サイクル（~122ms）で累積→次ブート冒頭でダンプして率換算（要実装）
+  3. 過去実施と同様JTAG mdwで計装カウンタを直読み（ただし内蔵USB-JTAGは
+     チップ稼働中/ハング時に不安定＝要外部プローブ）

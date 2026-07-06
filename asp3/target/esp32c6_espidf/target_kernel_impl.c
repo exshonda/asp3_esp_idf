@@ -122,8 +122,12 @@ hardware_init_hook(void)
 
 	sil_wrw_mem((void *)ESP32C6_RTC_CNTL_SWD_WPROTECT,
 				ESP32C6_RTC_CNTL_SWD_WKEY);
+	/* auto-feedに加え，SWD_DISABLE(bit30)で確実に無効化する．
+	 * auto-feedだけではesp_wifi_init中にLP Super WDT(rst:0x12
+	 * LP_SWDT_SYS)が発火してリブートループする実測に対応
+	 * （asp3_jump.cで実証済みの手法）． */
 	sil_orw((void *)ESP32C6_RTC_CNTL_SWD_CONF,
-			ESP32C6_RTC_CNTL_SWD_AUTO_FEED_EN);
+			ESP32C6_RTC_CNTL_SWD_AUTO_FEED_EN | (1U << 30));
 	sil_wrw_mem((void *)ESP32C6_RTC_CNTL_SWD_WPROTECT, 0U);
 
 	/*

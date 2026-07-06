@@ -172,6 +172,25 @@ main_task(EXINF exinf)
 	err = esp_wifi_scan_start(NULL, false);
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_scan_start -> %d", (int_t)err);
 
+#ifdef TOPPERS_ESP32C6_WIFI
+	/*
+	 *  GROUND-TRUTH比較（ASP3 shim側・一時的診断）：スキャン中2秒間の
+	 *  osi呼び出し頻度を採取し，ネイティブESP-IDF
+	 *  （qRecv59/qSend77/semTake40 per s）と比較する．
+	 */
+	{
+		extern volatile uint32_t g_asp_semtake, g_asp_semgive, g_asp_qrecv,
+								 g_asp_qsend, g_asp_qsendisr, g_asp_timerarm;
+		uint32_t st = g_asp_semtake, sg = g_asp_semgive, qr = g_asp_qrecv;
+		uint32_t qs = g_asp_qsend, qi = g_asp_qsendisr, ta = g_asp_timerarm;
+		(void) tslp_tsk(2000000);	/* 2秒 */
+		syslog(LOG_NOTICE, "GT-ASP3 2s/s: semTake=%d semGive=%d qRecv=%d qSend=%d qSendISR=%d timerArm=%d",
+			   (int_t)((g_asp_semtake - st) / 2U), (int_t)((g_asp_semgive - sg) / 2U),
+			   (int_t)((g_asp_qrecv - qr) / 2U), (int_t)((g_asp_qsend - qs) / 2U),
+			   (int_t)((g_asp_qsendisr - qi) / 2U), (int_t)((g_asp_timerarm - ta) / 2U));
+	}
+#endif /* TOPPERS_ESP32C6_WIFI */
+
 	while (!scan_done) {
 		(void) tslp_tsk(1000000);	/* SCAN_DONEを待つ（最大繰返し） */
 	}
