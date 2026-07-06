@@ -91,7 +91,6 @@ esp32c6_disable_mwdt(uint32_t timg_base)
 void
 hardware_init_hook(void)
 {
-	diag_mark(1U);	/* DIAGNOSTIC: hardware_init_hook入口 */
 
 	/*
 	 *  DIAGNOSTIC（仮説検証）：ESP-IDFハンドオフ後，最初のTIMG0レジスタ
@@ -108,29 +107,24 @@ hardware_init_hook(void)
 		v &= ~0x2U;		/* PCR_TG0_RST_EN 解除 */
 		*pcr_tg0 = v;
 	}
-	diag_mark(2U);	/* DIAGNOSTIC: PCR書き込み（TG0クロック有効化）を通過 */
 
 	/*
 	 *  ウォッチドッグタイマの無効化
 	 *  （MWDT0/1・RTC WDT・スーパーWDT．リセット後デフォルトで有効）
 	 */
 	esp32c6_disable_mwdt(ESP32C6_TIMG0_BASE);
-	diag_mark(3U);	/* DIAGNOSTIC: TIMG0 WDT無効化を通過 */
 	esp32c6_disable_mwdt(ESP32C6_TIMG1_BASE);
-	diag_mark(4U);	/* DIAGNOSTIC: TIMG1 WDT無効化を通過 */
 
 	sil_wrw_mem((void *)ESP32C6_RTC_CNTL_WDTWPROTECT,
 				ESP32C6_RTC_CNTL_WDT_WKEY);
 	sil_wrw_mem((void *)ESP32C6_RTC_CNTL_WDTCONFIG0, 0U);
 	sil_wrw_mem((void *)ESP32C6_RTC_CNTL_WDTWPROTECT, 0U);
-	diag_mark(5U);	/* DIAGNOSTIC: RTC WDT無効化を通過 */
 
 	sil_wrw_mem((void *)ESP32C6_RTC_CNTL_SWD_WPROTECT,
 				ESP32C6_RTC_CNTL_SWD_WKEY);
 	sil_orw((void *)ESP32C6_RTC_CNTL_SWD_CONF,
 			ESP32C6_RTC_CNTL_SWD_AUTO_FEED_EN);
 	sil_wrw_mem((void *)ESP32C6_RTC_CNTL_SWD_WPROTECT, 0U);
-	diag_mark(6U);	/* DIAGNOSTIC: RTC SWD処理を通過＝hardware_init_hook出口（この後start.Sのbss/dataクリア） */
 
 	/*
 	 *  CPUクロックの切替えは不要（実機診断により判明）
@@ -150,13 +144,14 @@ hardware_init_hook(void)
 void
 software_init_hook(void)
 {
-	diag_mark(7U);	/* DIAGNOSTIC: software_init_hook入口＝start.Sのbss/dataクリアを通過 */
+	diag_mark(1U);	/* DIAGNOSTIC: software_init_hook入口＝bss/dataクリア通過（PMP fix確認済） */
 	/* Initialize sio for fput */
 #ifdef TOPPERS_OMIT_TECS
 	sio_initialize(0);
+	diag_mark(2U);	/* DIAGNOSTIC: sio_initialize通過 */
 	sio_opn_por(SIOPID_FPUT, 0);
+	diag_mark(3U);	/* DIAGNOSTIC: sio_opn_por通過＝software_init_hook完了 */
 #endif
-	diag_mark(7U);	/* DIAGNOSTIC: SIO初期化を通過（7=swhook到達以降） */
 }
 
 /*
@@ -165,12 +160,12 @@ software_init_hook(void)
 void
 target_initialize(void)
 {
-	/* DIAGNOSTIC（今ラウンドはcp1→cp2区間の細分に集中するため
-	 * target_initialize側のマークは値衝突回避のため一時的に外す） */
+	diag_mark(4U);	/* DIAGNOSTIC: sta_ker到達→target_initialize入口 */
 	/*
 	 *  チップ依存の初期化（mtvec・割込みマトリクス・コア依存部）
 	 */
 	chip_initialize();
+	diag_mark(5U);	/* DIAGNOSTIC: chip_initialize（mtvec/割込み）通過 */
 
 	/*
 	 *  ペリフェラル割込みソースをCPU割込み線へ割り当てる
@@ -191,6 +186,7 @@ target_initialize(void)
 	esp32c6_intmtx_route(ESP32C6_INTSRC_UART0, 17U);
 #endif /* TOPPERS_ESP32C6_CONSOLE_USBJTAG */
 	esp32c6_intmtx_route(ESP32C6_INTSRC_FROM_CPU_1, 18U);
+	diag_mark(6U);	/* DIAGNOSTIC: target_initialize完了（割込みルーティング済み・この後カーネルがタスク起動） */
 }
 
 /*

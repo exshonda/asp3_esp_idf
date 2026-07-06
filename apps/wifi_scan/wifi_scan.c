@@ -109,17 +109,32 @@ main_task(EXINF exinf)
 	}
 #endif /* WIFI_SCAN_PREINIT_SPIN */
 
+#ifdef HANDOFF_SKIP_WIFI_INIT
+	/*
+	 *  DIAGNOSTIC（ハンドオフStep0）：ESP-IDFが既にesp_wifi_init/start
+	 *  まで済ませたWi-Fiの上へジャンプしてきた場合，ASP3側で
+	 *  esp_wifi_init を再実行すると二重初期化でblobの残留グローバル
+	 *  （ESP-IDF時代の関数ポインタ）を踏んでIllegal instructionになる．
+	 *  そこでinitをスキップし，その先（scan）だけを試す切り分け．
+	 */
+	syslog(LOG_NOTICE, "wifi_scan: HANDOFF_SKIP_WIFI_INIT (esp_wifi_init/start をスキップ)");
+	(void) cfg;
+#else /* HANDOFF_SKIP_WIFI_INIT */
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_init");
 	err = esp_wifi_init(&cfg);
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_init -> %d", (int_t)err);
 	if (err != 0) {
 		return;
 	}
+#endif /* HANDOFF_SKIP_WIFI_INIT */
+#ifndef HANDOFF_SKIP_WIFI_INIT
 	syslog(LOG_NOTICE, "wifi_scan: DIAG post-init g_ic[497]=%d g_ic[499]=%d",
 		   (int_t)diag_g_ic_byte(497), (int_t)diag_g_ic_byte(499));
 	syslog(LOG_NOTICE, "wifi_scan: DIAG post-init nvs_ptr=%x nvs[0]=%d",
 		   (int_t)diag_wifi_nvs_ptr(), (int_t)diag_wifi_nvs_byte0());
+#endif /* HANDOFF_SKIP_WIFI_INIT */
 
+#ifndef HANDOFF_SKIP_WIFI_INIT
 	(void) esp_wifi_set_mode(WIFI_MODE_STA);
 	syslog(LOG_NOTICE, "wifi_scan: DIAG post-set_mode g_ic[497]=%d g_ic[499]=%d",
 		   (int_t)diag_g_ic_byte(497), (int_t)diag_g_ic_byte(499));
@@ -149,6 +164,7 @@ main_task(EXINF exinf)
 			   (int_t)promisc_rx_count);
 		(void) esp_wifi_set_promiscuous(false);
 	}
+#endif /* HANDOFF_SKIP_WIFI_INIT */
 
 #ifdef TOPPERS_ESP32C6_WIFI
 	wifi_regsnap_reset();	/* DIAGNOSTIC (temporary, Priority 2) */

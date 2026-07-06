@@ -178,3 +178,61 @@ RAM(rwx) : ORIGIN = 0x40819000, LENGTH = 412k   /* 旧: 0x40800000 / 448k */
 - `asp3/target/esp32c6_espidf/esp32c6.ld`：RAMを0x40819000/412kへ（通常は
   0x40800000/448k）
 - `tmp/c6_handoff_source/`：ジャンプ元のGPIO準備・PMPダンプ・(GPIO_SELFTESTは撤去済)
+
+---
+
+## 追記2（2026-07-06）：ハンドオフ後ASP3は完全起動するがWi-Fiは使用不可＝Step0手法の行き止まり（確定）
+
+PMP修正でASP3がハンドオフ後に起動できるようになった後，wifi_scanを走らせた：
+
+### ASP3は完全起動する（PMP修正の最終確認）
+
+sample1では **バナー "TOPPERS/ASP3 Kernel Release 3.7.2 for ESP32-C6" 表示＋
+task1/task2実行＋HRT割込み＋コンソール出力** まで確認＝ハンドオフ後に
+ASP3カーネルが完全動作する。（副次的に，先に「UART書き込みがハング」と
+見えたのはsio初期化前のdiag_mark生FIFO書き込み特有で，正規のsio経由なら
+コンソール出力は正常。）
+
+### しかしWi-Fiは init/skip どちらでもクラッシュ＝残留ESP-IDFポインタ
+
+wifi_scanでの結果（コンソール観測）：
+
+| 版 | 結果 |
+|---|---|
+| `esp_wifi_init`あり | `wifi_scan: esp_wifi_init`後 **Illegal instruction pc=0x420a0e36**（ra=`wifi_api_lock`） |
+| `esp_wifi_init`スキップ（`HANDOFF_SKIP_WIFI_INIT`）→ scan直行 | **同一 Illegal instruction pc=0x420a0e36**（ra=`wifi_api_lock`） |
+
+- pc=0x420a0e36 は **ESP-IDFの旧.text範囲（0x42000020〜0x420a253c）内**の
+  アドレス＝ESP-IDF時代の関数ポインタ。
+- `wifi_api_lock`がosi関数テーブル経由でmutexロックを呼ぶ際，その
+  ポインタがESP-IDFのosi関数アドレスを保持したまま。ESP-IDFが古いRAM
+  領域(0x40800000系＝ASP3は0x40819000へ移したので上書きしない)に残した
+  osiテーブルを共有グローバルが指し続ける。ジャンプでflashを再マップ
+  したためそのアドレスはゴミ → クラッシュ。
+- **ASP3のbssクリアでもesp_wifi_init/skipでもリセットできない共有状態**
+  （ROM/固定アドレスのグローバル）なので，init有無に関わらず同一箇所で死ぬ。
+
+### 結論（確定）
+
+**ESP-IDF→ASP3ハンドオフは「ハードウェアは温められるがWi-Fiソフト
+状態は引き継げない」。2スタックのblob状態が共有グローバル（ESP-IDFの
+コードポインタ）で不可分に絡むため，ASP3はハンドオフ後にWi-Fiを
+使用できない。よって戦略ドキュメントStep0（ハンドオフでesp_wifi_scanを
+走らせ静的/ランタイムを判定）はこの手法では達成不可。**
+
+実施33（NuttX→agc_probe）が成功したのはagc_probeがWi-Fi APIを一切
+呼ばない受動観測アプリだったため（osiポインタを踏まない）。Wi-Fi APIを
+呼ぶ瞬間に残留ポインタで死ぬ，という差も整合する。
+
+### 次の方向（戦略ドキュメントの本命）
+
+ハンドオフは断念し，**ESP-IDF/Arduinoをground truth源**として使う：
+ネイティブESP-IDF（`components/esp_wifi/esp_adapter.c`のosiラッパ）に
+`(wrapper_id, timeout生値, 頻度)`ロギングを仕込み，`WiFiScan`中の
+「正常なosi呼び出しパターン」を採取 → ASP3の388Hzストームと直接比較する。
+
+### 実機操作のスクリプト化
+
+`tmp/c6hw.sh`（全ポートOFF→port4,5 ON→窓でesptool，を一括化）：
+`off`/`on`/`cycle`/`flash <bin> [offset]`/`flashfull <idfbuilddir>`。
+観測は Monitor で `/dev/ttyUSB0`(CP2102,115200)。
