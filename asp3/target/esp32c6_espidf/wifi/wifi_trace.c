@@ -208,7 +208,17 @@ WIFI_TRACE_WRAP4(wDev_Rxbuf_Init, 4)
 WIFI_TRACE_WRAP4(esf_buf_setup, 5)
 WIFI_TRACE_WRAP4(esf_buf_setup_static, 6)
 WIFI_TRACE_WRAP4(wdev_set_promis, 7)
-WIFI_TRACE_WRAP4(sta_rx_cb, 8)
+/*  追記23：sta_rx_cb（RXフレームがドライバへ）にRTC計測を追加．
+ *  frozen trace非依存でscan中も数える．RTC[36]=0x50000090． */
+extern long __real_sta_rx_cb(long a0, long a1, long a2, long a3);
+long __wrap_sta_rx_cb(long a0, long a1, long a2, long a3)
+{
+	(*(volatile uint32_t *)0x50000090U)++;
+	long ret = __real_sta_rx_cb(a0, a1, a2, a3);
+	wifi_trace_push(8U, 0U, (uintptr_t)a0, (uintptr_t)a1,
+					 (uintptr_t)a2, (uintptr_t)a3, (uintptr_t)ret);
+	return(ret);
+}
 WIFI_TRACE_WRAP4(wifi_recycle_rx_pkt, 9)
 WIFI_TRACE_WRAP4(esf_buf_alloc_dynamic, 11)
 WIFI_TRACE_WRAP4(wdev_data_init, 12)

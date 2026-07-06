@@ -207,6 +207,15 @@ esp_shim_coex_adapter_register(void)
 	/*
 	 *  ROMのcoexist_funcsポインタをダミーno-opテーブルへ向ける
 	 *  （WiFi単独＝coexist非アクティブ．上記コメント参照）．
+	 *
+	 *  ★追記24-25：この no-op 化がC6 RX不能の根本原因と特定．blobの
+	 *  coex調停（0x600a4dd8のWiFi PTI設定含む）が全てno-op化され、PTI=0
+	 *  ＝coexがWiFiにRXスロットを許可しない＝MAC RX割込み不発．
+	 *  だが単純に外すと coexist_funcs のNULL/未設定メソッドで即
+	 *  Illegal instruction（no-opの本来の理由＝coex_initがASP3文脈で
+	 *  coexist_funcsを完全に設定していない）．NuttX（同一blob・受信可）は
+	 *  no-opせず本物のcoexが動く＝正しい修正は「coex_initがcoexist_funcsを
+	 *  正しく設定する状態にする」こと（NuttX比較が次段）．
 	 */
 	for (i = 0U; i < 48U; i++) {
 		dummy_coexist_table[i] = (void *)coex_noop;

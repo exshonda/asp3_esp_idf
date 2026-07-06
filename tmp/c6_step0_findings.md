@@ -1223,3 +1223,168 @@ blob版が違う参照，NuttXは同一blobの参照＝**NuttXこそ本命の比
    カスケード（DMAディスクリプタ等RAM側状態）も疑う。
 3. 特定レジスタのアドレスからNuttX/blobの設定経路を逆引き
    （libpp逆アセンブル・NuttXソース）。
+
+---
+
+## 追記22（2026-07-06）★★根源特定★★：MAC RX割込みゲート＝レジスタ0x600a4dd8のbit0 ただ1ビット。ASP3=0x70 / native=0x71
+
+追記21の42レジスタを二分探索（各試行前にhard-resetで素状態へ戻し、
+poke後にesp_shim_int_count[1]の増分でレート判定．全自動化＝
+$CLAUDE_JOB_DIR/tmp/bisect.py）した結果：
+
+### 二分探索の収束（全て再現性あり）
+- 全42 → 153/s（baseline 4.4/s）
+- [0-20]無効 / [21-41]有効
+- [21-31]無効 / [32-41]有効
+- [32-36]有効 / [37-41]無効
+- [32,33]有効 / [34,35,36]無効
+- **[32]単独＝141/s！ [33]単独＝無効**
+
+### ★根源＝0x600a4dd8 bit0★
+- reg32 = **0x600a4dd8**：native=**0x71** / ASP3=**0x70**（差はbit0のみ）。
+- ASP3実行中に 0x600a4dd8 へ 0x71 を書く（bit0を立てる）だけで、
+  MAC割込み(esp_shim_int_count[1])が11固定→141/秒で発火開始。
+- **これがMAC RX割込みのイネーブルゲート**。5ヶ月来「MACが一度も割込みを
+  上げない」の直接原因＝この1ビットがASP3で立っていない。
+
+### ただしAPはまだ0（データパスは下流にもう1段）
+- bit0を立ててMAC割込みが141/s来ても RESCAN は 0 APs のまま。
+- 全42移植でも0 AP（追記21）＝割込みゲートより下流（sta_rx_cb→フレーム
+  パース→scan結果蓄積、またはRX DMAディスクリプタ等RAM側状態）に
+  もう一つブロッカーがある。ただし**最大の壁（割込み不発）は解けた**。
+
+### 次の焦点
+1. **0x600a4dd8 bit0 を「立てるべき」経路の特定**：libpp/libnet80211を
+   逆アセンブルしこのアドレスへのstore箇所を探す→どのblob関数が設定するか
+   →ASP3のglue/osiがその関数を呼ぶ経路が欠落/失敗していないか。
+   NuttX(同一blob・受信可)では立っている＝呼ばれている。
+2. データパス下流：全42移植状態で sta_rx_cb(id=8)/promisc_rx_count/
+   wifi_set_rx_policy(id=13) のトレースを見て、フレームが上がるか。
+3. **最短の実用検証**：bit0を立てる＋残りの効くレジスタ（下流）を
+   二分探索で追加特定し、"RESCAN N APs" が出る最小セットを求める。
+
+### ツール追加
+- `tmp/c6_jtag_tools/bisect.py`：poke/rate測定の自動化（要 diffs.json）。
+
+---
+
+## 追記23（2026-07-06）：0x600a4dd8 の正体＝COEX PTIレジスタ。下位4bit=WiFi default PTI(coex優先度)がnative=1/ASP3=0。根本＝coex優先度未設定でRXスロット不許可
+
+libpp逆アセンブルで 0x600a4dd8 を触る2関数を特定：
+- `hal_coex_pti_init`: `ori a4,a4,32`＝**bit5(0x20)をセット**（native/ASP3とも
+  立っている＝これは呼ばれている）。
+- `hal_set_wifi_default_pti(a0)`: `andi a5,a5,-16; or a5,a5,(a0&15)`＝
+  **下位4bit(PTI値)を引数に設定**するRMW。
+
+native=0x71（PTI=**1**）/ ASP3=0x70（PTI=**0**）。bit4/5/6(0x70)は両方一致。
+差は**下位nibble(WiFi default PTI＝coex調停の優先度)だけ**：native=1・ASP3=0。
+
+### 解釈（有力）
+COEX（WiFi/BT/802.15.4共存）の調停で**WiFiの優先度(PTI)が0だと無線
+RXスロットが許可されず、MAC RX割込みが一切上がらない**。PTIを1にすると
+（=native同等）141/秒でMAC割込みが発火＝ビーコン受信レートと整合。
+→ 5ヶ月来の「MAC無割込み」の根本は**coex優先度PTI=0**。
+
+`hal_coex_pti_init`(bit5)は呼ばれているのに `hal_set_wifi_default_pti(1)`
+相当が効いていない＝ASP3のcoex初期化/enableのどこかでdefault PTI設定が
+抜けている。ASP3は`._coex_init=coex_init`/`._coex_enable=coex_enable`と
+**本物のlibcoexist関数**を登録している（esp_coex_adapter.cのadapter登録も
+NuttXテンプレ）にもかかわらず。
+
+### まだ0 AP（データパスは別の下流ブロッカー）
+PTI=1でMAC割込み141/sでもRESCANは0 AP。全42移植でも0 AP。＝割込みゲート
+（coex PTI）とは別に、フレーム→scan結果のデータパスにもう1段ある
+（sta_rx_cb/RX DMA/scanテーブル、または42差分の範囲外＝RAM状態/別レジスタ）。
+
+### 次の焦点（2系統）
+A. **PTI=0の根本修正**：coex_init→coex_enable→(WiFi request/schm)→
+   hal_set_wifi_default_pti の連鎖のどこでASP3が止まるか。coex_enableが
+   呼ばれているか、coexのschm(スケジューラ)タスクが回っているか、
+   single-mode(WiFiのみ)のcoex configがNuttXと違うか。NuttX(同一blob・
+   受信可)では立っている＝連鎖が完走している。
+B. **データパス下流**：reg32以外で"APs found"に効くレジスタ/状態の特定
+   （全42でも0 APなので範囲外の可能性大＝RX DMAディスクリプタ等RAM側）。
+
+---
+
+## 追記24（2026-07-06）：PTI nibbleを叩くだけでは「割込みは開くがsta_rx_cb=0・発火過多(~1400/s)」＝真の修正はcoex初期化の完走
+
+reg32(0x600a4dd8 PTI nibble)をpokeした状態でRTC計測：
+- int_count[1]（MAC割込み）＝大量発火（7158/5秒≈1400/s）
+- **sta_rx_cb（RXフレーム→ドライバ）＝0（一度も呼ばれない）**
+- 発火レート~1400/sはビーコン受信量(~200/s)を大幅超過
+
+→ **PTI nibbleを手で立てるのは不完全/不正な代替**。割込みは開くが、
+coexの調停状態が正しくセットされていないため、正常なフレーム受信に
+ならず割込みだけが過剰発火（RXエラー/スプリアス）。sta_rx_cbに届かない。
+
+### 修正の方向（確定）
+**単一レジスタpokeは対症療法にすぎない。根本＝ASP3のcoex初期化が
+完走していない**こと。完走すればPTI=1＋残りの調停状態が一括で正しく
+設定される。NuttX(同一blob・受信可)ではcoex初期化が完走している。
+
+### 調査すべきcoex連鎖
+esp_wifi_start → (osi)_coex_enable=coex_enable → coex schmタスク →
+coex_wifi_request(SCAN) → PTI設定。ASP3のcoexアダプタ
+(esp_coex_adapter.c/esp_wifi_adapter.cのcoex系osi)に**NULL/スタブ/
+誤った戻り値**があると連鎖が途中で止まる。特に：
+- coex schmのタイマ/タスクが回っているか（coex_schm_process_restart
+  id=41がトレースに出るか）
+- coex_wifi_request/coex_wifi_release の戻り値
+- spin_lock/semphr等coexが使うosiプリミティブのISR文脈での挙動
+- single-mode(WiFiのみ)時のcoex config（sw_coex有効か）
+
+### 到達点（本日の総括）
+**MAC RX割込み不発の根本＝coex優先度PTI未設定**まで特定（0x600a4dd8
+下位nibble）。ただし手動pokeは不完全＝coex初期化完走が本当の修正。
+これでStep0の「なぜ受信しないか」は**coex初期化の不完全性**に確定的に
+帰着した。次セッション＝ASP3 vs NuttXのcoexアダプタ/初期化順の
+行単位比較（NuttXクローン=scratchpad）。
+
+---
+
+## 追記25（2026-07-06）★★根本原因確定★★：ASP3がcoexist_funcsをno-opテーブルに差し替えているのがC6 RX不能の根本。ただし単純除去はcoex_init未完でクラッシュ
+
+追記23-24でPTIゲートまで来た後、esp_coex_adapter.cを精査して根本を発見：
+
+### 根本原因（esp_shim_coex_adapter_register / esp_coex_adapter.c）
+```c
+for (i=0;i<48;i++) dummy_coexist_table[i] = (void*)coex_noop;
+coexist_funcs = dummy_coexist_table;   // ← 全coex関数をno-op化
+```
+「WiFi単独＝coexist非アクティブ」の判断でROMのcoexist_funcsを48個全て
+no-opに差し替えている。**これでblobが低レベルでcoexist_funcs経由で行う
+coex調停（0x600a4dd8のWiFi PTI設定＝hal_set_wifi_default_pti含む）が
+全てno-op化→PTI=0→coexがWiFiにRXスロットを許可しない→MAC RX割込み
+不発→0 AP**。5ヶ月来の症状の根本。
+
+### 検証（決定的）
+- no-op差し替えを`#if 0`で無効化してビルド→実機 **Illegal instruction
+  即クラッシュ**（PTIは0x70のまま＝到達前）。＝**coexist_funcsのNULL/
+  未設定メソッド**を踏む。no-opは元々このクラッシュ回避策だった。
+- つまり `coex_init()`（ASP3は本物のlibcoexist関数を_coex_initに登録）が
+  **ASP3文脈で coexist_funcs を完全に設定していない**。NuttX(同一blob・
+  受信可)はno-opせず本物のcoexが動く＝coex_initが完走しcoexist_funcsが
+  正しく設定される。
+
+### 正しい修正の方向
+「no-opを外す」だけでは不可（クラッシュ）。**coex_init()がcoexist_funcsを
+正しく設定する状態を作る**必要がある。候補：
+1. coex初期化順序：esp_shim_coex_adapter_register()でのno-op上書きが
+   coex_init()の設定を潰している可能性。coex_init後にcoexist_funcsを
+   確認し、no-op上書きを止めても中身が有効か。
+2. NuttXのcoexブリングアップ手順（クローン=scratchpad
+   arch/risc-v/src/common/espressif/ + esp32c6/）と行単位比較。
+   NuttXがcoexist_funcsをどう設定するか。
+3. クラッシュするメソッド（pm_disconnected_start経由のNULL）だけを
+   safe stubにし、PTI設定系は本物を通す部分的アプローチ。
+
+### 到達点（Step0完全解明に最接近）
+**「なぜC6 WiFiが受信しないか」＝coexist_funcsのno-op化でPTIゲートが
+閉じたまま**、と根本原因を確定。修正はcoex初期化の完全化（NuttX比較）。
+これでStep0の診断は事実上完了、残るは実装（fix）フェーズ。
+
+### 教訓
+「WiFi単独ならcoex不要」は**C6では誤り**。C6はWiFi-onlyでも受信経路が
+coex調停器を通るため、coexist_funcsを殺すとRXが死ぬ。C3で通用した
+簡略化がC6で通用しなかった（チップ差）。

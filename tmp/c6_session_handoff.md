@@ -1,14 +1,17 @@
 # C6 Wi-Fi調査 セッションハンドオフ（2026-07-06時点・別PC作業用）
 
-全経緯の正本は `tmp/c6_step0_findings.md`（追記1〜21）。本書は**別PCで
+全経緯の正本は `tmp/c6_step0_findings.md`（追記1〜25）。本書は**別PCで
 作業を再開するための環境・手順・現在地**のみをまとめる。
+**最新の現在地は本書末尾「根本原因確定＝coexist_funcs no-op化」を参照**
+（以下の環境/ビルド/観測手順は共通・有効）。
 
 ## 現在地（1行で）
 
-RXブロッカーは**WiFi MAC/WDEV空間（0x600A4xxx等）の未設定レジスタ42個**まで
-局在化済み。42個をnative値へJTAG移植するとMAC割込みが発火開始
-（11固定→~170/秒）。ただしまだ0 AP（データパス未達）。
-**次の一手＝42個の二分探索**（`tmp/c6_jtag_tools/poke_mac.tcl`を分割）。
+★**根本原因を確定**（下記末尾＋findings追記22-25）：C6 WiFi RX不能は
+`esp_coex_adapter.c` が `coexist_funcs` を全no-op化していることが原因＝
+coex PTIが0のままでMAC RX割込みが上がらない。**Step0診断は完了、次は
+実装(fix)フェーズ＝NuttXのcoexブリングアップ比較**。
+（途中経過：42レジスタ→二分探索で0x600a4dd8 の coex PTI nibble 1点に収束）
 
 ## 必要な環境（別PCで揃えるもの）
 
@@ -101,3 +104,31 @@ openocd -f board/esp32c6-builtin.cfg -c init -c halt -c "mdw <addr> <n>" -c resu
   トランザクション毎gate → nativeでのregi2c読みは
   `regi2c_ctrl_read_reg_mask`（ELFシンボル）か生JTAGトランザクションで
 - pyserialでttyACM0を読むとハングすることがある → ttyUSB0のみ読む
+
+---
+
+## 追記（2026-07-06夜）：根本原因確定＝coexist_funcs no-op化
+
+**Step0診断は完了**。C6 WiFi RX不能の根本＝`asp3/target/esp32c3_espidf/wifi/
+esp_coex_adapter.c` の `esp_shim_coex_adapter_register()` が `coexist_funcs`
+を48個全て no-op に差し替えていること（詳細はfindings追記22-25）。
+これでblobのcoex調停（0x600a4dd8 の WiFi PTI 設定）がno-op化→PTI=0→
+coexがRXスロット不許可→MAC割込み不発→0 AP。
+
+### 次PCでやること（実装フェーズ）
+1. **NuttXのcoexブリングアップと比較**（同一blob・受信可）：
+   scratchpad(なければ再clone) `apache/nuttx`
+   arch/risc-v/src/common/espressif/ と esp32c6/ で、coexist_funcs を
+   どう設定するか／coex_init/coex_enableの呼び出し順を確認。
+2. no-op を外しても動くようにする：`coex_init()`後に coexist_funcs が
+   有効テーブルになる状態を作る。単純除去は Illegal instruction
+   （pm_disconnected_start経由のNULL）＝クラッシュするメソッドだけ
+   safe stub、PTI系は本物、の部分approachも可。
+3. 検証：`tmp/c6_jtag_tools/bisect.py` の rate測定で MAC割込みが
+   自然に発火するか、最終的に "RESCAN N APs" が出るか。
+
+### 追加した観測資産
+- RTC固定番地計測：0x50000080=phy_enable入場, 0x50000088=register_chipv7_phy
+  入場, 0x50000090=sta_rx_cb呼出し数（wifi_trace.c）
+- `tmp/c6_jtag_tools/bisect.py` + `diffs.json`：42レジスタpoke/rate自動測定
+- wifi_scan.c の RESCAN ループ（連続scan）
