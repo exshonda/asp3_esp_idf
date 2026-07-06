@@ -36,6 +36,9 @@
 #include "soc/periph_defs.h"
 #include "esp_private/esp_modem_clock.h"
 #include "hal/regi2c_ctrl_ll.h"
+#include "hal/modem_lpcon_ll.h"
+#include "hal/modem_syscon_ll.h"
+#include "hal/pmu_ll.h"
 
 /*
  *  リンク閉包で解決するesp-hal／blob側の関数（宣言のみ）
@@ -562,6 +565,17 @@ wifi_apb80m_release_wrapper(void)
 static void
 phy_enable_wrapper(void)
 {
+	/*  ★根本原因修正（追記10）：MODEM_LPCON_CLK_CONF(0x600af018)の
+	 *  WIFIPWR(bit0)/COEX(bit1)/I2C_MST(bit2)クロックを，PHY較正
+	 *  （esp_phy_enable→register_chipv7_phyがregi2c経由でRFを較正）の
+	 *  直前に確実に有効化する．JTAGでnative(受信OK)=0x7 vs ASP3=0x0の
+	 *  差分として特定．I2C_MSTが立っていないとregi2c越しのRF較正が
+	 *  無応答で受信不能＝AP 0個になる． */
+	*(volatile uint32_t *)0x600af018U = 0x7U;
+	/*  追記10-b：広域JTAG diffで判明した残りのmodem LPclock差分も
+	 *  native値に合わせる（COEX_LP_CLK_CONF等．LP系だが検証のため）． */
+	*(volatile uint32_t *)0x600af008U = 0x314U;	/* MODEM_LPCON_COEX_LP_CLK_CONF */
+	*(volatile uint32_t *)0x600af048U = 0x314U;	/* MODEM_LPCON +0x48 */
 	esp_phy_enable(PHY_MODEM_WIFI);
 	phy_wifi_enable_set(1U);
 }
@@ -585,10 +599,40 @@ wifi_reset_mac_wrapper(void)
 	modem_clock_module_mac_reset(PERIPH_WIFI_MODULE);
 }
 
+/*
+ *  ★根本原因候補（追記13）：Zephyr soc_hw_init()のmodem ICG設定を移植．
+ *  CLK_CONF(MODEM_LPCON 0x600af018 bit0-2)はクロック「源」を有効化する
+ *  だけで，ICG（Internal Clock Gating）bitmapが「HP_ACTIVE電源状態で
+ *  そのクロックを実際に流すか」を決める．未設定だとCLK_CONF有効でも
+ *  クロックがゲートオフ（LPCON=0x7にしても受信できなかった理由の候補）．
+ *  NuttXは2段ブート，nativeはesp_perip_clk_init/bootloaderでこれをやるが，
+ *  ASP3のDirect Bootは飛ばす．JTAG+Zephyrソース比較で判明．
+ */
+static void
+esp_shim_modem_icg_init(void)
+{
+	pmu_dev_t			*pmu = (pmu_dev_t *)0x600B0000U;
+	modem_lpcon_dev_t	*lpcon = (modem_lpcon_dev_t *)0x600AF000U;
+	modem_syscon_dev_t	*syscon = (modem_syscon_dev_t *)0x600A9800U;
+	uint32_t			code_bit = 1U << 2;	/* BIT(PMU_HP_ICG_MODEM_CODE_ACTIVE=2) */
+
+	pmu_ll_hp_set_icg_modem(pmu, PMU_MODE_HP_ACTIVE, 2U);
+	modem_syscon_ll_set_modem_apb_icg_bitmap(syscon, code_bit);
+	modem_lpcon_ll_set_i2c_master_icg_bitmap(lpcon, code_bit);
+	modem_lpcon_ll_set_lp_apb_icg_bitmap(lpcon, code_bit);
+	pmu_ll_imm_update_dig_icg_modem_code(pmu, true);
+	pmu_ll_imm_update_dig_icg_switch(pmu, true);
+}
+
 static void
 wifi_clock_enable_wrapper(void)
 {
 	static bool_t	lpclk_selected = false;
+
+	/*  追記13：esp_shim_modem_icg_init()はJTAG実測で冗長と判明
+	 *  （clk_conf_power_st=0x66660000は既にnative一致＝modem_clockが設定）
+	 *  ．無効化。RXブロッカーはICGでもクロックでもなくRF/regi2c較正層． */
+	(void) esp_shim_modem_icg_init;
 
 	/*
 	 *  esp_perip_clk_init()（esp_system/port/soc/esp32c6/clk.c）が
@@ -631,6 +675,12 @@ wifi_clock_enable_wrapper(void)
 	}
 
 	wifi_module_enable();
+
+	/*  ★根本原因修正（追記10）：wifi_module_enable()後もMODEM_LPCON_CLK_
+	 *  CONF(0x600af018)のWIFIPWR/COEX/I2C_MSTクロック(bit0/1/2)を明示的に
+	 *  有効化する．既存の_regi2c_ctrl_ll_master_enable_clock等だけでは
+	 *  実機で0x0のまま（JTAG実測）＝受信不能だった． */
+	*(volatile uint32_t *)0x600af018U = 0x7U;
 }
 
 static void

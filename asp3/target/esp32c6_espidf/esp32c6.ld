@@ -27,7 +27,7 @@ MEMORY
      *  [0x408184b4,0x40880000) をRW(0x8b)として開けているので，そこへ
      *  移す．調査完了後にrevertする（通常ビルドは0x40800000/448kに戻す）．
      */
-    RAM(rwx)  : ORIGIN = 0x40800000, LENGTH = 448k
+    RAM(rwx)  : ORIGIN = 0x40819000, LENGTH = 412k
 }
 
 ENTRY(_flash_entry)

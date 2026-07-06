@@ -61,6 +61,23 @@ app_main(void)
 	wifi_ap_record_t	recs[20];
 	esp_err_t			err;
 
+#ifdef LOADER_NO_WIFI
+	/*
+	 *  ローダモード（option2）：ESP-IDFの2段ブートローダで起動した後，
+	 *  Wi-Fiを一切初期化せずに（＝blobのグローバル/ROM状態を汚さず）
+	 *  即ASP3へジャンプする．ASP3側が自前でフレッシュにesp_wifi_initする
+	 *  ため，ハンドオフ時のESP-IDF残留osiポインタ問題を回避できる．
+	 *  Direct Bootが起動しなくなった現状の代替経路（2段ブートローダは
+	 *  確実に動く）．
+	 */
+	ESP_LOGI(TAG, "LOADER_NO_WIFI: jumping to ASP3 at 0x200000 (no Wi-Fi init)");
+	(void) cfg; (void) num; (void) recs; (void) err;
+	(void) esp_task_wdt_deinit();
+	vTaskDelay(pdMS_TO_TICKS(300));
+	asp3_jump_now();	/* MMU remap 0x42000000<-0x200000 + jump; disables SWD */
+	for (;;) { vTaskDelay(pdMS_TO_TICKS(1000)); }
+#endif /* LOADER_NO_WIFI */
+
 #ifdef GPIO_SELFTEST
 	/*
 	 *  DIAGNOSTIC 自己診断：D0/D1/D2(GPIO0/1/2)を出力に設定し，
@@ -137,6 +154,35 @@ app_main(void)
 			vTaskDelay(pdMS_TO_TICKS(1000));
 		}
 	}
+
+	/*  GROUND-TRUTH（ASP3との modem/PHY レジスタ差分取得・一時的）：
+	 *  ジャンプせず，受信できるネイティブESP-IDFのまま再スキャンし続ける．
+	 *  JTAGでいつhaltしても「受信できている版」のレジスタ状態を読める． */
+#if 1
+	ESP_LOGI(TAG, "GT-REGDIFF: rescanning forever (no jump) for JTAG register comparison");
+	for (;;) {
+		err = esp_wifi_scan_start(NULL, true);
+		num = 20;
+		err = esp_wifi_scan_get_ap_records(&num, recs);
+		{
+			/*  追記12：ASP3と同じRF較正regi2c読み戻し→RTC[16..](0x50000040)．*/
+			uint32_t *romtbl = (uint32_t *)0x4087f954U;
+			uint8_t (*rd)(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t) =
+				(uint8_t (*)(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t))
+					(uintptr_t)romtbl[23];
+			volatile uint8_t *out = (volatile uint8_t *)0x50000040U;
+			static const uint8_t blk[4] = {0x6b, 0x6a, 0x66, 0x6d};
+			static const uint8_t hst[4] = {1, 1, 0, 1};
+			int bi, r, o = 0;
+			for (bi = 0; bi < 4; bi++) {
+				for (r = 0; r < 16; r++) {
+					out[o++] = rd(blk[bi], hst[bi], (uint8_t) r, 7, 0);
+				}
+			}
+		}
+		ESP_LOGI(TAG, "GT-REGDIFF rescan: %d APs (err=%d)", (int) num, (int) err);
+	}
+#endif
 
 	ESP_LOGI(TAG, "Step0: scan succeeded (%d APs) -- jumping to ASP3 in 2s", num);
 	vTaskDelay(pdMS_TO_TICKS(2000));

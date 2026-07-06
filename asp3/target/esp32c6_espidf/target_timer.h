@@ -96,12 +96,19 @@ target_timer_force_int(void)
 /*
  *  次に割込みを発生させる時刻の設定
  */
+/*  DIAGNOSTIC（HRTスプリアス割込み調査・一時的）：最後に武装したtarget
+ *  をハンドラが参照して「alarm発火主張だが実はcounter<target＝古い
+ *  targetのレベル再ラッチ」を検出する． */
+extern volatile uint64_t g_hrt_last_target;
+
 Inline void
 target_hrt_set_event(HRTCNT hrtcnt)
 {
 	uint64_t	current = esp32c6_systimer_read();
 	uint64_t	target = current
 					+ (uint64_t)hrtcnt * ESP32C6_SYSTIMER_TICKS_PER_US;
+
+	g_hrt_last_target = target;	/* DIAGNOSTIC */
 
 	/*
 	 *  target0コンパレータへ比較値を設定する

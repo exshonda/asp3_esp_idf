@@ -67,9 +67,30 @@ target_hrt_terminate(intptr_t exinf)
 /*
  *  タイマ割込みハンドラ
  */
+/*
+ *  DIAGNOSTIC（Step0 HRTスプリアス割込み調査・一時的）：
+ *  RTC RAM(0x50000000)に計測を蓄積．[12]handler総入場 [13]入場時に
+ *  systimer alarm int_stがセット済み（＝alarm発火主張） [14]うち
+ *  counter<last_target（＝古いtargetのレベル再ラッチ＝スプリアスの証拠）．
+ *  last_targetはtarget_hrt_set_eventが g_hrt_last_target へ保存する．
+ */
+volatile uint64_t g_hrt_last_target;
+
 void
 target_hrt_handler(void)
 {
+	volatile uint32_t *rc = (volatile uint32_t *)0x50000000U;
+	bool_t fired = systimer_ll_is_alarm_int_fired(&SYSTIMER, 0U);
+	uint64_t now = esp32c6_systimer_read();
+
+	rc[12] += 1U;
+	if (fired) {
+		rc[13] += 1U;
+		if (now < g_hrt_last_target) {
+			rc[14] += 1U;	/* alarm発火主張だが武装targetは未来＝スプリアス */
+		}
+	}
+
 	/*
 	 *  SYSTIMER側とFROM_CPU_0側（強制割込み）の両方をクリアする
 	 *  （どちらも同じCPU割込み線にマップされたlevelソース）

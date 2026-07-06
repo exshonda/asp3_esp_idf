@@ -97,17 +97,34 @@ main_task(EXINF exinf)
 		volatile uint32_t *g = (volatile uint32_t *)0x50000000U;
 		uint_t k;
 		if (g[0] != 0xC6057A11U) {	/* 電源投入時=magic無し→全クリア */
-			for (k = 0U; k < 8U; k++) {
+			for (k = 0U; k < 16U; k++) {
 				g[k] = 0U;
 			}
 			g[0] = 0xC6057A11U;
 		}
 		syslog(LOG_NOTICE,
-			   "GT-ASP3 accum boot#=%d: semTake=%d semGive=%d qRecv=%d qSend=%d qSendISR=%d timerArm=%d",
+			   "GT-ASP3 accum boot#=%d: semTake=%d semGive=%d qRecv=%d qSend=%d",
 			   (int_t)g[1], (int_t)g[2], (int_t)g[3], (int_t)g[4],
-			   (int_t)g[5], (int_t)g[6], (int_t)g[7]);
+			   (int_t)g[5]);
+		/*  前回runのscan結果（flood-proof：Wi-Fi起動前=氾濫前に出力）．
+		 *  [8]AP件数 [9]scan_get err [10]到達マーカ(1:loop脱出 2:calloc後
+		 *  3:get_ap_records後) [11]qRecv増分の目安 */
+		syslog(LOG_NOTICE,
+			   "GT-ASP3 prev-scan: reach=%d apcount=%d scanerr=%d timerArm=%d qSendISR=%d",
+			   (int_t)g[10], (int_t)g[8], (int_t)g[9],
+			   (int_t)g[7], (int_t)g[6]);
+		/*  HRTスプリアス割込み計測＋Wi-Fi割込み配送数（前回run累積）：
+		 *  hrtEntries=HRT割込み総数 hrtFired=alarm発火主張 hrtSpur=うち
+		 *  counter<target（＝スプリアス） wifiInt=Wi-Fi線の発火総数
+		 *  （0近傍ならRX割込みが配送されていない＝0 APの根因） */
+		syslog(LOG_NOTICE,
+			   "GT-ASP3 hrtEntries=%d hrtFired=%d hrtSpur=%d wifiInt=%d",
+			   (int_t)g[12], (int_t)g[13], (int_t)g[14], (int_t)g[11]);
 		g[1] = g[1] + 1U;
 	}
+	/*  boot dumpの3行をlogtaskに吐かせてからWi-Fi起動（blobの同時
+	 *  UART出力で文字化けするのを避ける）． */
+	(void) tslp_tsk(300000);
 #endif /* TOPPERS_ESP32C6_WIFI */
 
 	syslog(LOG_NOTICE, "wifi_scan: initializing shim");
@@ -194,31 +211,90 @@ main_task(EXINF exinf)
 
 #ifdef TOPPERS_ESP32C6_WIFI
 	wifi_regsnap_reset();	/* DIAGNOSTIC (temporary, Priority 2) */
+	/*  ★根本原因テスト（追記10）：JTAGでnative(受信OK)=0x7 vs ASP3=0x0の
+	 *  差分が判明した MODEM_LPCON_CLK_CONF(0x600af018) を強制的に0x7へ．
+	 *  bit0=WIFIPWR bit1=COEX bit2=I2C_MST(RF regi2c用)クロック．これで
+	 *  APが検出できれば，shimのクロックenable欠落が0 APの根因と確定． */
+	*(volatile uint32_t *)0x600af018U = 0x7U;
 #endif /* TOPPERS_ESP32C6_WIFI */
 	err = esp_wifi_scan_start(NULL, false);
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_scan_start -> %d", (int_t)err);
 
-	while (!scan_done) {
-		(void) tslp_tsk(1000000);	/* SCAN_DONEを待つ（最大繰返し） */
+	{
+		/*  DIAGNOSTIC（Step0 option2）：scan待ちの間，RTC-RAMのosiカウンタ
+		 *  (0x50000008〜．adapterがライブ加算)を毎秒読み，per-secデルタを
+		 *  出力してosi呼出しレート（388Hz storm再現の有無）を実測する．
+		 *  syslogは5引数上限のため1行5値．scan_doneが来なくても
+		 *  20秒で抜けて後段のダンプへ進む．*/
+		volatile uint32_t *g = (volatile uint32_t *)0x50000000U;
+		uint32_t lsemt = g[2], lqr = g[4], lqs = g[5], lqsi = g[6], lta = g[7];
+		int sec;
+		for (sec = 0; sec < 20 && !scan_done; sec++) {
+			*(volatile uint32_t *)0x600af018U = 0x7U;	/* 追記10：クロック再アサート */
+			(void) tslp_tsk(1000000);	/* 1秒 */
+			syslog(LOG_NOTICE,
+				"OSIRATE/s semTake=%d qRecv=%d qSend=%d qSendISR=%d timerArm=%d",
+				(int_t)(g[2] - lsemt), (int_t)(g[4] - lqr),
+				(int_t)(g[5] - lqs), (int_t)(g[6] - lqsi),
+				(int_t)(g[7] - lta));
+			lsemt = g[2]; lqr = g[4]; lqs = g[5]; lqsi = g[6]; lta = g[7];
+		}
 	}
-#ifdef TOPPERS_ESP32C6_WIFI
-	wifi_trace_dump_counts();	/* DIAGNOSTIC（実施20）：syslogバースト・ロス回避のため先に集計版 */
-	wifi_regi2c_dump_count();	/* DIAGNOSTIC（実施23）：同上，先に集計版 */
-	wifi_trace_dump();	/* DIAGNOSTIC (temporary): scan完了後まで延長して捕捉 */
-	wifi_regsnap_dump();	/* DIAGNOSTIC (temporary, Priority 2) */
-	wifi_regi2c_dump();	/* DIAGNOSTIC（実施23／Priority 2） */
-	wifi_taskdelay_dump();	/* DIAGNOSTIC（実施26／タイミング感度調査） */
-	wifi_phyinit_dump();	/* DIAGNOSTIC（実施36／phy_init呼出し境界の一点スナップショット） */
-	wifi_trace_dump_addr();	/* DIAGNOSTIC（実施37／JTAG生読み用アドレス確認） */
+#if defined(TOPPERS_ESP32C6_WIFI) && 0
+	/*  DIAGNOSTIC（Step0 option2）：これらの重いダンプはlogtaskを溢れさせ
+	 *  "APs found"行を飲み込むため一時無効化．スキャン完走/AP件数の確認を
+	 *  優先する（調査完了後に復帰）．*/
+	wifi_trace_dump_counts();
+	wifi_regi2c_dump_count();
+	wifi_trace_dump();
+	wifi_regsnap_dump();
+	wifi_regi2c_dump();
+	wifi_taskdelay_dump();
+	wifi_phyinit_dump();
+	wifi_trace_dump_addr();
 #endif /* TOPPERS_ESP32C6_WIFI */
 
+	*(volatile uint32_t *)0x50000028U = 1U;	/* [10]=reach 1: loop脱出 */
 	num = 20;
 	recs = (wifi_ap_record_t *)
 				esp_shim_calloc(num, sizeof(wifi_ap_record_t));
 	if (recs == NULL) {
 		return;
 	}
+	*(volatile uint32_t *)0x50000028U = 2U;	/* [10]=reach 2: calloc後 */
 	err = esp_wifi_scan_get_ap_records(&num, recs);
+	*(volatile uint32_t *)0x50000020U = (uint32_t)num;	/* [8]=AP件数 */
+	*(volatile uint32_t *)0x50000024U = (uint32_t)err;	/* [9]=scan_get err */
+	*(volatile uint32_t *)0x50000028U = 3U;	/* [10]=reach 3: get後 */
+	{
+		/*  Wi-Fi割込み線(1〜15)の発火総数をRTC[11]へ．blobがset_intrで
+		 *  ルーティングしたMAC/RX割込みが実際に配送されているかの実測．*/
+		extern volatile uint32_t esp_shim_int_count[];
+		uint32_t wsum = 0U;
+		int wi;
+		for (wi = 1; wi <= 15; wi++) {
+			wsum += esp_shim_int_count[wi];
+		}
+		*(volatile uint32_t *)0x5000002CU = wsum;	/* [11]=Wi-Fi int総数 */
+	}
+	{
+		/*  追記12：RF較正regi2cブロックを読み戻してRTC[16..](0x50000040)へ．
+		 *  ROM PHY funsテーブル(0x4087f954)のidx23=read_mask関数で全8bit取得．
+		 *  native(受信OK)と同じ読み出しをして比較＝RF較正の正否を判定． */
+		uint32_t *romtbl = (uint32_t *)0x4087f954U;
+		uint8_t (*rd)(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t) =
+			(uint8_t (*)(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t))
+				(uintptr_t)romtbl[23];
+		volatile uint8_t *out = (volatile uint8_t *)0x50000040U;
+		static const uint8_t blk[4] = {0x6bU, 0x6aU, 0x66U, 0x6dU};
+		static const uint8_t hst[4] = {1U, 1U, 0U, 1U};
+		int bi, r, o = 0;
+		for (bi = 0; bi < 4; bi++) {
+			for (r = 0; r < 16; r++) {
+				out[o++] = rd(blk[bi], hst[bi], (uint8_t)r, 7U, 0U);
+			}
+		}
+	}
 	syslog(LOG_NOTICE, "wifi_scan: %d APs found (err=%d)",
 		   (int_t)num, (int_t)err);
 	for (i = 0; i < num; i++) {
