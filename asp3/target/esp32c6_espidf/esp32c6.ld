@@ -17,7 +17,17 @@ INCLUDE esp32c6.peripherals.ld
 MEMORY
 {
     FLASH(rx) : ORIGIN = 0x42000000, LENGTH = 4096k
-    RAM(rwx)  : ORIGIN = 0x40800000, LENGTH = 448k
+    /*
+     *  DIAGNOSTIC（ハンドオフStep0調査・一時的）：
+     *  通常のDirect Bootでは RAM ORIGIN=0x40800000・LENGTH=448k．
+     *  しかしESP-IDFからのハンドオフ実験では，ESP-IDFがロック付きPMPで
+     *  [0x40800000,0x408184b4) を読取専用(R+X,no-W)に保護しているため，
+     *  ASP3の.data/.bss/istackをこの領域に置くとbssクリアのストアがfault
+     *  してハングする（実測でPMP entry4=0x8dと確認）．PMP entry5が
+     *  [0x408184b4,0x40880000) をRW(0x8b)として開けているので，そこへ
+     *  移す．調査完了後にrevertする（通常ビルドは0x40800000/448kに戻す）．
+     */
+    RAM(rwx)  : ORIGIN = 0x40819000, LENGTH = 412k
 }
 
 ENTRY(_flash_entry)

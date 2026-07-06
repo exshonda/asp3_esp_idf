@@ -16,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_task_wdt.h"
+#include "driver/gpio.h"
 #include "asp3_jump.h"
 
 static const char *TAG = "c6_handoff_source";
@@ -27,6 +28,35 @@ app_main(void)
 	uint16_t			num = 20;
 	wifi_ap_record_t	recs[20];
 	esp_err_t			err;
+
+#ifdef GPIO_SELFTEST
+	/*
+	 *  DIAGNOSTIC 自己診断：D0/D1/D2(GPIO0/1/2)を出力に設定し，
+	 *  ASP3側diag_markと同じ生W1TS/W1TCレジスタ書き込みで 000→111 を
+	 *  巡回させる（各0.5秒）．Logic8/テスターでD0/D1/D2が全て正しく
+	 *  トグルするか確認し，チェックポイント読み出し機構を検証する．
+	 */
+	{
+		gpio_config_t io = {
+			.pin_bit_mask = (1ULL << 0) | (1ULL << 1) | (1ULL << 2),
+			.mode = GPIO_MODE_OUTPUT,
+			.pull_up_en = GPIO_PULLUP_DISABLE,
+			.pull_down_en = GPIO_PULLDOWN_DISABLE,
+			.intr_type = GPIO_INTR_DISABLE,
+		};
+		unsigned int v = 0U;
+		gpio_config(&io);
+		ESP_LOGI(TAG, "GPIO_SELFTEST: cycling D0/D1/D2 through 0..7 (0.5s each)");
+		while (1) {
+			*(volatile uint32_t *)0x6009100CU = 0x7U;		/* W1TC: clear D0/D1/D2 */
+			*(volatile uint32_t *)0x60091008U = (v & 0x7U);	/* W1TS: set value */
+			ESP_LOGI(TAG, "GPIO_SELFTEST: value=%u (D2=%u D1=%u D0=%u)",
+					 v, (v >> 2) & 1U, (v >> 1) & 1U, v & 1U);
+			vTaskDelay(pdMS_TO_TICKS(500));
+			v = (v + 1U) & 0x7U;
+		}
+	}
+#endif /* GPIO_SELFTEST */
 
 	ESP_ERROR_CHECK(nvs_flash_init());
 	ESP_ERROR_CHECK(esp_netif_init());
@@ -59,6 +89,64 @@ app_main(void)
 
 	ESP_LOGI(TAG, "Step0: scan succeeded (%d APs) -- jumping to ASP3 in 2s", num);
 	vTaskDelay(pdMS_TO_TICKS(2000));
+
+	/*
+	 *  ハンドオフ後のASP3起動チェックポイントを保持出力するためのGPIO
+	 *  （XIAO D0/D1/D2 = GPIO0/1/2）を出力=0で用意する．ここでIOMUX／
+	 *  GPIOマトリクスまで正しく設定しておき，ジャンプ後のASP3側は
+	 *  GPIO_OUTビットを書くだけにする．D6/D7(UART)以外は未使用なので安全．
+	 */
+	gpio_config_t diag_io = {
+		.pin_bit_mask = (1ULL << 0) | (1ULL << 1) | (1ULL << 2),
+		.mode = GPIO_MODE_OUTPUT,
+		.pull_up_en = GPIO_PULLUP_DISABLE,
+		.pull_down_en = GPIO_PULLDOWN_DISABLE,
+		.intr_type = GPIO_INTR_DISABLE,
+	};
+	gpio_config(&diag_io);
+	gpio_set_level(0, 0);
+	gpio_set_level(1, 0);
+	gpio_set_level(2, 0);
+	ESP_LOGI(TAG, "diag GPIO0/1/2 (D0/D1/D2) armed = 000 (checkpoint latch for Logic8)");
+
+	/*
+	 *  DIAGNOSTIC：ハンドオフ後ASP3のstart.S bss/dataクリア（stores to
+	 *  0x40800010..0x40803230）でハングする．ESP-IDFのPMP設定が当該RAMを
+	 *  M-modeでも書込み不可（ロック付き読取専用）に保護している疑いの検証．
+	 *  ジャンプ前（ESP-IDF文脈・ログ可能）にPMP CSRをダンプする．
+	 */
+	{
+		uint32_t cfg[4], addr[16];
+		__asm__ volatile("csrr %0, 0x3a0" : "=r"(cfg[0]));
+		__asm__ volatile("csrr %0, 0x3a1" : "=r"(cfg[1]));
+		__asm__ volatile("csrr %0, 0x3a2" : "=r"(cfg[2]));
+		__asm__ volatile("csrr %0, 0x3a3" : "=r"(cfg[3]));
+		__asm__ volatile("csrr %0, 0x3b0" : "=r"(addr[0]));
+		__asm__ volatile("csrr %0, 0x3b1" : "=r"(addr[1]));
+		__asm__ volatile("csrr %0, 0x3b2" : "=r"(addr[2]));
+		__asm__ volatile("csrr %0, 0x3b3" : "=r"(addr[3]));
+		__asm__ volatile("csrr %0, 0x3b4" : "=r"(addr[4]));
+		__asm__ volatile("csrr %0, 0x3b5" : "=r"(addr[5]));
+		__asm__ volatile("csrr %0, 0x3b6" : "=r"(addr[6]));
+		__asm__ volatile("csrr %0, 0x3b7" : "=r"(addr[7]));
+		__asm__ volatile("csrr %0, 0x3b8" : "=r"(addr[8]));
+		__asm__ volatile("csrr %0, 0x3b9" : "=r"(addr[9]));
+		__asm__ volatile("csrr %0, 0x3ba" : "=r"(addr[10]));
+		__asm__ volatile("csrr %0, 0x3bb" : "=r"(addr[11]));
+		__asm__ volatile("csrr %0, 0x3bc" : "=r"(addr[12]));
+		__asm__ volatile("csrr %0, 0x3bd" : "=r"(addr[13]));
+		__asm__ volatile("csrr %0, 0x3be" : "=r"(addr[14]));
+		__asm__ volatile("csrr %0, 0x3bf" : "=r"(addr[15]));
+		ESP_LOGI(TAG, "PMP cfg0=%08lx cfg1=%08lx cfg2=%08lx cfg3=%08lx",
+				 (unsigned long)cfg[0], (unsigned long)cfg[1],
+				 (unsigned long)cfg[2], (unsigned long)cfg[3]);
+		for (int k = 0; k < 16; k++) {
+			ESP_LOGI(TAG, "PMP addr%-2d=%08lx (region top ~%08lx)",
+					 k, (unsigned long)addr[k], (unsigned long)(addr[k] << 2));
+		}
+		ESP_LOGI(TAG, "ASP3 bss=0x40800010..0x40803230 (target of the failing store)");
+	}
+
 	ESP_LOGI(TAG, "disabling task WDT before jump (defensive; rule out WDT-induced reboot confound)");
 	(void) esp_task_wdt_deinit();
 	ESP_LOGI(TAG, "asp3_jump_now: jumping now");

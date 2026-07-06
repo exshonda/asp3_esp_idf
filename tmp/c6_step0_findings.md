@@ -101,3 +101,80 @@ riscv32-esp-elf-objcopy -O binary min.elf min.bin   # 36バイト
 
 UART0はCP2102（`/dev/ttyUSB0`）で115200bps。'U'(0x55)の連続出力が
 見えれば制御到達，無音ならASP3 start.S側の問題。
+
+---
+
+## 追記（2026-07-06 続き）：ASP3が起動できない根本原因＝ESP-IDFのロック付きPMP。修正確定
+
+Step0で「ハンドオフ後ASP3のstart.S bss/dataクリアで停止」まで絞った後，
+GPIO3ビット・チェックポイント法（`target_kernel_impl.c`の`diag_mark(n)`が
+GPIO0/1/2＝XIAO D0/D1/D2へ到達番号を保持出力→ハング後にLogic8で読む）で
+段階を二分し，**根本原因を特定・修正まで確定**した。
+
+### 決定的な観測列（GPIO値＝最後に到達したチェックポイント）
+
+- diag_markに**UART0書き込みを入れていると値1で停止**した。これは実際の
+  クラッシュではなく，**diag_mark内のUART0 FIFO書き込み自体がハンドオフ後
+  文脈でハング**していた観測アーティファクト（ASP3のバナーが一度も
+  出なかった理由もこれ）。GPIO保持出力のみに変えると先へ進んだ。
+- GPIO-onlyのdiag_markで**値6**＝`hardware_init_hook`完走（WDT無効化・PCR・
+  RTC全て通過），`software_init_hook`（値7）未到達。すなわち停止は
+  **start.Sのbss/dataクリア**（0x40800010へのストア）。
+  （hardware_init_hookが値6まで通れたのは呼び出し先がインライン化され
+   スタック未使用＝RO領域への最初の実書き込みがbssクリアだったため。
+   起動時SP=0x40801780もRO領域内だが未書き込みだった。）
+
+### PMPダンプ（ジャンプ元ESP-IDF文脈で pmpcfg/pmpaddr を読み出し）
+
+```
+PMP cfg0=808d809f cfg1=8d808b8d cfg2=8d8b8089 cfg3=00009b8b
+addr3=10200000 (<<2 => 0x40800000)   addr4=1020612d (<<2 => 0x408184b4)
+addr5=10220000 (<<2 => 0x40880000)
+entry4 cfg=0x8d = R1 W0 X1 TOR L1  → [0x40800000,0x408184b4) 読取専用+実行・ロック
+entry5 cfg=0x8b = R1 W1 X0 TOR L1  → [0x408184b4,0x40880000) 読み書き可・ロック
+```
+
+ASP3の.data(0x40800000)/.bss(0x40800010-0x40803230)/istack(0x40800780,SP=0x40801780)
+は**すべてentry4のRO領域内**。ロック付き(L=1)なのでM-modeでも書込み禁止が
+強制され，bssクリアのストアがアクセスfault → ASP3はまだmtvec未設定のため
+ESP-IDFの古い例外ハンドラへトラップ → ハング。
+
+### 修正（確定）
+
+`asp3/target/esp32c6_espidf/esp32c6.ld` の RAM を，ESP-IDFがRWで開けている
+entry5領域へ移す：
+
+```
+RAM(rwx) : ORIGIN = 0x40819000, LENGTH = 412k   /* 旧: 0x40800000 / 448k */
+```
+
+これで .data=0x40819000・.bss=0x40819010..0x4081c230・istack=0x40819780 が
+すべてRW領域に入り，**ハンドオフ後ASP3が bss/dataクリアを突破して
+`software_init_hook` まで到達（GPIO値7）することを実機で確認**。
+
+### 意義・整合
+
+- 実施22「PMPはハードウェアロック」・実施33「NuttXハンドオフは成功」と符合。
+  NuttXはASP3のRAM領域(0x40800000)をRO-lockしていなかったため起動できたが，
+  ESP-IDF（＝Arduino相当のground truth）はロック付きROで保護するため起動不可
+  だった，という差の説明がついた。
+- これはハンドオフ手法（ESP-IDFのPMP環境）に固有の障害で，ASP3通常の
+  Direct Boot動作（PMPロック無し）とは無関係。
+
+### 残作業（本来のStep0＝388Hz再現テストへ）
+
+1. チェックポイントを target_initialize→chip_initialize→カーネル起動 へ拡張し
+   ASP3完全起動を確認。
+2. sample1 → `apps/wifi_scan` に切替え，ハンドオフ後に esp_wifi_scan を実行して
+   388Hz再現の有無を判定（本来のStep0ゲート）。
+3. **UART0書き込みもハングする**問題（別途PMP/クロック要因の可能性）＝
+   観測性の課題。scan結果の観測にはGPIO併用かUART復活の調査が要る。
+
+### 注意（この時点のリポジトリ状態＝診断用の一時変更）
+
+以下は**診断専用の一時変更**であり，調査完了後にrevertすること：
+- `asp3/target/esp32c6_espidf/target_kernel_impl.c`：`diag_mark()`とチェック
+  ポイント呼び出し（GPIO保持出力）＋TIMG0 PCRクロック有効化の検証コード
+- `asp3/target/esp32c6_espidf/esp32c6.ld`：RAMを0x40819000/412kへ（通常は
+  0x40800000/448k）
+- `tmp/c6_handoff_source/`：ジャンプ元のGPIO準備・PMPダンプ・(GPIO_SELFTESTは撤去済)

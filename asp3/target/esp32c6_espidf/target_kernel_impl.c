@@ -38,6 +38,42 @@ extern void Error_Handler(void);
 extern void software_term_hook(void);
 
 /*
+ *  DIAGNOSTIC（一時的・ハンドオフStep0調査）：ASP3起動シーケンスの
+ *  どの段階まで到達するかを切り分けるための，クロック非依存の生UART0
+ *  書き込み．min_uart_target（tmp/）と同じくUART0のTX FIFO
+ *  （0x60000000）へ直接1バイトを書くだけ．ASP3のSIO初期化やクロック
+ *  再設定に一切依存しない．各チェックポイントで固有の文字を数回出力し，
+ *  ESP-IDF→ASP3ハンドオフ後にどこでクラッシュ／停止するかを観測する．
+ *  調査完了後にrevertする．
+ */
+#define DIAG_UART0_FIFO      0x60000000U
+#define DIAG_GPIO_OUT_W1TS   0x60091008U	/* GPIO_OUT_W1TS_REG（1でセット） */
+#define DIAG_GPIO_OUT_W1TC   0x6009100CU	/* GPIO_OUT_W1TC_REG（1でクリア） */
+#define DIAG_GPIO_MASK       0x7U			/* GPIO0/1/2＝XIAO D0/D1/D2 */
+/*
+ *  チェックポイントの到達番号(1..6)を，
+ *   (a) GPIO0/1/2（XIAO D0/D1/D2）へ3ビットで「保持出力」する
+ *       → ハング後もLogic8で最終レベルを読めば最後に到達した段階が判る．
+ *       GPIOの方向設定（IOMUX/マトリクス）はジャンプ元のESP-IDF側で
+ *       済ませてある前提（ここではOUTビットの更新のみ）．
+ *   (b) UART0(0x60000000)へも数字を数回出力（観測できる場合の保険）．
+ *  ESP-IDF→ASP3ハンドオフ後にどこでクラッシュ／停止するかを観測する
+ *  診断専用．調査完了後にrevertする．
+ */
+static void
+diag_mark(unsigned int n)
+{
+	/* GPIO0/1/2 を 3ビットの n で更新（保持出力） */
+	*(volatile uint32_t *)DIAG_GPIO_OUT_W1TC = DIAG_GPIO_MASK;
+	*(volatile uint32_t *)DIAG_GPIO_OUT_W1TS = (n & DIAG_GPIO_MASK);
+
+	/* DIAGNOSTIC: UART0書き込みがASP3ハンドオフ文脈でハングする疑いの
+	 * 検証のため，UART出力を一時的に無効化（GPIO保持出力のみ）．
+	 * これで cp が先へ進めばUART FIFO書き込みが犯人と確定する． */
+	(void) DIAG_UART0_FIFO;
+}
+
+/*
  *  MWDT（タイマグループのウォッチドッグ）の無効化
  */
 static void
@@ -55,23 +91,46 @@ esp32c6_disable_mwdt(uint32_t timg_base)
 void
 hardware_init_hook(void)
 {
+	diag_mark(1U);	/* DIAGNOSTIC: hardware_init_hook入口 */
+
+	/*
+	 *  DIAGNOSTIC（仮説検証）：ESP-IDFハンドオフ後，最初のTIMG0レジスタ
+	 *  アクセスでハングする（cp1で停止＝GPIO値1）．C6では未クロックの
+	 *  ペリフェラルへのアクセスはバスストール＝ハングを起こす．ESP-IDFが
+	 *  TIMG0のペリフェラルクロックをゲートした可能性を検証するため，
+	 *  TIMG0アクセス直前にPCRでTIMG0クロックを有効化・リセット解除する．
+	 *  これで cp1 より先（>=2）へ進めば「ESP-IDFのクロックゲート」が犯人と確定．
+	 */
+	{
+		volatile uint32_t *pcr_tg0 = (volatile uint32_t *)0x6009603CU; /* PCR_TIMERGROUP0_CONF_REG */
+		uint32_t v = *pcr_tg0;
+		v |= 0x1U;		/* PCR_TG0_CLK_EN */
+		v &= ~0x2U;		/* PCR_TG0_RST_EN 解除 */
+		*pcr_tg0 = v;
+	}
+	diag_mark(2U);	/* DIAGNOSTIC: PCR書き込み（TG0クロック有効化）を通過 */
+
 	/*
 	 *  ウォッチドッグタイマの無効化
 	 *  （MWDT0/1・RTC WDT・スーパーWDT．リセット後デフォルトで有効）
 	 */
 	esp32c6_disable_mwdt(ESP32C6_TIMG0_BASE);
+	diag_mark(3U);	/* DIAGNOSTIC: TIMG0 WDT無効化を通過 */
 	esp32c6_disable_mwdt(ESP32C6_TIMG1_BASE);
+	diag_mark(4U);	/* DIAGNOSTIC: TIMG1 WDT無効化を通過 */
 
 	sil_wrw_mem((void *)ESP32C6_RTC_CNTL_WDTWPROTECT,
 				ESP32C6_RTC_CNTL_WDT_WKEY);
 	sil_wrw_mem((void *)ESP32C6_RTC_CNTL_WDTCONFIG0, 0U);
 	sil_wrw_mem((void *)ESP32C6_RTC_CNTL_WDTWPROTECT, 0U);
+	diag_mark(5U);	/* DIAGNOSTIC: RTC WDT無効化を通過 */
 
 	sil_wrw_mem((void *)ESP32C6_RTC_CNTL_SWD_WPROTECT,
 				ESP32C6_RTC_CNTL_SWD_WKEY);
 	sil_orw((void *)ESP32C6_RTC_CNTL_SWD_CONF,
 			ESP32C6_RTC_CNTL_SWD_AUTO_FEED_EN);
 	sil_wrw_mem((void *)ESP32C6_RTC_CNTL_SWD_WPROTECT, 0U);
+	diag_mark(6U);	/* DIAGNOSTIC: RTC SWD処理を通過＝hardware_init_hook出口（この後start.Sのbss/dataクリア） */
 
 	/*
 	 *  CPUクロックの切替えは不要（実機診断により判明）
@@ -91,11 +150,13 @@ hardware_init_hook(void)
 void
 software_init_hook(void)
 {
+	diag_mark(7U);	/* DIAGNOSTIC: software_init_hook入口＝start.Sのbss/dataクリアを通過 */
 	/* Initialize sio for fput */
 #ifdef TOPPERS_OMIT_TECS
 	sio_initialize(0);
 	sio_opn_por(SIOPID_FPUT, 0);
 #endif
+	diag_mark(7U);	/* DIAGNOSTIC: SIO初期化を通過（7=swhook到達以降） */
 }
 
 /*
@@ -104,6 +165,8 @@ software_init_hook(void)
 void
 target_initialize(void)
 {
+	/* DIAGNOSTIC（今ラウンドはcp1→cp2区間の細分に集中するため
+	 * target_initialize側のマークは値衝突回避のため一時的に外す） */
 	/*
 	 *  チップ依存の初期化（mtvec・割込みマトリクス・コア依存部）
 	 */
