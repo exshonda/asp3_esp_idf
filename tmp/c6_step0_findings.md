@@ -367,3 +367,26 @@ boot#=4: 20  boot#=5: 25  boot#=6: 30   （＝+5/サイクル）
    LP_WDT/RTC_WDTを恒久無効化 or 高優先度ASP3ハンドラで周期給餌．
 2. RTC_XTAL_FREQ_REG を2段ブートローダ相当値（40MHz=0x00280028等）に
    設定してから esp_wifi_init を呼ぶ（LPクロック誤設定→WDT誤発火の解消を狙う）．
+
+---
+
+## 追記6（2026-07-06）：RTC_XTAL_FREQ_REGは良性（自己修正）／super-WDT再武装が確定
+
+- `RTC_XTAL_FREQ_REG`リード：`rtc_clk_xtal_freq_get`は値0なら警告後
+  自分で40MHzを`clk_ll_xtal_store_freq_mhz`する（自己修正）．よって
+  この警告は良性で，super-WDTリセットの原因ではない（設定しても無意味）．
+- 決定的切り分け：**sample1のDirect Bootは正常動作**（task1/2ループ）＝
+  `hardware_init_hook`のsuper-WDT無効化(auto-feed+DISABLE)は非Wi-Fiでは
+  効いている．**wifi_scan（esp_wifi_init）でのみ発火**＝
+  **blobがesp_wifi_init中にsuper-WDTを再武装**していることが確定．
+
+### 修正方針（次の実装）
+
+esp_wifi_init中もsuper-WDTを生かし続ける：
+- **高優先度ASP3周期ハンドラ（CRE_CYC）で〜50msごとにsuper-WDTを給餌**
+  （LP_WDT SWD_FEED または SWD_CONFIGのauto-feed/disableを再設定）．
+  cyclicは割込み文脈でタスクより上位に走るため，esp_wifi_initが
+  タスク文脈でブロック中でも給餌が届く．
+- 実装：`wifi_scan.cfg`（または target cfg）に`CRE_CYC`追加＋給餌
+  ハンドラ．これでスキャンに到達すれば，388Hz測定・実データ受信
+  （＝元のAGC問題）の調査へ進める．
