@@ -236,3 +236,56 @@ wifi_scanでの結果（コンソール観測）：
 `tmp/c6hw.sh`（全ポートOFF→port4,5 ON→窓でesptool，を一括化）：
 `off`/`on`/`cycle`/`flash <bin> [offset]`/`flashfull <idfbuilddir>`。
 観測は Monitor で `/dev/ttyUSB0`(CP2102,115200)。
+
+---
+
+## 追記3（2026-07-06）：ground truth採取＝ネイティブESP-IDFのosi呼び出し頻度
+
+ハンドオフStep0が行き止まりと確定した後，戦略ドキュメント本命の
+「ESP-IDF/Arduinoをground truth源として使う」を実施．IDF本体は無改変で，
+`tmp/c6_handoff_source`（ネイティブESP-IDF）にリンカ`--wrap`で
+FreeRTOSプリミティブを横取りするカウンタを仕込み，WiFiスキャン中の
+正常な呼び出し頻度を採取した（`main/main.c`の`__wrap_xQueue*`＋
+`main/CMakeLists.txt`の`idf_build_set_property(LINK_OPTIONS ...--wrap...)`）．
+
+### 結果（ネイティブESP-IDF・C6・WiFiスキャン中 2.5秒）
+
+| osi呼び出し（FreeRTOSプリミティブ） | 頻度 |
+|---|---|
+| `xQueueReceive`（WiFiタスク主ループのqueue_recv） | **59/s** |
+| `xQueueGenericSend`（queue_send系） | **77/s** |
+| `xQueueSemaphoreTake`（semphr_take系） | **40/s** |
+
+→ **正常値は数十/s（40〜80）**．ASP3 shimの**388Hz**（過去計測の「take」，
+`docs/wifi-shim-c6.md`）と比べ **約10倍過剰**．
+
+### ASP3 shim側のタイムアウト変換レビュー（単位バグではない）
+
+`esp_shim_tick_to_tmo`（`asp3/target/esp32c6_espidf/wifi/esp_shim.c`）：
+```
+block_time_tick==BLOCK_FOREVER -> TMO_FEVR
+block_time_tick==0             -> TMO_POL
+それ以外                        -> tick(ms) * 1000 = µs
+```
+`task_ms_to_tick`は1:1（1 tick=1ms）なので block_time_tick はms．
+ASP3のTMOはµs単位（このポートの実装）なので `ms*1000=µs` は正しい．
+→ **388Hzは単純な単位変換バグではない**．
+
+### 見立て（要ASP3側測定で確認）
+
+388Hzは，WiFiタスクが `semphr_take`/`queue_recv` の**タイムアウトで
+空振りループ**している症状の可能性が高い＝RXパケット/割込みイベントが
+流れてこないため待ちが毎回タイムアウトして高速リトライ．これは元の
+C6根本問題（AGC凍結でスキャンが実データを受信しない＝発見AP 0）と整合し，
+**388Hzはその下流症状**という解釈．ground truthの
+「native 40/s（イベント正常）vs ASP3 388/s（空振り）」も支持する．
+
+### 次のステップ
+
+1. ASP3のshim（`esp_wifi_adapter.c`の`semphr_take_wrapper`/
+   `queue_recv_wrapper`＝外側リポジトリ・編集可）にカウンタを入れ，
+   Direct BootのASP3 wifi_scan（スキャンは走るがAP 0）で実測．
+   どの呼び出しが388/sかを確定し，native 40/sと突き合わせる．
+2. 388/sが「タイムアウト空振り」なら，イベントが来ない理由＝AGC/RX経路
+   （元のC6根本問題）へ回帰．「値が同じだが起床しない＝wake取りこぼし」
+   なら shim の sem give/isr 経路を監査．

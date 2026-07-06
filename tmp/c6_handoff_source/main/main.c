@@ -21,6 +21,38 @@
 
 static const char *TAG = "c6_handoff_source";
 
+/*
+ *  GROUND-TRUTH DIAGNOSTIC：ネイティブESP-IDFのosi呼び出し頻度を採取する．
+ *  リンカ --wrap で FreeRTOS プリミティブを横取りしてカウント（IDF無改変）．
+ *  WiFiタスク主ループが叩く xQueueReceive の頻度が「正常値」．ASP3 shimの
+ *  388Hzと比較して，どのosi呼び出しが過剰かを特定する足がかりにする．
+ */
+#include "freertos/queue.h"
+#include "esp_timer.h"
+extern BaseType_t __real_xQueueReceive(QueueHandle_t q, void *buf, TickType_t t);
+extern BaseType_t __real_xQueueGenericSend(QueueHandle_t q, const void *buf,
+										   TickType_t t, BaseType_t pos);
+extern BaseType_t __real_xQueueSemaphoreTake(QueueHandle_t q, TickType_t t);
+volatile uint32_t g_gt_qrecv = 0;
+volatile uint32_t g_gt_qsend = 0;
+volatile uint32_t g_gt_semtake = 0;
+BaseType_t __wrap_xQueueReceive(QueueHandle_t q, void *buf, TickType_t t)
+{
+	g_gt_qrecv++;
+	return __real_xQueueReceive(q, buf, t);
+}
+BaseType_t __wrap_xQueueGenericSend(QueueHandle_t q, const void *buf,
+									TickType_t t, BaseType_t pos)
+{
+	g_gt_qsend++;
+	return __real_xQueueGenericSend(q, buf, t, pos);
+}
+BaseType_t __wrap_xQueueSemaphoreTake(QueueHandle_t q, TickType_t t)
+{
+	g_gt_semtake++;
+	return __real_xQueueSemaphoreTake(q, t);
+}
+
 void
 app_main(void)
 {
@@ -67,8 +99,27 @@ app_main(void)
 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 	ESP_ERROR_CHECK(esp_wifi_start());
 
+	/* GROUND-TRUTH: アイドル2秒間のosi呼び出し頻度（基準線） */
+	{
+		uint32_t r0 = g_gt_qrecv, s0 = g_gt_qsend, m0 = g_gt_semtake;
+		vTaskDelay(pdMS_TO_TICKS(2000));
+		ESP_LOGW(TAG, "GT idle 2s: qRecv=%.0f/s qSend=%.0f/s semTake=%.0f/s",
+				 (g_gt_qrecv - r0) / 2.0, (g_gt_qsend - s0) / 2.0,
+				 (g_gt_semtake - m0) / 2.0);
+	}
+
 	ESP_LOGI(TAG, "esp_wifi_scan_start (blocking)");
-	err = esp_wifi_scan_start(NULL, true);	/* true=完走まで自タスクをブロック */
+	{
+		uint32_t rb = g_gt_qrecv, sb = g_gt_qsend, mb = g_gt_semtake;
+		int64_t t0 = esp_timer_get_time();
+		err = esp_wifi_scan_start(NULL, true);	/* true=完走まで自タスクをブロック */
+		int64_t t1 = esp_timer_get_time();
+		double sec = (double)(t1 - t0) / 1e6;
+		if (sec <= 0) sec = 1e-6;
+		ESP_LOGW(TAG, "GT scan %.2fs: qRecv=%.0f/s qSend=%.0f/s semTake=%.0f/s",
+				 sec, (g_gt_qrecv - rb) / sec, (g_gt_qsend - sb) / sec,
+				 (g_gt_semtake - mb) / sec);
+	}
 	ESP_LOGI(TAG, "esp_wifi_scan_start -> %d", (int) err);
 
 	err = esp_wifi_scan_get_ap_records(&num, recs);
