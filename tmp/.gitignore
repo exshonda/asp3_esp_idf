@@ -1,0 +1,8 @@
+# ESP-IDF / build artifacts for the C6 handoff experiment (regeneratable)
+c6_handoff_source/build/
+c6_handoff_source/sdkconfig
+c6_handoff_source/sdkconfig.old
+c6_handoff_source/managed_components/
+c6_handoff_source/dependencies.lock
+min_uart_target/*.elf
+min_uart_target/*.bin

@@ -1,0 +1,13 @@
+# c6_handoff_source（Step 0：遅いハンドオフ再現テストのジャンプ元）用の
+# 非既定設定。`idf.py set-target esp32c6` 後にこれらが効くよう再ビルドする。
+#
+#   - FLASHSIZE=4MB：実チップ（ESP32-C6FH4）は4MB。2MB既定だとASP3
+#     イメージを置く0x200000がフラッシュコントローラの範囲外扱いになり
+#     ジャンプ先が壊れるため必須（実測で判明）。
+#   - INT_WDT無効：ジャンプ後にクラッシュ観測する際，割込みWDT（0.3秒）
+#     が自動リブートを繰り返し「単発クラッシュ」の観測を妨げるため。
+#     （LP Super WDT は別系統で，asp3_jump.c 内で LP_WDT_SWD_DISABLE を
+#      叩いて無効化している。）
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_ESP_INT_WDT=n
