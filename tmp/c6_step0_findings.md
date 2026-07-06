@@ -390,3 +390,48 @@ esp_wifi_init中もsuper-WDTを生かし続ける：
 - 実装：`wifi_scan.cfg`（または target cfg）に`CRE_CYC`追加＋給餌
   ハンドラ．これでスキャンに到達すれば，388Hz測定・実データ受信
   （＝元のAGC問題）の調査へ進める．
+
+---
+
+## 追記7（2026-07-06）：super-WDTリセットの根本原因＝SWD書込み保護キーのバグ（修正）
+
+### 発見：ESP32C6_LP_WDT_SWD_WKEYが誤り
+
+`asp3/asp3_core/arch/riscv_gcc/esp32c6/esp32c6.h`（submodule）：
+```
+ESP32C6_LP_WDT_WDT_WKEY = 0x50D83AA1U   （RTC WDT用・正しい）
+ESP32C6_LP_WDT_SWD_WKEY = 0x8F1D312AU   （super-WDT用・★誤り★）
+```
+esp-idf正本（`components/esp_hal_wdt/esp32c6/include/hal/lpwdt_ll.h`）：
+```
+LP_WDT_WKEY_VALUE     = 0x50D83AA1
+LP_WDT_SWD_WKEY_VALUE = 0x50D83AA1   （両方とも同じ）
+```
+→ asp3のSWDキー0x8F1D312Aは誤り．正しくは0x50D83AA1．
+
+### 影響と整合
+
+- `hardware_init_hook`のsuper-WDT無効化（SWD_WPROTECT解除→SWD_CONFIG書込み）
+  が**誤キーで拒否され，実際には無効化されていなかった**．
+- sample1 Direct Bootが正常なのは，super-WDTが既定で発火しないため
+  （何も触らなければ問題ない）．**esp_wifi_initがsuper-WDTを起動/武装
+  した瞬間，ASP3は誤キーで止められず発火**＝リブートループ，と整合．
+- ハンドオフのasp3_jump.cは正しい0x50D83AA1を直書きしていたため効いていた，
+  という不整合の説明もつく．
+
+### 修正
+
+`target_kernel_impl.c`（外側リポジトリ）の`hardware_init_hook`で，SWD
+書込み保護解除に正しいキー0x50D83AA1を直接使うよう変更（submoduleの
+esp32c6.h修正は別途bump時）．
+
+**恒久修正（要submodule側）**：`arch/riscv_gcc/esp32c6/esp32c6.h`の
+`ESP32C6_LP_WDT_SWD_WKEY`を0x50D83AA1に訂正．
+
+### ハードウェア確認は保留（実機I/O不安定）
+
+本修正の実機確認中に，多数の電源サイクル・抜き差しの影響で
+CP2102(ttyUSB0)がUART出力を返さなくなった（Acronameポート対応も
+セッション中に変化＝ボードが一時port3へ）．物理接続（CP2102↔D6/D7・
+ボード電源/リセット）の再確認後に再テストが必要．修正自体はesp-idf
+正本との照合で高確度．

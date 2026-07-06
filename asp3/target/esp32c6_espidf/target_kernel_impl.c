@@ -120,12 +120,17 @@ hardware_init_hook(void)
 	sil_wrw_mem((void *)ESP32C6_RTC_CNTL_WDTCONFIG0, 0U);
 	sil_wrw_mem((void *)ESP32C6_RTC_CNTL_WDTWPROTECT, 0U);
 
-	sil_wrw_mem((void *)ESP32C6_RTC_CNTL_SWD_WPROTECT,
-				ESP32C6_RTC_CNTL_SWD_WKEY);
-	/* auto-feedに加え，SWD_DISABLE(bit30)で確実に無効化する．
-	 * auto-feedだけではesp_wifi_init中にLP Super WDT(rst:0x12
-	 * LP_SWDT_SYS)が発火してリブートループする実測に対応
-	 * （asp3_jump.cで実証済みの手法）． */
+	/*
+	 *  BUGFIX：submoduleのesp32c6.hの ESP32C6_LP_WDT_SWD_WKEY(=0x8F1D312A)は
+	 *  誤り．esp-idf正本（esp_hal_wdt/esp32c6/lpwdt_ll.h の
+	 *  LP_WDT_SWD_WKEY_VALUE）では LP_WDT・LP_WDT_SWD とも書込み保護解除
+	 *  キーは 0x50D83AA1．誤キーだとSWD_CONFIG書込みが拒否され，super-WDT
+	 *  が無効化されずesp_wifi_init中に発火してリブートループしていた
+	 *  （asp3_jump.cは正しく0x50D83AA1を使い効いていた）．
+	 *  ここでは正しいキーを直接使う（submodule修正は別途bump時）．
+	 *  auto-feed＋SWD_DISABLE(bit30)の両方を設定．
+	 */
+	sil_wrw_mem((void *)ESP32C6_RTC_CNTL_SWD_WPROTECT, 0x50D83AA1U);
 	sil_orw((void *)ESP32C6_RTC_CNTL_SWD_CONF,
 			ESP32C6_RTC_CNTL_SWD_AUTO_FEED_EN | (1U << 30));
 	sil_wrw_mem((void *)ESP32C6_RTC_CNTL_SWD_WPROTECT, 0U);
