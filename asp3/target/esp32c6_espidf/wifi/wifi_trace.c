@@ -16,6 +16,7 @@
 #include <string.h>
 #include "wifi_trace.h"
 #include "esp_shim.h"
+#include "esp_rom_sys.h"	/* esp_rom_delay_us：実施39切り分け実験用 */
 
 #define WIFI_TRACE_SIZE  1024
 
@@ -136,6 +137,11 @@ wifi_trace_name(uint16_t id)
 	case 44: return("pbus_rx_dco_cal_1step_new");
 	case 45: return("ram_pbus_force_mode");
 	case 46: return("rx_pbus_reset");
+	case 50: return("lmacProcessRxSucData");
+	case 51: return("ppRxPkt");
+	case 52: return("wdevProcessRxSucDataAll");
+	case 53: return("wDev_ProcessRxSucData");
+	case 54: return("wDev_IndicateFrame");
 	default: return("?");
 	}
 }
@@ -219,6 +225,41 @@ long __wrap_sta_rx_cb(long a0, long a1, long a2, long a3)
 					 (uintptr_t)a2, (uintptr_t)a3, (uintptr_t)ret);
 	return(ret);
 }
+
+/*
+ *  DIAGNOSTIC（実施58，一時的）：RXデータパスの各段にRTC固定番地
+ *  カウンタを仕込み，「MAC割込みは約160/秒発火するのにsta_rx_cbが0」
+ *  という現象が，RX成功処理チェーンのどこで途切れているかを特定する．
+ *  チェーン（典型）：MAC RX ISR → lmacProcessRxSucData → ppRxPkt
+ *  → wdevProcessRxSucDataAll → wDev_ProcessRxSucData → wDev_IndicateFrame
+ *  → sta_rx_cb．いずれもlibpp.aに定義され，ppRxPkt/lmacProcessRxSucData/
+ *  wdevProcessRxSucDataAllは外部参照（U）を持つため--wrapが確実に効く
+ *  （wDev_ProcessRxSucData/wDev_IndicateFrameは局所コールのみの可能性が
+ *  あり，発火すれば到達確定・0は両義的）．RTCはDirect Bootでゼロクリア
+ *  されないため計測前にJTAGでゼロ書込みして差分を取る（実施57で確立）．
+ *    RTC[37]=0x50000094 lmacProcessRxSucData
+ *    RTC[38]=0x50000098 ppRxPkt
+ *    RTC[39]=0x5000009C wdevProcessRxSucDataAll
+ *    RTC[40]=0x500000A0 wDev_ProcessRxSucData
+ *    RTC[41]=0x500000A4 wDev_IndicateFrame
+ */
+#define WIFI_TRACE_WRAP4_RTC(name, id, rtcaddr) \
+	extern long __real_##name(long a0, long a1, long a2, long a3); \
+	long __wrap_##name(long a0, long a1, long a2, long a3) \
+	{ \
+		(*(volatile uint32_t *)(rtcaddr))++; \
+		long ret = __real_##name(a0, a1, a2, a3); \
+		wifi_trace_push((id), 0U, (uintptr_t)a0, (uintptr_t)a1, \
+						 (uintptr_t)a2, (uintptr_t)a3, (uintptr_t)ret); \
+		return(ret); \
+	}
+
+WIFI_TRACE_WRAP4_RTC(lmacProcessRxSucData, 50, 0x50000094U)
+WIFI_TRACE_WRAP4_RTC(ppRxPkt, 51, 0x50000098U)
+WIFI_TRACE_WRAP4_RTC(wdevProcessRxSucDataAll, 52, 0x5000009CU)
+WIFI_TRACE_WRAP4_RTC(wDev_ProcessRxSucData, 53, 0x500000A0U)
+WIFI_TRACE_WRAP4_RTC(wDev_IndicateFrame, 54, 0x500000A4U)
+
 WIFI_TRACE_WRAP4(wifi_recycle_rx_pkt, 9)
 WIFI_TRACE_WRAP4(esf_buf_alloc_dynamic, 11)
 WIFI_TRACE_WRAP4(wdev_data_init, 12)
@@ -284,8 +325,45 @@ WIFI_TRACE_WRAP4(restart_cal, 36)
 WIFI_TRACE_WRAP4(i2cmst_reg_init, 37)
 WIFI_TRACE_WRAP4(rxiq_cal_init, 38)
 WIFI_TRACE_WRAP4(set_rx_gain_cal_dc_new, 39)
-WIFI_TRACE_WRAP4(coex_init, 40)
-WIFI_TRACE_WRAP4(coex_schm_process_restart, 41)
+/*
+ *  実施53：coex_init/coex_schm_process_restartは実施37でring bufferを
+ *  凍結するregister_chipv7_phyのはるか後（wifi_start以降）に呼ばれる
+ *  ため，generic WIFI_TRACE_WRAP4のwifi_trace_push経由の記録は
+ *  凍結済みで無条件に捨てられ，実際に呼ばれたかどうかを確認できない．
+ *  frozen非依存の通常BSSグローバルカウンタで補完する（RTC-RAMは
+ *  真の電源断でしかクリアされずwarm resetでは前回値が残るため，
+ *  今回はBSS＝毎回のDirect Bootで確実にゼロ初期化される領域を使う）．
+ */
+volatile uint32_t	wifi_coex_init_count;
+volatile uint32_t	wifi_coex_init_ret;
+volatile uint32_t	wifi_coex_schm_process_restart_count;
+
+extern long __real_coex_init(long a0, long a1, long a2, long a3);
+long
+__wrap_coex_init(long a0, long a1, long a2, long a3)
+{
+	long	ret;
+
+	wifi_coex_init_count++;
+	ret = __real_coex_init(a0, a1, a2, a3);
+	wifi_coex_init_ret = (uint32_t)ret;
+	wifi_trace_push(40U, 0U, (uintptr_t)a0, (uintptr_t)a1,
+					 (uintptr_t)a2, (uintptr_t)a3, (uintptr_t)ret);
+	return(ret);
+}
+
+extern long __real_coex_schm_process_restart(long a0, long a1, long a2, long a3);
+long
+__wrap_coex_schm_process_restart(long a0, long a1, long a2, long a3)
+{
+	long	ret;
+
+	wifi_coex_schm_process_restart_count++;
+	ret = __real_coex_schm_process_restart(a0, a1, a2, a3);
+	wifi_trace_push(41U, 0U, (uintptr_t)a0, (uintptr_t)a1,
+					 (uintptr_t)a2, (uintptr_t)a3, (uintptr_t)ret);
+	return(ret);
+}
 /*
  *  実施38（コーディネータ指示）：set_rx_gain_cal_dc_new()内部で実際に
  *  呼ばれるROM常駐PBUSヘルパを直接--wrapする．手動逆アセンブルで
@@ -593,23 +671,32 @@ __wrap_esf_buf_alloc(long a0, long a1, long a2, long a3)
  *  `g_phyFuns`はJTAGで実測して構造を特定済み（`register_chipv7_phy`
  *  →`phy_get_romfunc_addr()`の戻り値がそのままg_phyFuns代入元）：
  *    offset  76 (idx19): rom_chip_i2c_readReg
- *    offset  80 (idx20): rom_i2c_readReg
+ *    offset  80 (idx20): rom_i2c_readReg       ← phy_i2c_init1/2が実際に使用
  *    offset  84 (idx21): rom_chip_i2c_writeReg
  *    offset  88 (idx22): rom_i2c_writeReg      ← phy_i2c_init1/2が実際に使用
- *    offset  92 (idx23): rom_i2c_readReg_Mask
+ *    offset  92 (idx23): rom_i2c_readReg_Mask  ← 較正ループの比較読出しに使用
  *    offset  96 (idx24): rom_i2c_writeReg_Mask
  *
  *  `phy_get_romfunc_addr`はROM常駐だが通常のcall命令で参照される
  *  （function-pointer間接ではない）ため`--wrap`可能．戻り値
- *  （=テーブル本体へのポインタ）を横取りし，write/write_mask枠だけ
- *  自前のトレース関数へ差し替えてから返す．
+ *  （=テーブル本体へのポインタ）を横取りし，read/read_mask/write/
+ *  write_mask枠を自前のトレース関数へ差し替えてから返す．
+ *
+ *  DIAGNOSTIC（コーディネータ指示：regi2c読み戻し比較）：実施23は
+ *  write/write_mask枠のみを計装し「書込みシーケンスはほぼ完全一致」を
+ *  確認したが，read/read_mask枠は無計装のまま（実施7で1回だけ手動で
+ *  読み出した記録があるのみ）だった．較正ループ内部でblobが読み戻す
+ *  実際の値（regi2cは`0x600a7xxx`のようなMMIO直読みでは観測できない
+ *  唯一のアナログ経路）をASP3・NuttX間で直接突き合わせるため，
+ *  write/write_maskと対称にread/read_maskも計装する．
  */
-#define WIFI_REGI2C_SIZE 1024
+#define WIFI_REGI2C_SIZE 4096
 
 typedef struct {
 	uint32_t	t_us_low;
 	uint8_t		block, host_id, reg_add, data;
-	uint8_t		msb, lsb;	/* write_mask以外は0xFFを格納 */
+	uint8_t		msb, lsb;	/* *_mask以外は0xFFを格納 */
+	uint8_t		op;		/* 0=write,1=write_mask,2=read,3=read_mask */
 } wifi_regi2c_t;
 
 static wifi_regi2c_t	wifi_regi2c[WIFI_REGI2C_SIZE];
@@ -617,9 +704,15 @@ static volatile uint32_t wifi_regi2c_pos;
 
 typedef void (*wifi_regi2c_write_fn_t)(uint8_t, uint8_t, uint8_t, uint8_t);
 typedef void (*wifi_regi2c_write_mask_fn_t)(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+typedef uint8_t (*wifi_regi2c_read_fn_t)(uint8_t, uint8_t, uint8_t);
+typedef uint8_t (*wifi_regi2c_read_mask_fn_t2)(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
 
 static wifi_regi2c_write_fn_t		wifi_regi2c_orig_write;
 static wifi_regi2c_write_mask_fn_t	wifi_regi2c_orig_write_mask;
+#ifdef WIFI_REGI2C_TRACE_READS
+static wifi_regi2c_read_fn_t		wifi_regi2c_orig_read;
+static wifi_regi2c_read_mask_fn_t2	wifi_regi2c_orig_read_mask;
+#endif /* WIFI_REGI2C_TRACE_READS */
 
 void
 wifi_regi2c_reset(void)
@@ -641,6 +734,7 @@ wifi_regi2c_traced_write(uint8_t block, uint8_t host_id, uint8_t reg_add, uint8_
 	e->data = data;
 	e->msb = 0xFFU;
 	e->lsb = 0xFFU;
+	e->op = 0U;
 	if (wifi_regi2c_orig_write != NULL) {
 		wifi_regi2c_orig_write(block, host_id, reg_add, data);
 	}
@@ -660,10 +754,75 @@ wifi_regi2c_traced_write_mask(uint8_t block, uint8_t host_id, uint8_t reg_add,
 	e->data = data;
 	e->msb = msb;
 	e->lsb = lsb;
+	e->op = 1U;
 	if (wifi_regi2c_orig_write_mask != NULL) {
 		wifi_regi2c_orig_write_mask(block, host_id, reg_add, msb, lsb, data);
 	}
+#ifdef WIFI_REGI2C_DELAY_DIV_ADC_WRITE
+	/*
+	 *  DIAGNOSTIC（実施40切り分け実験．結論確定済み・実施42参照）：
+	 *  block=0x66,reg=0x04（I2C_BBPLL_DIV_ADC）へのwrite_mask直後の
+	 *  読み戻しがASP3・NuttXで食い違う現象（実施39）について，
+	 *  計装オーバーヘッド差によるアーティファクトかどうかをROM常駐
+	 *  `esp_rom_delay_us`（両機種で同一機械語）による対称遅延で
+	 *  切り分けた．結果は不変（アーティファクト説は反証．実施40／
+	 *  42で調査完了・結論確定済み）．再検証が必要な場合のみ有効化
+	 *  すること．
+	 */
+	if ((block == 0x66U) && (host_id == 0U) && (reg_add == 4U)) {
+		esp_rom_delay_us(5U);
+	}
+#endif /* WIFI_REGI2C_DELAY_DIV_ADC_WRITE */
 }
+
+#ifdef WIFI_REGI2C_TRACE_READS
+static uint8_t
+wifi_regi2c_traced_read(uint8_t block, uint8_t host_id, uint8_t reg_add)
+{
+	uint32_t		pos;
+	wifi_regi2c_t	*e;
+	uint8_t			ret = 0U;
+
+	if (wifi_regi2c_orig_read != NULL) {
+		ret = wifi_regi2c_orig_read(block, host_id, reg_add);
+	}
+	pos = wifi_regi2c_pos++;
+	e = &wifi_regi2c[pos % WIFI_REGI2C_SIZE];
+	e->t_us_low = (uint32_t)esp_shim_time_us();
+	e->block = block;
+	e->host_id = host_id;
+	e->reg_add = reg_add;
+	e->data = ret;
+	e->msb = 0xFFU;
+	e->lsb = 0xFFU;
+	e->op = 2U;
+	return(ret);
+}
+
+static uint8_t
+wifi_regi2c_traced_read_mask(uint8_t block, uint8_t host_id, uint8_t reg_add,
+							  uint8_t msb, uint8_t lsb)
+{
+	uint32_t		pos;
+	wifi_regi2c_t	*e;
+	uint8_t			ret = 0U;
+
+	if (wifi_regi2c_orig_read_mask != NULL) {
+		ret = wifi_regi2c_orig_read_mask(block, host_id, reg_add, msb, lsb);
+	}
+	pos = wifi_regi2c_pos++;
+	e = &wifi_regi2c[pos % WIFI_REGI2C_SIZE];
+	e->t_us_low = (uint32_t)esp_shim_time_us();
+	e->block = block;
+	e->host_id = host_id;
+	e->reg_add = reg_add;
+	e->data = ret;
+	e->msb = msb;
+	e->lsb = lsb;
+	e->op = 3U;
+	return(ret);
+}
+#endif /* WIFI_REGI2C_TRACE_READS */
 
 /*
  *  当初`phy_get_romfunc_addr`（`register_chipv7_phy`が呼ぶ，ROM常駐
@@ -686,7 +845,9 @@ wifi_regi2c_traced_write_mask(uint8_t block, uint8_t host_id, uint8_t reg_add,
  *  固定テーブルを指す）とは無関係にテーブル自体へ直接書き込む．
  */
 #define WIFI_ROM_PHYFUNS_TABLE_ADDR  0x4087f954UL
+#define WIFI_PHYFUNS_IDX_I2C_READ        20U
 #define WIFI_PHYFUNS_IDX_I2C_WRITE       22U
+#define WIFI_PHYFUNS_IDX_I2C_READ_MASK   23U
 #define WIFI_PHYFUNS_IDX_I2C_WRITE_MASK  24U
 
 void
@@ -700,6 +861,26 @@ wifi_regi2c_patch_install(void)
 		(wifi_regi2c_write_mask_fn_t)(uintptr_t)tbl[WIFI_PHYFUNS_IDX_I2C_WRITE_MASK];
 	tbl[WIFI_PHYFUNS_IDX_I2C_WRITE] = (uint32_t)(uintptr_t)wifi_regi2c_traced_write;
 	tbl[WIFI_PHYFUNS_IDX_I2C_WRITE_MASK] = (uint32_t)(uintptr_t)wifi_regi2c_traced_write_mask;
+#ifdef WIFI_REGI2C_TRACE_READS
+	/*
+	 *  実施39〜42：read/read_mask枠のトレースは目的（regi2c読み戻し
+	 *  比較）を達成し完了済み．常時有効のままだと，このwrapper1回
+	 *  あたりのオーバーヘッド（関数呼出し1段＋esp_shim_time_us()＋
+	 *  リングバッファ書込み）が，phy_init内部のタイトな逐次比較／
+	 *  ポーリングループ（block=0x62等）の反復回数に掛け算されて
+	 *  効いてしまい，通常のスキャン所要時間を数秒から分単位まで
+	 *  悪化させることを実機で確認した（ボード再接続後の実行で発覚．
+	 *  真のハングではなくROM常駐regi2c読み出し関数群を無限に近い
+	 *  回数再訪しているだけとJTAGで確認済み）．再度read側の比較が
+	 *  必要になった場合のみ，このマクロを定義してビルドすること．
+	 */
+	wifi_regi2c_orig_read =
+		(wifi_regi2c_read_fn_t)(uintptr_t)tbl[WIFI_PHYFUNS_IDX_I2C_READ];
+	wifi_regi2c_orig_read_mask =
+		(wifi_regi2c_read_mask_fn_t2)(uintptr_t)tbl[WIFI_PHYFUNS_IDX_I2C_READ_MASK];
+	tbl[WIFI_PHYFUNS_IDX_I2C_READ] = (uint32_t)(uintptr_t)wifi_regi2c_traced_read;
+	tbl[WIFI_PHYFUNS_IDX_I2C_READ_MASK] = (uint32_t)(uintptr_t)wifi_regi2c_traced_read_mask;
+#endif /* WIFI_REGI2C_TRACE_READS */
 }
 
 void
@@ -713,12 +894,15 @@ wifi_regi2c_dump(void)
 	syslog(LOG_NOTICE, "wifi_regi2c: total=%d (showing %d)", (int_t)total, (int_t)n);
 	for (i = 0U; i < n; i++) {
 		idx = (start + i) % WIFI_REGI2C_SIZE;
+		/*  syslog()はt_syslog.hのsyslog_5までしか無く6引数は無言で
+		 *  破損する（実際に発生・確認済み）ため，op引数は2行目へ移す．  */
 		syslog(LOG_NOTICE, "wifi_regi2c: [%d] t=%d block=%02x host=%d reg=%02x",
 			   (int_t)i, (int_t)wifi_regi2c[idx].t_us_low,
 			   (unsigned int)wifi_regi2c[idx].block,
 			   (int_t)wifi_regi2c[idx].host_id,
 			   (unsigned int)wifi_regi2c[idx].reg_add);
-		syslog(LOG_NOTICE, "wifi_regi2c:   data=%02x msb=%d lsb=%d",
+		syslog(LOG_NOTICE, "wifi_regi2c:   op=%d data=%02x msb=%d lsb=%d",
+			   (int_t)wifi_regi2c[idx].op,
 			   (unsigned int)wifi_regi2c[idx].data,
 			   (int_t)wifi_regi2c[idx].msb,
 			   (int_t)wifi_regi2c[idx].lsb);
@@ -741,8 +925,13 @@ wifi_regi2c_dump_count(void)
  *  read_mask枠（idx23=rom_i2c_readReg_Mask）を取得して直接呼ぶ．
  *  write枠のパッチ（差し替え）とは異なり，読み出しは横取りせず
  *  素通しで良いため，パッチインストール不要．
+ *
+ *  （regi2c読み戻し比較の追加により，`wifi_regi2c_patch_install()`が
+ *  read_mask枠も`wifi_regi2c_traced_read_mask`へ差し替え済みとなった
+ *  ため，本関数がここで`romtbl[]`から取得するのは実際にはトレース
+ *  関数経由になる＝二重にはならず，単にこの一点読出しもリングバッファ
+ *  へ記録される副次効果が生じるだけで，動作・戻り値とも変化しない）．
  */
-#define WIFI_PHYFUNS_IDX_I2C_READ_MASK 23U
 
 typedef uint8_t (*wifi_regi2c_read_mask_fn_t)(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
 

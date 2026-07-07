@@ -31,8 +31,9 @@
 
 #include "private/esp_coexist_adapter.h"
 
-/*  esp_coex_adapter_register（libcoexist.a／esp_coex内） */
+/*  esp_coex_adapter_register／coex_pre_init（libcoexist.a／esp_coex内） */
 extern int esp_coex_adapter_register(coex_adapter_funcs_t *funcs);
+extern int coex_pre_init(void);
 
 /*
  *  coexist_funcs：ROM常駐グローバル（esp32c3.rom.ld・0x3fcdf83c）．
@@ -194,31 +195,88 @@ coex_adapter_funcs_t g_coex_adapter_funcs = {
 /*
  *  coexアダプタの登録（WiFi初期化前に呼ぶ．NuttXのbringupに相当）
  */
+/*
+ *  DIAGNOSTIC（実施53，一時的）：coex_pre_init()自体が返ってくるかを
+ *  BSSグローバル（毎回のDirect Bootで確実にゼロ初期化される）で
+ *  確認する．entered=1で「呼んだ」，done=1で「戻ってきた」．
+ */
+volatile uint32_t	esp_shim_coex_pre_init_entered;
+volatile uint32_t	esp_shim_coex_pre_init_done;
+volatile int32_t	esp_shim_coex_pre_init_ret;
+volatile uint32_t	esp_shim_coex_pre_regi2c_63 = 0xFFFFFFFFU;
+volatile uint32_t	esp_shim_coex_post_regi2c_63 = 0xFFFFFFFFU;
+
 void
 esp_shim_coex_adapter_register(void)
 {
-	int		ret = esp_coex_adapter_register(&g_coex_adapter_funcs);
+	static bool	done = false;
+	int		ret;
+	int		pre_ret;
 	uint_t	i;
+
+	/*
+	 *  実施54：hardware_init_hook（起動ごく初期）とアプリのmain_task
+	 *  （wifi初期化直前）の両方から呼ばれても1回しか実行しない
+	 *  （NuttXのボード起動タイミングへ近付けるためhardware_init_hook
+	 *  からも呼ぶが，既存アプリ側の呼出しは互換のため残す）．
+	 */
+	if (done) {
+		return;
+	}
+	done = true;
+
+	ret = esp_coex_adapter_register(&g_coex_adapter_funcs);
 
 	if (ret != 0) {
 		syslog(LOG_ERROR, "esp_coex_adapter_register -> %d", (int_t)ret);
 	}
 
 	/*
-	 *  ROMのcoexist_funcsポインタをダミーno-opテーブルへ向ける
-	 *  （WiFi単独＝coexist非アクティブ．上記コメント参照）．
-	 *
-	 *  ★追記24-25：この no-op 化がC6 RX不能の根本原因と特定．blobの
-	 *  coex調停（0x600a4dd8のWiFi PTI設定含む）が全てno-op化され、PTI=0
-	 *  ＝coexがWiFiにRXスロットを許可しない＝MAC RX割込み不発．
-	 *  だが単純に外すと coexist_funcs のNULL/未設定メソッドで即
-	 *  Illegal instruction（no-opの本来の理由＝coex_initがASP3文脈で
-	 *  coexist_funcsを完全に設定していない）．NuttX（同一blob・受信可）は
-	 *  no-opせず本物のcoexが動く＝正しい修正は「coex_initがcoexist_funcsを
-	 *  正しく設定する状態にする」こと（NuttX比較が次段）．
+	 *  実施52（docs/wifi-shim-c6.md）：coexist_funcsをダミーno-opテーブル
+	 *  で上書きしていたのがC6 RX不能（PTI=0でMAC RX割込み不発）の根本
+	 *  原因と判明．NuttXのボード起動（esp32c6_bringup.c）は
+	 *  esp_coex_adapter_register()の直後に必ずcoex_pre_init()（libcoexist.a
+	 *  内，esp_coexist_internal.h宣言）を呼んでおり，これがcoexist_funcs
+	 *  を正しい実体（PTI設定を含む）で初期化する．ESP-IDF本体の
+	 *  startup_funcs.cではこの2つを起動シーケンスの中で自動的に呼ぶが，
+	 *  「#ifndef __NuttX__」でガードされ**NuttXでは呼ばれない**ため，
+	 *  NuttXは同じ2行をボード側（bringup）で明示的に呼んでいる．ASP3の
+	 *  Direct Bootも同様にESP-IDFの起動シーケンスを経由しないため，
+	 *  NuttXと同じ位置（wifi初期化前のcoexアダプタ登録時）で明示的に
+	 *  呼ぶ必要がある．
 	 */
-	for (i = 0U; i < 48U; i++) {
-		dummy_coexist_table[i] = (void *)coex_noop;
+	esp_shim_coex_pre_init_entered = 1U;
+	/*
+	 *  実施54続き：coex_pre_init()がregi2c block=0x63（実施53で
+	 *  wait_i2c_sdm_stableが待つブロック，実施44でも既出）に
+	 *  何らかの影響を与えていないか，直前直後でROM常駐i2c_read
+	 *  （固定ROMテーブルWIFI_ROM_PHYFUNS_TABLE_ADDR，wifi_trace.cと
+	 *  同一の手法．blob初期化を待たずROM起動直後から有効）で
+	 *  直接読み比べる．
+	 */
+	{
+		typedef uint8_t (*regi2c_read_fn_t)(uint8_t, uint8_t, uint8_t);
+		uint32_t			*tbl = (uint32_t *)0x4087f954UL;
+		regi2c_read_fn_t	read_fn =
+			(regi2c_read_fn_t)(uintptr_t)tbl[20U];
+
+		esp_shim_coex_pre_regi2c_63 = read_fn(0x63U, 1U, 0U);
+		pre_ret = coex_pre_init();
+		esp_shim_coex_post_regi2c_63 = read_fn(0x63U, 1U, 0U);
 	}
-	coexist_funcs = dummy_coexist_table;
+	esp_shim_coex_pre_init_done = 1U;
+	esp_shim_coex_pre_init_ret = (int32_t)pre_ret;
+	if (pre_ret != 0) {
+		/*
+		 *  coex_pre_init失敗時のみ，従来のダミーno-opテーブルへ
+		 *  フォールバックする（NULLメソッド呼出しによるクラッシュを
+		 *  避けるための保険．正常経路では通らないはず）．
+		 */
+		syslog(LOG_ERROR, "coex_pre_init -> %d (falling back to no-op)",
+			   (int_t)pre_ret);
+		for (i = 0U; i < 48U; i++) {
+			dummy_coexist_table[i] = (void *)coex_noop;
+		}
+		coexist_funcs = dummy_coexist_table;
+	}
 }

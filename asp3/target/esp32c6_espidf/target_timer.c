@@ -24,6 +24,13 @@
 #include <sil.h>
 
 /*
+ *  DIAGNOSTIC（実施50，一時的）：target_hrt_set_event用カウンタの実体．
+ */
+volatile uint32_t	esp32c6_hrt_set_event_count;
+volatile uint32_t	esp32c6_hrt_set_event_forceint_count;
+volatile uint32_t	esp32c6_hrt_set_event_hrtcnt_min = 0xffffffffU;
+
+/*
  *  タイマの起動処理
  */
 void

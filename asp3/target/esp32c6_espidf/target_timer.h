@@ -94,6 +94,18 @@ target_timer_force_int(void)
 }
 
 /*
+ *  DIAGNOSTIC（実施50，一時的）：target_hrt_set_eventの呼出し頻度と
+ *  「設定完了時点で既に過去」を検出した回数・最小hrtcntを軽量カウンタ
+ *  で観測する．JTAGでのライブhalt採取は関数内部の2回のsystimer読出し
+ *  の間に割込んでしまうと見かけ上「常に過去」を作り出す計測アーチ
+ *  ファクトになり得るため，計測はカウンタの蓄積のみで行い，JTAGは
+ *  ダンプ後にまとめて読む．
+ */
+extern volatile uint32_t	esp32c6_hrt_set_event_count;
+extern volatile uint32_t	esp32c6_hrt_set_event_forceint_count;
+extern volatile uint32_t	esp32c6_hrt_set_event_hrtcnt_min;
+
+/*
  *  次に割込みを発生させる時刻の設定
  */
 /*  DIAGNOSTIC（HRTスプリアス割込み調査・一時的）：最後に武装したtarget
@@ -110,6 +122,11 @@ target_hrt_set_event(HRTCNT hrtcnt)
 
 	g_hrt_last_target = target;	/* DIAGNOSTIC */
 
+	esp32c6_hrt_set_event_count++;
+	if (hrtcnt < esp32c6_hrt_set_event_hrtcnt_min) {
+		esp32c6_hrt_set_event_hrtcnt_min = hrtcnt;
+	}
+
 	/*
 	 *  target0コンパレータへ比較値を設定する
 	 */
@@ -121,6 +138,7 @@ target_hrt_set_event(HRTCNT hrtcnt)
 	 *  （oneshotのコンパレータは過去時刻に対して発火しないため）
 	 */
 	if (esp32c6_systimer_read() >= target) {
+		esp32c6_hrt_set_event_forceint_count++;
 		target_timer_force_int();
 	}
 }

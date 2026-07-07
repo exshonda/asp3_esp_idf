@@ -289,6 +289,12 @@ list(APPEND ASP3_LINK_OPTIONS
     -Wl,--wrap=pbus_rx_dco_cal_1step_new
     -Wl,--wrap=ram_pbus_force_mode
     -Wl,--wrap=rx_pbus_reset
+    #  実施58：RXデータパス各段（sta_rx_cbが0の原因切り分け・一時的）
+    -Wl,--wrap=lmacProcessRxSucData
+    -Wl,--wrap=ppRxPkt
+    -Wl,--wrap=wdevProcessRxSucDataAll
+    -Wl,--wrap=wDev_ProcessRxSucData
+    -Wl,--wrap=wDev_IndicateFrame
 )
 
 #

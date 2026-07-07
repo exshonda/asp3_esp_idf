@@ -770,10 +770,25 @@ esp_shim_timer_setfn(void *ptimer, void (*pfunc)(void *), void *parg)
 	}
 }
 
+/*
+ *  DIAGNOSTIC（実施50，一時的）：esp_shim_timer_arm_usの呼出し頻度・
+ *  要求us値を軽量カウンタで観測する（syslogバースト・ロス回避のため
+ *  実施20と同じ「カウントのみ・まとめてダンプ」方式）．
+ */
+volatile uint32_t	esp_shim_timer_arm_count;
+volatile uint32_t	esp_shim_timer_arm_us_min = 0xffffffffU;
+volatile uint32_t	esp_shim_timer_arm_us_last;
+
 void
 esp_shim_timer_arm_us(void *ptimer, uint32_t us, bool_t repeat)
 {
 	SHIM_TIMER	*t = shim_timer_find(ptimer, true);
+
+	esp_shim_timer_arm_count++;
+	esp_shim_timer_arm_us_last = us;
+	if (us < esp_shim_timer_arm_us_min) {
+		esp_shim_timer_arm_us_min = us;
+	}
 
 	if (t != NULL) {
 		SHIM_LOCK();
@@ -818,6 +833,11 @@ esp_shim_timer_done(void *ptimer)
 /*
  *  タイマタスク本体（esp_shim.cfgのCRE_TSKで生成・起動）
  */
+volatile uint32_t	esp_shim_timer_task_loops;
+volatile uint32_t	esp_shim_timer_task_fn_calls;
+volatile uint32_t	esp_shim_timer_task_wait_min = 0xffffffffU;
+volatile uint32_t	esp_shim_timer_task_wait_last;
+
 void
 esp_shim_timer_task(EXINF exinf)
 {
@@ -827,6 +847,8 @@ esp_shim_timer_task(EXINF exinf)
 		int64_t		next = 0;
 		void		(*fn)(void *) = NULL;
 		void		*arg = NULL;
+
+		esp_shim_timer_task_loops++;
 
 		/*
 		 *  期限到来タイマを1つ選ぶ（コールバックはロック外で実行）
@@ -854,6 +876,7 @@ esp_shim_timer_task(EXINF exinf)
 		SHIM_UNLOCK();
 
 		if (fn != NULL) {
+			esp_shim_timer_task_fn_calls++;
 			fn(arg);
 			continue;			/* 他の期限到来タイマを続けて処理 */
 		}
@@ -865,6 +888,10 @@ esp_shim_timer_task(EXINF exinf)
 			int64_t wait = next - now;
 			if (wait < 1000) {
 				wait = 1000;
+			}
+			esp_shim_timer_task_wait_last = (uint32_t)wait;
+			if ((uint32_t)wait < esp_shim_timer_task_wait_min) {
+				esp_shim_timer_task_wait_min = (uint32_t)wait;
 			}
 			(void) twai_sem(SHIM_TIMER_SEM, (TMO)wait);
 		}
@@ -907,6 +934,30 @@ static void
 shim_int_dispatch(int intno)
 {
 	esp_shim_int_count[intno]++;
+	/*
+	 *  DIAGNOSTIC（実施59，一時的）：MAC割込み線（intno==1）が上がった
+	 *  瞬間に，blobのMAC ISRが読み出す前のMAC割込みイベント／ステータス
+	 *  レジスタ（0x600a4c48＝hal_mac_interrupt_get_eventが読む先）を採取
+	 *  し，どのビットで140/秒の割込みが上がっているのかを特定する．
+	 *  RTC固定番地（0x500000B0〜）にOR蓄積・最新値・非零回数・総数を残す
+	 *  （Direct BootはRTC RAMをゼロクリアしないため，JTAGでゼロクリア後に
+	 *  フリーランさせて差分／蓄積を読む）．あわせてRX制御（0x600a4080）・
+	 *  RX最終ディスクリプタ（0x600a408c）も最新値を残し，RX DMAが
+	 *  ディスクリプタを進めているかを見る．
+	 */
+	if (intno == 1) {
+		volatile uint32_t *rtc = (volatile uint32_t *)0x500000B0U;
+		uint32_t ev = *(volatile uint32_t *)0x600A4C48U;	/* MAC int event */
+		rtc[0] |= ev;						/* [B0] OR蓄積 */
+		rtc[1]  = ev;						/* [B4] 最新値 */
+		if (ev != 0U) {
+			rtc[2]++;						/* [B8] 非零回数 */
+		}
+		rtc[3]++;						/* [BC] intno==1総数 */
+		rtc[4]  = *(volatile uint32_t *)0x600A4080U;	/* [C0] RX制御 */
+		rtc[5]  = *(volatile uint32_t *)0x600A408CU;	/* [C4] RX最終dscr */
+		rtc[6] |= *(volatile uint32_t *)0x600A408CU;	/* [C8] RX最終dscr OR */
+	}
 	if (shim_isr_tbl[intno].fn != NULL) {
 		shim_isr_tbl[intno].fn(shim_isr_tbl[intno].arg);
 	}

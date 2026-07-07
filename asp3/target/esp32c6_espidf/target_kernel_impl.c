@@ -23,6 +23,7 @@
 #include "kernel_impl.h"
 #include "target_syssvc.h"
 #include <sil.h>
+#include "esp_rom_sys.h"
 #ifdef TOPPERS_OMIT_TECS
 #include "chip_serial.h"
 #endif
@@ -147,7 +148,37 @@ hardware_init_hook(void)
 	 *  設定したものを流用しており，追加のレジスタ操作は不要かつ
 	 *  行うべきでない）．CORE_CLK_MHZ＝160・SIL_DLY_TIM1/2は実測較正
 	 *  済み（esp32c6.h・docs/dev/esp32c6-target.md参照）．
+	 *
+	 *  実施48（docs/wifi-shim-c6.md）：上記の通りCPUクロック自体は
+	 *  ROMが起動時に160MHzへ設定済みだが，その事実をROM自身の
+	 *  較正用大域変数（s_ticks_per_us，esp_rom_delay_us内部で
+	 *  「要求us×s_ticks_per_us」ティック分ビジーウェイトする際に
+	 *  参照される）へ明示的に通知するAPI呼出しが，Direct Bootの
+	 *  どこにも存在しなかった（NuttX側はrtc_clk.cのクロック切替え
+	 *  関数内で毎回esp_rom_set_cpu_ticks_per_us()を呼んでいるが，
+	 *  ASP3はクロック切替え自体を行わないため，この呼出しも
+	 *  漏れていた）．放置するとs_ticks_per_usはROM起動ごく初期の
+	 *  低速クロック較正値のまま残り，phy_init全体で使われる
+	 *  esp_rom_delay_us()が本来の約1/3の時間しか待たなくなる．
 	 */
+	esp_rom_set_cpu_ticks_per_us(CORE_CLK_MHZ);
+
+#ifdef TOPPERS_ESP32C6_WIFI
+	/*
+	 *  実施54（docs/wifi-shim-c6.md）：実施52で追加したcoex_pre_init()
+	 *  呼出しが，従来アプリのmain_task内（esp_wifi_init直前）だと
+	 *  register_chipv7_phy冒頭のBBPLL/regi2c較正（wait_i2c_sdm_stable，
+	 *  block=0x63）を新たに停止させる退行を引き起こした（実施53）．
+	 *  NuttXは同じ2行（esp_coex_adapter_register+coex_pre_init）を
+	 *  ボード起動のごく初期（wifi初期化のはるか前）で呼んでおり，
+	 *  ASP3も同じタイミングへ近付けるためhardware_init_hookから
+	 *  呼ぶ．esp_shim_coex_adapter_register()は多重呼出しに対して
+	 *  自己ガード済み（初回のみ実行）のため，各アプリのmain_task内の
+	 *  既存呼出しと共存できる。
+	 */
+	extern void esp_shim_coex_adapter_register(void);
+	esp_shim_coex_adapter_register();
+#endif /* TOPPERS_ESP32C6_WIFI */
 }
 
 void
