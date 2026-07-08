@@ -1586,6 +1586,34 @@ SA/cal比較ループ（regi2c write_mask→read_mask反復）にbp/計装し，
 回数をNuttX vs ASP3で比較**＝どこで反復せず早期exit/skipするか特定．反復阻害の前提
 （cal用クロック/PLLロック/regi2cマスタ/bias）を掴めればtarget補完を試す．
 
+#### (1)(f) payoff着手：cal局所化＝BBPLLは正常・RF/AGC calが非反復（2026-07-08，未完）
+
+**register_chipv7_phy(0x42021a72, blobだがapp flashにリンク＝逆アセンブル可)の構造**：
+呼出し＝`register_chipv7_phy_init_param`, `rom_phy_bbpll_cal`(+`rom2_read/write_pll_cap`),
+`get_temp_init`(温度センサ), `set_rfpll_freq`×3/`rfpll_set_freq`(RF PLL), `rf_init`(0x420211f0),
+`bb_init`(0x4202196e), `rf_cal_data_recovery/backup`, `chip_v7_set_chan_offset`．
+
+**局所化（regi2c比較より）**：**BBPLLブロック0x66のtrimはNuttX=ASP3で完全一致**
+＝BBPLL cal(`rom_phy_bbpll_cal`)は正常動作．**相違はRF/AGCブロック(0x6b/0x6d/0x6a)**
+＝RF/AGC calステップ（`rf_init`/`bb_init`内のSAループが有力）でASP3が非反復．
+⇒ 阻害前提は「BBPLLには不要だがRF/AGC calに要るもの」＝RF PLL/RF-FE電源・bias・
+温度・RF系cal専用クロックが候補．
+
+**実機確認（bounded）**：ASP3で`reset halt`→bp register_chipv7_phy(0x42021a72)→resume
+＝**bp HIT確認（PC=0x42021a72, debug_reason=breakpoint）＝ASP3もcal本体を実行している**．
+（reset halt時にexamine haltエラーが出るがbp自体は発火．深追いはbare-run+単発attach
+推奨．）register_chipv7_phy入口に`lbu 229(s0/s1)`→bnez skip・`lbu 286(s0)`等の
+**init_param/state依存の分岐**あり（cal経路にデータ依存skipが存在）．
+
+**★正直な現状（未完）**：cal本体到達・BBPLL正常・RF/AGC非反復まで局所化したが，
+**RF/AGC calのどのSAループがどの前提でASP3だけ早期exit/skipするかは未特定**
+（＝阻害前提未pin，target補完未実施，adv未開通）．これはC6 66-round相当の深さ．
+**次段**：rf_init(0x420211f0)/bb_init(0x4202196e)内のregi2c write→read→比較ループに
+bp/`--wrap`計装し，**同一board B(rev3)でNuttX vs ASP3のイテレーション回数と分岐条件を
+比較**→ASP3が反復をやめる分岐点で読むstatus/flag/reg(RF-PLLロック/温度/cal-clock/
+上記offset229/286)を掴む→target補完(bt_shim/esp_shim)．計測はreset-halt不安定ゆえ
+bare-run+単発attach or 対象関数の--wrap計装(C6実施38系手法)推奨．C6 deaf-RXへ相互参照．
+
 ### 変更したファイル
 
 | ファイル | 内容 |
