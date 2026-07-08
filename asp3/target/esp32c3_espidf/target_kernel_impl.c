@@ -28,6 +28,13 @@
 #endif
 
 /*
+ *  ROMの遅延較正大域変数 s_ticks_per_us を更新するROM API
+ *  （esp32c3.rom.api.ld で ets_update_cpu_frequency へPROVIDE済み）．
+ *  ヘッダ依存を避けるためここでプロトタイプのみ宣言する．
+ */
+extern void esp_rom_set_cpu_ticks_per_us(uint32_t ticks_per_us);
+
+/*
  *  エラー時の処理
  */
 extern void Error_Handler(void);
@@ -85,6 +92,26 @@ hardware_init_hook(void)
 			 ESP32C3_CPU_PER_CONF_PLL_160M, ESP32C3_CPU_PER_CONF_CLK_MASK);
 	sil_mskw((void *)ESP32C3_SYSTEM_SYSCLK_CONF,
 			 ESP32C3_SYSCLK_CONF_SEL_PLL, ESP32C3_SYSCLK_CONF_SEL_MASK);
+
+	/*
+	 *  ROMの遅延較正大域変数 s_ticks_per_us をCPU実クロック(160MHz)へ
+	 *  更新する（emi.c:164解消後に顕在化したRF較正リセットの真因対策）．
+	 *
+	 *  Direct BootではCPUはリセット既定のXTAL/2＝20MHzで起動し，ROMは
+	 *  その20MHzで s_ticks_per_us を較正する（実機JTAGでB=0x14=20を確認．
+	 *  基準機NuttXは0xa0=160）．上でPLL160MHzへ切替えても，その事実を
+	 *  ROMの s_ticks_per_us へ通知するAPI（esp_rom_set_cpu_ticks_per_us＝
+	 *  ets_update_cpu_frequency）が呼ばれないと，esp_rom_delay_us(N) は
+	 *  N×20 サイクルしかビジーウェイトせず，本来の約1/8の時間しか待たない．
+	 *  register_chipv7_phy等のRF/PHY較正はPLLロック待ち・アナログ整定
+	 *  待ちにこの遅延を多用するため，遅延不足で較正が破綻しチップが
+	 *  リセットする（rst:0x15）．C6でも同一機構を確認・修正済み
+	 *  （docs/wifi-shim-c6.md 実施48/49，memory/project_c6_agc_investigation.md）．
+	 *  NuttXはrtc_clk.cのクロック切替関数内で毎回呼ぶが，ASP3はクロック
+	 *  切替をこのhook内で直接行うため同じ位置で明示的に呼ぶ．
+	 *  WiFi/BT双方（RF/PHYを使う）に必要なので無条件で呼ぶ．
+	 */
+	esp_rom_set_cpu_ticks_per_us(160U);
 
 #ifdef TOPPERS_ESP32C3_WIFI
 	/*

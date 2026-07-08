@@ -596,12 +596,39 @@ enableは`emi.c:164`を越えたが，**`phy_init`のRF較正（`register_chipv7
 - ＝ブロッカーは**RF/PHY較正（`register_chipv7_phy`内のregi2c/RFレジスタ
   プログラミング）**。C6 Wi-Fi調査（`memory/project_c6_agc_investigation.md`，
   66ラウンドのRF/regi2c/deaf-RX）と同じ層で，**別フェーズの調査が必要**。
-- 次段方針：同じ2ボード差分（A=NuttXは`register_chipv7_phy`を完走し
-  enable成功）で，`register_chipv7_phy`入口／RF較正中のregi2c状態・
-  PHY較正データ・残りのクロック（`esp_perip_clk_init`のうち本修正で
-  未補完の部分）をA/B比較して欠落を特定する。真因候補：PHY較正データ
-  （NVS/eFuse）読込の欠落，regi2c前提初期化の欠落，または
-  `esp_perip_clk_init`残余クロック。
+
+##### 追加調査（2026-07-08 続き）：s_ticks_per_us修正＋リセット種別確定
+
+1. **`s_ticks_per_us`（ROMの遅延較正大域，`0x3fcdf64c`）を修正**（C6 実施48/49と同一機構）：
+   実機で **B(ASP3)=`0x14`(20) / A(NuttX)=`0xa0`(160)** を確認。ASP3 Direct Bootは
+   PLL160MHzへ切替えるが，その事実をROMへ通知する`esp_rom_set_cpu_ticks_per_us`
+   を呼んでおらず，`esp_rom_delay_us(N)`が本来の**1/8**（N×20）しか待たない。
+   → `asp3/target/esp32c3_espidf/target_kernel_impl.c`の`hardware_init_hook()`に
+   `esp_rom_set_cpu_ticks_per_us(160)`を追加（無条件）。実機で`s_ticks_per_us=0xa0`へ
+   修正されたことを確認。**RF較正の遅延精度に必須の修正だが，これ単独では
+   リセットは解消しなかった**（リセットは別要因）。
+2. **リセット種別＝チップ内部（ホスト起因ではない）と確定**：JTAGのみ接続
+   （passiveコンソール読取り無し）でも，さらに**何も接続せず起動（bare run）
+   →6s後にJTAG接続**しても，PCは`_kernel_start_r`(`0x42003d4c/50`)＝
+   **リセットループ**，`hci_reset_done`=0（VHCI未完）。＝USB CDCのDTR/RTS揺れや
+   再列挙ではなく，**RF較正中にチップが実際にリセットしている**
+   （`rst:0x15 USB_UART_CHIP_RESET`）。
+3. **A/Bクロック差分（`phy_module_enable`停止時）**：
+   - `SYSTEM_PERIP_CLK_EN0_REG(0x600C0010)`：B=`0xf9c1e06f`（リセット既定）／
+     A=`0x71806007`。NuttXは`esp_perip_clk_init`で不要ペリフェラルクロックを
+     **CLEAR**するが，ASP3はORのみで未クリア＝Bに余分なビットが残る。
+   - `SYSTEM_WIFI_CLK_EN(0x60026014)`：B=`0xffffffff`／A=`0xffffffdf`（bit5差）。
+   - `SYSTEM_PERIP_CLK_EN1(0x600C0014)`はA/B一致（`0x200`）。
+   - ただし**WIFI_CLK_EN bit5をJTAGでクリアしてもリセットは解消せず**＝
+     単一ビットではない。
+   - 真因候補：ASP3が`esp_perip_clk_init`の**CLEAR側**（不要クロック停止）と
+     `SYSTEM_WIFI_CLK_EN`の**厳密値化**（NuttX 0xff87f850）を行っていないこと，
+     またはRF較正が読むregi2c前提初期化/PHY較正データの欠落。
+- 次段方針：同じ2ボード差分で`register_chipv7_phy`内のregi2c（block 0x6b/0x66/0x6d等，
+  C6資産）・PHY較正データ（NVS/eFuse）・`esp_perip_clk_init`の完全再現
+  （CLEAR含む）をA/B比較。**修正は`hardware_init_hook`で`esp_perip_clk_init`相当を
+  より忠実に再現する方向**（ただしASP3自前のコンソール/タイマ用クロックを
+  止めない配慮が必要）。C6のRF/regi2c知見が直結。
 
 #### 併発する既知バグ（boot variance の真因）
 本セッションを通した「boot variance」（em store bp命中率≈1/3，
@@ -649,6 +676,7 @@ C6調査資産への影響を避け未修正．要判断）。
 | `asp3/target/esp32c3_espidf/bt/bt_shim.c` | `esp_shim_bt_clock_init()`追加＝BLEベースバンドの機能クロック（`SYSCON_WIFI_CLK_EN` bit6,11,12,16,17＝`0x00031840`）を有効化。**emi.c:164の真因修正**（Direct Bootが飛ばす`esp_perip_clk_init`のBBクロック分を補完）。 |
 | `apps/bt_smoke/bt_smoke.c` | `esp_bt_controller_init()`直前で`esp_shim_bt_clock_init()`を呼ぶ。調査用プローブ`BT_PROBE_STOP_AFTER_INIT`（`#ifdef`ガード，通常ビルド無影響）を残置。 |
 | `asp3/target/esp32c3_espidf/wifi/esp_coex_adapter.c` | `esp_shim_coex_adapter_register()`内のC6調査用一時診断（`read_fn(0x63)`）に**NULLガード**追加＝間欠クラッシュ（boot variance）の解消。`read_fn`が有効な場合の従来動作は不変。 |
+| `asp3/target/esp32c3_espidf/target_kernel_impl.c` | `hardware_init_hook()`に`esp_rom_set_cpu_ticks_per_us(160)`追加＝ROMの`s_ticks_per_us`を実CPUクロックへ更新（`esp_rom_delay_us`が1/8時間しか待たない問題の修正、C6 実施48/49と同機構）。RF較正の遅延精度に必須（ただしRF較正リセットの解消は別要因で未達）。 |
 
 ### Git情報
 
