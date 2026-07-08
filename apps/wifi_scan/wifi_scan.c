@@ -182,7 +182,35 @@ main_task(EXINF exinf)
 	syslog(LOG_NOTICE, "wifi_scan: DIAG post-set_mode g_ic[497]=%d g_ic[499]=%d",
 		   (int_t)diag_g_ic_byte(497), (int_t)diag_g_ic_byte(499));
 	(void) esp_wifi_set_storage(WIFI_STORAGE_RAM);
+#ifdef WIFI_SCAN_PS_MIN_MODEM
+	/*
+	 *  DIAGNOSTIC（一時的，実施71／Codex申し送り(a)の因果実験）：
+	 *  native側scanアプリはesp_wifi_set_psを一切呼ばず，STAモードの
+	 *  既定値WIFI_PS_MIN_MODEM（モデムスリープ有効）のまま動作する．
+	 *  実施71でこれがesp_phy_enable/esp_phy_disable（osi_funcsの
+	 *  _phy_enable/_phy_disable経由）の周期的呼出し（native実測4回/
+	 *  scan）を駆動し，2回目以降のesp_phy_enableがs_is_phy_calibrated
+	 *  既真のため`phy_wakeup_init`（FE再初期化，`fe_txrx_reset`含む）
+	 *  を実行することを突き止めた．ASP3は下のWIFI_PS_NONEにより
+	 *  esp_phy_enableを一度しか呼ばず`phy_wakeup_init`に一度も到達
+	 *  しない．本フラグでWIFI_PS_NONEをWIFI_PS_MIN_MODEMに切替え，
+	 *  周期的なPHY re-enable／FE再初期化が起きるかを検証する
+	 *  （原因か症状かの切り分け用，恒久変更ではない）．
+	 *
+	 *  ★実施71実測：本フラグを有効にして実機検証した結果，
+	 *  WIFI_PS_MIN_MODEMに切替えてもASP3のesp_phy_enableは依然
+	 *  1回しか呼ばれず，`phy_wakeup_init`にも到達しなかった（陰性
+	 *  結果）．すなわちnativeのesp_phy_enable/disable周期呼出しは
+	 *  単純なPS設定値の違いでは説明できない——スキャン中（未接続）は
+	 *  DTIM同期を伴う本来のモデムスリープが適用される状況ではない
+	 *  ため，別の要因（blob内部のスキャン専用の電源管理ロジック，
+	 *  もしくはOSプリミティブ／タイマ連携の違い）が真因である可能性が
+	 *  高い．本フラグは反証済みの実験として残置（削除しない）．
+	 */
+	(void) esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+#else /* WIFI_SCAN_PS_MIN_MODEM */
 	(void) esp_wifi_set_ps(WIFI_PS_NONE);
+#endif /* WIFI_SCAN_PS_MIN_MODEM */
 
 	err = esp_wifi_start();
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_start -> %d", (int_t)err);

@@ -10037,3 +10037,262 @@ ASP3＝scanを延々と繰返す）であるため，**壁時計ベースの3ス
   `60:55:F9:57:C9:88`・`60:55:F9:57:C2:60`には一切触れず）。
 - ボードは実施70終了時点でASP3（`asp_flash_trunc1M.bin`，esptool
   ハードリセットで正常起動・スキャンループ稼働中）に戻して残置。
+
+## 実施71：実施70の申し送り(a)(b)(c)を実行——★(a)分岐条件を完全特定★＝`fe_txrx_reset`は`phy_wakeup_init_`から呼ばれ，`esp_phy_enable()`が`s_is_phy_calibrated`真の状態で再入されたときだけ実行される「PHY再有効化（wakeup）」経路の一部．ASP3は`esp_phy_enable`を起動時に1回しか呼ばず，この経路に**そもそも到達しない**（分岐条件不成立ではなく関数自体が再入されない）．WIFI_PS_MIN_MODEMへの切替実験は陰性（再入は起きず）．★(b)★＝ASP3のRESCANループは`WIFI_EVENT_SCAN_DONE`の正常なイベント発火で駆動されており（タイムアウト経路ではない），よってfe_txrx_reset欠落は「スキャン未完走」の症状ではない．★(c)★＝ブレークポイント同期での再実施で新候補`0x600a4e4c`（native=定数`0xfe00000`固定，ASP3=下位バイトが常時ジッタ）を発見したが意味は未特定．総合判定：原因／症状の切り分けは（b)により症状仮説が弱まり，`esp_phy_enable`再入がそもそも起きないという構造差自体が新たな一次リード
+
+### 背景
+
+実施70で「`rx_pbus_reset`バースト23回の直後で，nativeは`fe_txrx_reset`
+を呼ぶがASP3は呼ばない」という決定的な非対称を発見したが，これが
+（a）ASP3がその分岐で条件不成立によりスキップしているだけなのか，
+（b）ASP3のスキャンが正常完了せずクリーンアップ経路に到達していない
+症状に過ぎないのか，未解決だった。本ラウンドはコーディネータの
+申し送り(a)(b)(c)を順に実行する。
+
+### 実装・手順
+
+1. **(a) 分岐条件の特定**：native `scan.elf`の全体逆アセンブル
+   （`objdump -d`，26万行）から`fe_txrx_reset`のジャンプテーブル
+   （`0x40001374`）への唯一の呼出し元を検索した。呼出し元は
+   `phy_wakeup_init_`（`0x40803e90`）という単一関数内の1箇所のみ
+   （`fe_txrx_reset`はROM内で他に呼出し元を持たない）。`phy_wakeup_init_`
+   の唯一の呼出し元は`phy_wakeup_init`（`0x42088136`，テールコール
+   トランポリン）で，その唯一の呼出し元は`esp_phy_enable`
+   （`0x40806afe`）内の1箇所だった。`esp_phy_enable`を逆アセンブルし，
+   分岐条件を精読した。
+2. **同一構造の確認**：`nm`でASP3側の対応シンボル
+   （`esp_phy_enable=0x420044e2`，`esp_phy_disable=0x420043b8`，
+   `phy_wakeup_init=0x42029146`，`phy_wakeup_init_=0x4206309a`，
+   `s_is_phy_calibrated=0x4081a95c`）を確認し，同一blobであることを
+   前提にASP3でも同じ制御構造が存在するとみなした。
+3. **実機JTAG検証**：`esp_phy_enable`・`esp_phy_disable`・
+   `phy_wakeup_init`へHWブレークポイントを同時設置し（実施70で確立
+   した`wait_halt`＋`rbp all`/`rwp all`手順），ASP3・native双方で
+   長時間（60イテレーション×1.5秒）呼出し回数を計測した。
+4. **(a)因果実験**：`apps/wifi_scan/wifi_scan.c`に診断用ビルドフラグ
+   `WIFI_SCAN_PS_MIN_MODEM`を追加（デフォルトOFF，`asp3/asp3_core/`・
+   `hal/`いずれのsubmoduleも変更せず）。native側scanアプリが
+   `esp_wifi_set_ps`を一切呼ばず（ソース確認済み，STAモード既定値
+   `WIFI_PS_MIN_MODEM`のまま）動作するのに対し，ASP3は明示的に
+   `WIFI_PS_NONE`を設定していることに着目し，本フラグで
+   `WIFI_PS_MIN_MODEM`に切替えて`esp_phy_enable`が再入されるかを
+   検証した。
+5. **(b) WIFI_EVENT_SCAN_DONEとの相関**：`wifi_event_handler`
+   （`0x4200019a`）へHWブレークポイントを設置し，第3引数（`a2`
+   レジスタ，RISC-V標準呼出し規約）＝イベントID を読み取った。
+   OpenOCD TCLの`while`ループ（`catch`で個々の失敗を握りつぶしながら
+   継続）を使い，複数回の呼出しでIDの推移を観測した。
+   `WIFI_EVENT_SCAN_DONE`＝1（`esp_wifi_types_generic.h`のenum定義で
+   確認），`WIFI_EVENT_STA_START`＝2。
+6. **(c) MAC空間diffの再実施**：実施70の「壁時計sleep」方式ではなく，
+   `rx_pbus_reset`のHWブレークポイントヒットをトリガに`0x600a4000`-
+   `0x600a4fff`をダンプする方式に変更。ASP3・native双方で同一
+   ブレークポイント（プラットフォーム毎の実アドレス）×6ヒット分の
+   スナップショットを取得し，全ワードを比較した。再現性確認のため
+   ASP3は2ブート，nativeも2ブートで実施。
+
+### 結果
+
+**(a) 分岐条件は完全特定：`esp_phy_enable()`内の`s_is_phy_calibrated`分岐**
+
+`esp_phy_enable`の逆アセンブル（native/ASP3同一構造）：
+
+```
+esp_phy_enable(a0):
+    lock_acquire
+    if (phy_get_modem_flag() != 0):          // 既に有効化済みなら
+        phy_set_modem_flag(a0); phy_track_pll(); lock_release; return
+    esp_phy_common_clock_enable()
+    if (s_is_phy_calibrated == 0):           // ★初回のみ
+        esp_phy_load_cal_and_init()          // フルキャリブレーション
+        s_is_phy_calibrated = 1
+        phy_track_pll_init()
+        if (phy_ant_need_update()): phy_ant_update(); phy_ant_clr_update_flag()
+        goto (short-circuit return path)
+    else:                                     // ★2回目以降（既キャリブレーション済み）
+        phy_wakeup_init()                     // ← fe_txrx_resetはここ
+        goto phy_track_pll_init() ...
+```
+
+`phy_wakeup_init()`→`phy_wakeup_init_()`は，内部で`fe_txrx_reset`（FE
+リセットパルス）を直接呼び，さらに`phy_reg_init()`（内部で
+`mac_enable_bb`をテールコール）も呼ぶ。すなわち**`fe_txrx_reset`は
+「`esp_phy_enable()`が，PHYが既にキャリブレーション済みの状態で
+再度呼ばれたとき」にのみ実行される，PHY起動のFAST-PATH（`phy_wakeup_init`）
+の一部**であることが確定した。native側の呼出し回数（`esp_phy_enable`=4，
+`esp_phy_disable`=4，`phy_wakeup_init`=3）は，「初回enable（フル
+キャリブレーション）→disable→enable（wakeup path，1回目）→disable→
+enable（wakeup path，2回目）→disable→enable（wakeup path，3回目）→
+disable」という4サイクルのenable/disable往復と完全に整合する
+（wakeup path実行回数＝enable回数−1＝3，実測と一致）。
+
+**ASP3の到達状況**：ASP3で`esp_phy_enable`（`0x420044e2`）・
+`esp_phy_disable`（`0x420043b8`）・`phy_wakeup_init`（`0x42029146`）を
+同時監視した結果，**60イテレーション×1.5秒（約90秒，多数のRESCAN
+サイクルを跨ぐ）で`esp_phy_enable`が正確に1回だけヒットし，
+`esp_phy_disable`・`phy_wakeup_init`は一度もヒットしなかった**（2ブート
+で再現）。すなわち，コーディネータが提示した判定基準に照らすと，
+**「分岐点に到達しているが条件不成立でスキップ」ではなく「分岐点
+そのもの（`esp_phy_enable`の2回目以降の呼出し）に到達していない」**
+という後者のケースに該当する。ASP3の`esp_phy_enable`は起動時の
+1回きりで，その後は一度も`esp_phy_disable`とペアで呼ばれることが
+ない。
+
+**(a)因果実験（WIFI_PS_MIN_MODEM）は陰性**：`WIFI_SCAN_PS_MIN_MODEM`
+ビルドフラグを有効化し（`esp_wifi_set_ps(WIFI_PS_MIN_MODEM)`に切替），
+再ビルド・実機検証したところ，**`esp_phy_enable`は依然1回しか
+呼ばれず，`phy_wakeup_init`にも到達しなかった**。すなわちnativeの
+`esp_phy_enable`/`esp_phy_disable`周期呼出しは，単純なアプリ側PS設定
+（`WIFI_PS_NONE` vs `WIFI_PS_MIN_MODEM`）の違いだけでは説明できない
+（この仮説は反証された）。なお，スキャン中（未接続状態）はDTIM同期を
+伴う本来のモデムスリープが成立する状況ではないため，これは驚くべき
+結果ではない——native側の周期呼出しの真の駆動源は，blob内部の
+スキャン専用の電源管理ロジック（チャネルホップ毎/一定間隔でのPHY
+duty-cycling），またはOSプリミティブ／タイマ連携の別の差異である
+可能性が高い。
+
+**(b) WIFI_EVENT_SCAN_DONEは正常発火：ASP3のRESCANはタイムアウト経路ではない**
+
+`wifi_event_handler`（`0x4200019a`）へのHWブレークポイントで，
+イベントID（`a2`レジスタ）の推移をOpenOCD TCLループ
+（`while`＋`catch`で個々のミスを許容）で観測した：初回ヒット
+（起動直後の過渡値，`id=0x2b`，起動シーケンス中の未確定値と推定）→
+`id=2`（`WIFI_EVENT_STA_START`，1回）→以降**`id=1`
+（`WIFI_EVENT_SCAN_DONE`）が22回連続でヒット**——ASP3のRESCANループの
+周期（実施70で確立した約2.3秒/サイクル）とほぼ一致する頻度で，
+正常なスキャン完了イベントが継続的に発火し続けている。
+
+**解釈**：ASP3のRESCANループは，タイムアウトや強制終了ではなく，
+**blobが内部的に「スキャン完了」を正しく検出してイベントを正規発火
+させる正常経路**によって駆動されている（実施62で確立した「dwellは
+受信ではなくタイマ駆動」という理解とも整合——各チャネルの滞在時間が
+経過すれば，受信の成否に関わらずスキャンは正常に完了へ進む）。
+これは**「ASP3のスキャンが正常完了パスに到達できていないから
+`fe_txrx_reset`が呼ばれない」という**症状仮説を弱める**——スキャン
+自体の完了検出は正常に機能しているのに，`esp_phy_enable`/`esp_phy_disable`
+のペア呼出しサイクル（`fe_txrx_reset`を駆動する経路）が一度も
+起きないという，**より上流の，スキャン完了検出とは別の制御パス**の
+問題であることを示唆する。
+
+**(c) MAC空間diff（ブレークポイント同期）の結果**
+
+`rx_pbus_reset`ヒット時点で同期スナップショットを6回（ASP3・native
+各2ブート）取得し比較した。
+
+- 実施70で候補に挙がった`0x600a4300`等の壁時計依存の差分は，
+  同期後の比較では再現しなかった（実施70の指摘通り時間整合の
+  問題だったことを裏付け）。
+- **新候補`0x600a4e2c`**：1ブート目でASP3のみ単調増加
+  （`0x1c2e0`→`0x1c2e8`）し native は完全一定（`0x1c4a3`）に見えた
+  が，**2ブート目のASP3では増分がほぼ消失**（`0x1c4a3`→`0x1c4a4`，
+  native既測定値とほぼ同値）——**ブート間で増分レートが大きく
+  変動しており，プラットフォーム決定論的な差ではなくブートノイズ
+  と判定，反証**（実施41/70自身が警告した「単一ブートでの比較は
+  ブート間ノイズを見落とす」罠に，本ラウンド自身も一度陥りかけ，
+  2ブート目で自己訂正した）。
+- **新候補`0x600a4e4c`**：native側は**2ブート・計16サンプル
+  （6+10）全てで完全に定数`0xfe00000`**。ASP3側は**2ブート・計12
+  サンプル全てで下位バイトが`0xa2x`〜`0xacx`の範囲でジッタする**
+  （例：boot1=`0xfe00a26,0xfe00a48,0xfe00ab7,0xfe00a62,0xfe00a51,
+  0xfe00acb`，boot2=`0xfe00a68,0xfe00ab6,0xfe00a95,0xfe00a28,
+  0xfe00ab3,0xfe00a71`）。**この意味論（何のレジスタか）は未特定**
+  だが，native側が完全に静止しASP3側が常にジッタするという非対称は
+  2ブートずつで再現しており，実施70の壁時計手法では検出できなかった
+  新しい候補である。ただし，因果的な意味づけ（RSSI/エネルギー検出値
+  なのか，較正リトライカウンタなのか等）はROM/blob逆アセンブルに
+  よる特定が必要で，本ラウンドでは未着手。
+
+### まとめ・申し送り
+
+1. **★(a)決定★：`fe_txrx_reset`は`esp_phy_enable()`の「PHY
+   wakeup（既キャリブレーション済み状態での再有効化）」経路の一部で，
+   ASP3はこの関数自体を起動後1回しか呼ばないため経路に到達しない
+   （分岐不成立ではなく，そもそもの再入が無い）。単純なPS設定変更
+   （`WIFI_PS_MIN_MODEM`）では再入は誘発されなかった（反証済み，
+   `WIFI_SCAN_PS_MIN_MODEM`ビルドフラグとして残置）。
+2. **★(b)決定★：ASP3のRESCANは`WIFI_EVENT_SCAN_DONE`の正常発火で
+   駆動されており，タイムアウト経路ではない**。これにより「症状
+   （スキャン未完走）」仮説はやや後退し，「`esp_phy_enable`の再入
+   自体が起きない」という，スキャン完了検出とは独立した制御パスの
+   構造差そのものが，新たな一次的な調査対象として浮上した。
+3. **総合判定**：完全な原因／症状の確定には至らないが，(b)により
+   「症状（スキャン未完走）」説の根拠は弱まった。次に追うべきは
+   **「nativeでesp_phy_enable/disableのペアを4回起こしている真の
+   トリガは何か」**——WIFI_PS設定ではないと分かったので，(i) coex
+   スケジューラのBLE/Wi-Fi時分割ロジック（ASP3の`coex_pre_init`
+   導入と関係する可能性），(ii) スキャン自体の内部実装（2.4GHz
+   チャネルグループ境界やactive/passiveスキャン切替のタイミングで
+   PHYを明示的にenable/disableする設計），(iii) OSプリミティブ
+   （esp_timer/タイマコールバック）による周期的な省電力チェックの
+   いずれかが候補。`esp_phy_enable_wrapper`/`esp_phy_disable_wrapper`
+   （native `scan.elf`で確認，osi_funcsの`_phy_enable`/`_phy_disable`
+   スロットに対応するラッパ）の**呼出し元**（wifi/mac blob側の
+   コード）を逆アセンブルし，何が周期的にこれらを呼んでいるかを
+   特定するのが次の直接的な一手。
+4. **(c)新候補`0x600a4e4c`**（native=定数固定，ASP3=ジッタ，各2ブート
+   で再現）は，`0x600a4300`等の旧候補と異なり時間整合済みの比較で
+   得られた分，信頼度は高いが，**意味論未特定**につき単独では
+   結論を出さない。次段でROM/blob逆アセンブルによりこのオフセットの
+   読み書き元を特定すべき。
+5. **方法論上の自己訂正（本ラウンド内）**：`0x600a4e2c`を最初
+   「ASP3だけ単調増加＝有力候補」と見た所見は，2ブート目の追加
+   検証で「ブート間で増分レートが大きく変動＝ブートノイズ」と判明し，
+   撤回した。実施70自身が確立した「≥2ブートでの再現性確認」の
+   規律を，本ラウンドでも徹底したことで誤結論を未然に防いだ。
+6. 本調査全体（実施1〜71）は依然**未解決**（0 AP）。探索空間は
+   「`fe_txrx_reset`欠落」というリードから，より具体的に「nativeで
+   4回起きる`esp_phy_enable`/`esp_phy_disable`往復サイクルの真の
+   トリガをblob側で特定する」というタスクへ絞り込まれた。
+
+### 変更ファイル
+
+- `apps/wifi_scan/wifi_scan.c`：診断用ビルドフラグ
+  `WIFI_SCAN_PS_MIN_MODEM`を追加（デフォルトOFF，既存の
+  `esp_wifi_set_ps(WIFI_PS_NONE)`を`#ifdef`で条件化し，フラグ有効時
+  `WIFI_PS_MIN_MODEM`に切替える一時的な因果実験用診断——実機検証済み
+  で陰性，恒久変更ではなく残置）。`asp3/asp3_core/`（submodule）・
+  `hal/`（submodule）はいずれも変更していない（CLAUDE.md禁則1・2を
+  遵守）。`docs/wifi-shim-c6.md`に本実施71を追記。
+
+### 検証
+
+- `cmake --build build/c6_wifi_scan_uart`：`WIFI_SCAN_PS_MIN_MODEM`
+  有効・無効の両方でエラーなくビルド成功（FLASH 12.92%/RAM 89.38%，
+  フラグの有無でサイズ変化なし）。最終的にフラグ無効（既定の
+  `WIFI_PS_NONE`）でビルドし直し，実機へ書込んで動作確認
+  （`wifi_tr_pos`=186，`int_count[1]`が5秒で`0x540`→`0x820`と
+  増加＝スキャン正常稼働）。
+- (a) native `scan.elf`の全体逆アセンブル（`objdump -d`，26万行）で
+  `fe_txrx_reset`ジャンプテーブル（`0x40001374`）参照が
+  `phy_wakeup_init_`（`0x40803e90`）内の1箇所のみであることを確認。
+  `phy_wakeup_init_`の呼出し元が`phy_wakeup_init`（`0x42088136`）
+  経由で`esp_phy_enable`（`0x40806afe`）内の1箇所のみであることを
+  確認。ASP3側対応シンボル（`nm`）：`esp_phy_enable=0x420044e2`，
+  `esp_phy_disable=0x420043b8`，`phy_wakeup_init=0x42029146`，
+  `s_is_phy_calibrated=0x4081a95c`。
+- ASP3：`esp_phy_enable`/`esp_phy_disable`/`phy_wakeup_init`の3bp
+  同時監視，60イテレーション×1.5秒，2ブートとも
+  `esp_phy_enable`=1回のみ，他2つ=0回。
+- native：同3bp監視，60イテレーション×1.5秒，
+  `esp_phy_enable`=4回，`esp_phy_disable`=4回，`phy_wakeup_init`=3回
+  （enable/disable交互パターンで確認）。
+- `WIFI_SCAN_PS_MIN_MODEM`有効ビルドをASP3実機へ書込み，同3bp監視
+  60イテレーションで`esp_phy_enable`=1回のみを確認（陰性）。
+- (b) `wifi_event_handler`（`0x4200019a`）へのbpで，OpenOCD TCL
+  `while`ループ（`catch`で個別ミス許容）により25回分のサンプルを
+  取得，`a2`（イベントID）=1（`WIFI_EVENT_SCAN_DONE`）が22回連続
+  ヒットすることを確認。
+- (c) `rx_pbus_reset`ヒット同期での`0x600a4000`-`0x600a4fff`ダンプ
+  （6回×ASP3 2ブート・native 2ブート）で全ワードdiff。`0x600a4e2c`は
+  ブート間で増分レートが変動（ブートノイズと判定，反証）。
+  `0x600a4e4c`はnative=定数`0xfe00000`（2ブート・計16サンプル），
+  ASP3=`0xfe00a2x`〜`0xfe00acx`のジッタ（2ブート・計12サンプル）で
+  再現。
+- 全JTAGは`esptool --after hard-reset`起動後，OpenOCD`init`→`halt`
+  （`reset halt`不使用）→`rbp all`/`rwp all`→`bp`設置の実施69-70
+  手順を踏襲。`adapter serial 58:E6:C5:12:D4:D0`で本ボードに固定
+  （同一USBホスト上の他のEspressifボード，特にC3ボード
+  `60:55:F9:57:C9:88`・`60:55:F9:57:C2:60`には一切触れず）。
+- ボードは実施71終了時点でASP3（`WIFI_SCAN_PS_MIN_MODEM`無効の
+  既定ビルド，esptoolハードリセットで正常起動・スキャンループ
+  稼働中）に戻して残置。
