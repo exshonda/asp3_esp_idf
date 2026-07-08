@@ -1801,6 +1801,25 @@ status0でsource5線に立つ低レベルHW要因（INTMTX/割込み配線/coex/
 計装(phy_cal_trace)は診断用途としてoption OFF既定で温存．C6 deaf-RXとの結合は
 「RF-cal共通」ではなくなった＝再評価要．
 
+#### (1)(m) (C)over-the-air確認＝storm下でASP3は電波を出していない（2026-07-09）
+
+安価な決定テスト：board B(ASP3, 通常advビルド=trace OFF, RAM92.71%)を焼き直し起動→
+**storm状態を確定**（sync marker 0x60008050=0x5ADE51C0＝on_sync実行, storm count
+0x600080B8=1.7M, PC=0x42029dd0＝bt_bb_isr_wrapper内＝storm中）→host hci0
+`bluetoothctl scan le` 50秒．
+- **★ASP3(C2:62 / "ASP3-C3-BLE")は50秒スキャンで全く見えず**（scannerは正常＝
+  NuttX C9:8A を-55で検出）．
+- ⇒ **storm下でASP3の無線はadvを出していない**．コントローラのadvスケジューラ(lld_adv)が
+  回れていない＝**storm(CPU飽和)がホストタスクだけでなくコントローラのadv送信自体も阻害**．
+  （測定artifact留意：flash失敗/ボード不良状態では偽陰性ゆえ，JTAGでstorm確定後に
+  再スキャンして確定．NuttXが同スキャンで見える＝scanner健全．）
+
+**★判定＝storm自体がブロッカー（電波不出）**：楽観シナリオ「無線は出てるがホストhangだけ」は
+**否定**．storm(BT_BB source5 spurious status0)を止めることがadv開通の前提．D-2bの本丸は
+**stormの根絶**＝相変わらず根本未特定（clock/reset/ANA/BB-mask/lpclk/RF-cal全反証）．
+次段はstorm根本＝低レベルHW（BT_BB source5がstatus0で立つINTMTX/割込み配線/coex/NMI系，
+またはadv-enableでコントローラがBBに要求し続ける下層）に回帰して再攻略．
+
 ### 変更したファイル
 
 | ファイル | 内容 |
