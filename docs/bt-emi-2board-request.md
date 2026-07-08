@@ -38,10 +38,25 @@
 現状 **未接続**。ユーザーが接続後に下表のポート番号を記入する。
 （接続を指示されたらユーザーが挿すので、判明したポートをここに追記してもらうこと。）
 
-| 役割 | ボード | ポート（/dev/ttyACM*） | 備考 |
+| 役割 | ボード | ポート（/dev/ttyACM*） | 個体識別（MAC / by-id） |
 |---|---|---|---|
-| 基準機A（real ESP-IDF + NimBLE, enable成功構成） | M5Stamp C3U Mate #1 | `______________` ←記入 | |
-| 被験機B（FMP3 + bt_smoke, emi.c:164再現） | M5Stamp C3U Mate #2 | `______________` ←記入 | |
+| 基準機A（real ESP-IDF + NimBLE, enable成功構成） | M5Stamp C3U Mate #1 | **`/dev/ttyACM3`** | ESP32-C3 rev0.3, MAC `60:55:F9:57:C9:88`（by-id: `usb-Espressif_USB_JTAG_serial_debug_unit_60:55:F9:57:C9:88-if00`） |
+| 被験機B（FMP3 + bt_smoke, emi.c:164再現） | M5Stamp C3U Mate #2 | **`/dev/ttyACM4`** | ESP32-C3 rev0.3, MAC `60:55:F9:57:C2:60`（by-id: `usb-Espressif_USB_JTAG_serial_debug_unit_60:55:F9:57:C2:60-if00`） |
+
+> ※ポート番号（ttyACM*）は接続順で変動しうる。2台とも同型のため、**MAC/by-idで個体を
+> 識別**すること（A=`60:55:F9:57:C9:88` / B=`60:55:F9:57:C2:60`）。安定運用には
+> `/dev/serial/by-id/…-if00` を `ESP32C3_PORT` に指定するのが確実。
+
+**即使えるポート指定（by-id・順序非依存で確実）:**
+```sh
+# 基準機A（real ESP-IDF + NimBLE）
+PORT_A=/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_60:55:F9:57:C9:88-if00
+# 被験機B（FMP3 + bt_smoke）
+PORT_B=/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_60:55:F9:57:C2:60-if00
+# 例: 被験機Bのビルド/書込み
+#   cmake ... -DESP32C3_BT=ON -DESP32C3_PORT=$PORT_B
+```
+（現状の実ポート: A=`/dev/ttyACM3`, B=`/dev/ttyACM4`。ttyACM0/1/2 はS3の2台＝BLE作業では使わない。）
 
 > 補足: M5Stamp C3U Mate は native USB（USB Serial/JTAG）。コンソール＝書込みと同じ
 > `/dev/ttyACM*` に 115200bps。2台同時接続時はポート番号が別々に割り当たるので、
