@@ -313,6 +313,9 @@ static const ID shim_sem_id[ESP_SHIM_NUM_SEM] = {
 	SHIM_SEM13, SHIM_SEM14, SHIM_SEM15, SHIM_SEM16,
 	SHIM_SEM17, SHIM_SEM18, SHIM_SEM19, SHIM_SEM20,
 	SHIM_SEM21, SHIM_SEM22, SHIM_SEM23, SHIM_SEM24
+#ifdef TOPPERS_ESP32C3_BT_NIMBLE
+	, SHIM_SEM25, SHIM_SEM26, SHIM_SEM27, SHIM_SEM28
+#endif
 };
 static bool_t shim_sem_used[ESP_SHIM_NUM_SEM];
 
@@ -400,6 +403,9 @@ typedef struct {
 static const ID shim_mtx_id[ESP_SHIM_NUM_MTX] = {
 	SHIM_MTX1, SHIM_MTX2, SHIM_MTX3, SHIM_MTX4,
 	SHIM_MTX5, SHIM_MTX6, SHIM_MTX7, SHIM_MTX8
+#ifdef TOPPERS_ESP32C3_BT_NIMBLE
+	, SHIM_MTX9, SHIM_MTX10, SHIM_MTX11, SHIM_MTX12
+#endif
 };
 static SHIM_MTX shim_mtx[ESP_SHIM_NUM_MTX];
 
@@ -487,6 +493,9 @@ typedef struct {
 
 static const ID shim_dtq_id[ESP_SHIM_NUM_DTQ] = {
 	SHIM_DTQ1, SHIM_DTQ2, SHIM_DTQ3, SHIM_DTQ4
+#ifdef TOPPERS_ESP32C3_BT_NIMBLE
+	, SHIM_DTQ5, SHIM_DTQ6, SHIM_DTQ7, SHIM_DTQ8
+#endif
 };
 static SHIM_QUE shim_que[ESP_SHIM_NUM_DTQ];
 
@@ -662,7 +671,11 @@ esp_shim_task_create(void (*entry)(void *), const char *name,
 					 uint32_t freertos_prio, void **task_handle)
 {
 	static const ID tskid_tbl[ESP_SHIM_NUM_TSK] = {
-		SHIM_TSK1, SHIM_TSK2, SHIM_TSK3, SHIM_TSK4, SHIM_TSK5, SHIM_TSK6
+		SHIM_TSK1, SHIM_TSK2, SHIM_TSK3, SHIM_TSK4,
+		SHIM_TSK5, SHIM_TSK6
+#ifdef TOPPERS_ESP32C3_BT_NIMBLE
+		, SHIM_TSK7, SHIM_TSK8
+#endif
 	};
 	uint_t		i;
 	SHIM_TSK	*t = NULL;

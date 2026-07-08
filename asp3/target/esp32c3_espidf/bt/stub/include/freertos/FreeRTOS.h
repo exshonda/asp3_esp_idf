@@ -17,9 +17,34 @@
 #define pdPASS		1
 #define pdFAIL		0
 
+/*  FreeRTOS キュー系の戻り値（NimBLE NPL が xQueueReceive 失敗判定に使用） */
+#ifndef errQUEUE_EMPTY
+#define errQUEUE_EMPTY	0
+#endif
+#ifndef errQUEUE_FULL
+#define errQUEUE_FULL	0
+#endif
+
 #define portMAX_DELAY		0xffffffffUL	/* ESP_SHIM_BLOCK_FOREVERと同値 */
 #define portTICK_PERIOD_MS	1		/* esp_shim側もtick=1msの前提 */
 #define configTICK_RATE_HZ	1000		/* tick=1ms（NimBLE NPLの時間換算用） */
+
+/*
+ *  NimBLE のホストタスク生成・コア親和で参照するFreeRTOS構成マクロ．
+ *  ESP-IDF既定に倣う（configMAX_PRIORITIES=25）．ESP32-C3は単一コア
+ *  （portNUM_PROCESSORS=1）．なお esp_shim_task_create は優先度を一律
+ *  （ESP_SHIM_WIFI_TASK_PRI）に写像するため，configMAX_PRIORITIES-4 の
+ *  実値はランタイム動作に影響しない（コンパイル用）．
+ */
+#ifndef configMAX_PRIORITIES
+#define configMAX_PRIORITIES	25
+#endif
+#ifndef portNUM_PROCESSORS
+#define portNUM_PROCESSORS		1
+#endif
+#ifndef pdMS_TO_TICKS
+#define pdMS_TO_TICKS(ms)	((TickType_t)(ms))	/* tick=1ms */
+#endif
 
 typedef void (*TaskFunction_t)(void *);
 

@@ -39,6 +39,16 @@ xSemaphoreCreateMutex(void)
 	return (SemaphoreHandle_t) esp_shim_sem_create(1U, 1U);
 }
 
+/*
+ *  バイナリセマフォ（NimBLE esp_nimble_hci.c が使用）．FreeRTOS の
+ *  バイナリセマフォは生成直後は空（取得前に give が必要）＝max=1／init=0．
+ */
+static inline SemaphoreHandle_t
+xSemaphoreCreateBinary(void)
+{
+	return (SemaphoreHandle_t) esp_shim_sem_create(1U, 0U);
+}
+
 static inline void
 vSemaphoreDelete(SemaphoreHandle_t xSemaphore)
 {

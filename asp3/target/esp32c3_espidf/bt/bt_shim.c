@@ -186,6 +186,33 @@ esp_timer_stop(esp_timer_handle_t timer)
  */
 
 /*
+ *  NimBLE NPL（npl_os_freertos.cのコールアウト＝esp_timer経路）が要求する
+ *  参照系API．struct esp_timerのdeadline_us/activeをそのまま返す．
+ */
+esp_err_t
+esp_timer_get_expiry_time(esp_timer_handle_t timer, uint64_t *expiry)
+{
+	struct esp_timer	*t = (struct esp_timer *) timer;
+
+	if (t == NULL || expiry == NULL) {
+		return(ESP_ERR_INVALID_ARG);
+	}
+	if (!t->active) {
+		return(ESP_ERR_INVALID_STATE);
+	}
+	*expiry = (uint64_t) t->deadline_us;
+	return(ESP_OK);
+}
+
+bool
+esp_timer_is_active(esp_timer_handle_t timer)
+{
+	struct esp_timer	*t = (struct esp_timer *) timer;
+
+	return(t != NULL && t->active);
+}
+
+/*
  *  タイマタスク：期限順の線形走査（BT_TIMER_NUM=4と小さいため
  *  ソート済みリストは使わず毎回全走査で十分）
  */

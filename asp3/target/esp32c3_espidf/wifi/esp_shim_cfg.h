@@ -7,11 +7,32 @@
 /*
  *  プールの規模
  */
+/*
+ *  プール規模．
+ *
+ *  NimBLE（Phase D-2）を積む BT ビルド（TOPPERS_ESP32C3_BT）では，NPL
+ *  （npl_os_freertos.c）が eventq→xQueueCreate（DTQ），mutex→
+ *  xSemaphoreCreateRecursiveMutex（MTX），sem→xSemaphoreCreateCounting
+ *  （SEM），ホストタスク→esp_shim_task_create（TSK）へ写像するため，
+ *  コントローラ使用分と衝突しないよう各プールを小幅に拡張する．
+ *
+ *  esp_shim は WiFi ビルドとも共有だが，拡張分は TOPPERS_ESP32C3_BT_NIMBLE
+ *  （NimBLE ホストを積むビルドのみ立つ．esp_bt.cmake で定義）限定にして，
+ *  WiFi ビルドおよび BT コントローラ単体（bt_smoke）の RAM を従来通りに保つ．
+ *  （esp_shim.cfg／esp_shim.c の配列・CRE_* と一致させること）
+ */
+#ifdef TOPPERS_ESP32C3_BT_NIMBLE
+#define ESP_SHIM_NUM_SEM    28    /* 24→28：NimBLE分+4 */
+#define ESP_SHIM_NUM_MTX    12    /* 8→12：NimBLE分+4 */
+#define ESP_SHIM_NUM_DTQ    8     /* 4→8：NimBLE eventq分+4 */
+#define ESP_SHIM_NUM_TSK    8     /* 6→8：NimBLEホストタスク分+ */
+#else
 #define ESP_SHIM_NUM_SEM    24    /* セマフォプール */
 #define ESP_SHIM_NUM_MTX    8     /* ミューテックスプール */
 #define ESP_SHIM_NUM_DTQ    4     /* キュープール（各深さESP_SHIM_DTQ_CNT） */
-#define ESP_SHIM_DTQ_CNT    256   /* WiFiドライバタスクのイベントキューは200深を要求 */
 #define ESP_SHIM_NUM_TSK    6     /* タスクプール（各スタックESP_SHIM_TSK_STKSZ） */
+#endif
+#define ESP_SHIM_DTQ_CNT    256   /* WiFiドライバタスクのイベントキューは200深を要求 */
 #define ESP_SHIM_TSK_STKSZ  8192
 
 /*
