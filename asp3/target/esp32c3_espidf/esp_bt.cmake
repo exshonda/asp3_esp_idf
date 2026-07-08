@@ -122,6 +122,18 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
 )
 
 #
+#  （D-2b(1)(j) 診断）RF/AGC cal の regi2c 系列トレース計装（既定OFF＝非回帰）．
+#  ON時のみ phy_cal_trace.c を追加し ROM phy_get_romfuncs を --wrap して
+#  g_phyFuns の regi2c エントリをトレースラッパへ差替える．詳細=docs/bt-shim.md。
+#
+option(ESP32C3_BT_PHY_CAL_TRACE "Trace RF/AGC cal regi2c via g_phyFuns swap (D-2b diag)" OFF)
+if(ESP32C3_BT_PHY_CAL_TRACE)
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES ${BT_TARGETDIR}/phy_cal_trace.c)
+    list(APPEND ASP3_LINK_OPTIONS -Wl,--wrap=phy_get_romfuncs)
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_BT_PHY_CAL_TRACE)
+endif()
+
+#
 #  ------------------------------------------------------------------
 #  3. リンクライブラリパス・ライブラリ
 #  ------------------------------------------------------------------
