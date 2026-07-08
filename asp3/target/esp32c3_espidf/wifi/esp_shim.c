@@ -996,16 +996,31 @@ shim_int_dispatch(int intno)
 {
 	esp_shim_int_count[intno]++;
 	if (esp_shim_isr_storm_probe != 0U && intno == 1) {
-		/*  STORE4(0xB8)=ストーム累積回数．STORE6(0xC0)=source番号は
-		    bt_shim esp_intr_allocが一度書く（ROM生存reg）．STORE7(0xC4)=
-		    blob ISR実行後のINTMTX EIP_STATUS（線1のclear残存確認）．
-		    ※0xBCはROMがusb-reset時に上書きするため使用不可．  */
+		/*  （D-2b(1)(a) BBステータス計装）BT_BB(source5)割込みの原因を判定
+		    する blob ISR（r_bt_bb_isr_hack）が読むBB割込みステータス
+		    レジスタ 0x6001108c を，ISR実行**前**（再アサートされた生の原因）に
+		    読んでRTCへ記録．どのビットが立ち続けるか＝ストームの原因．
+		      STORE4(0xB8)=ストーム累積回数
+		      STORE6(0xC0)=BB status 0x6001108c（ISR入口の生値）
+		      STORE7(0xC4)=これまで観測した全statusのsticky OR（取りこぼし防止）
+		    ※0xBC(STORE5)はROMがusb-reset時に上書きするため使用不可．  */
+		/*  ストームは99.997%がBB status(0x6001108c)=0のspurious＝真の源は
+		    blobの0x6001108cハンドラ外の低レベルBB線．blob ISR実行**後**に
+		    INTMTX EIP_STATUS(0x600C2110)のbit1(線1)が残るか＝BT_BB線が
+		    ack不能で立ちっぱなしか(=ハード/クロック要因)を判定する．
+		      0xB8=総ディスパッチ数
+		      0xC0=blob ISR実行後EIP_STATUSのsticky OR（bit1残存＝ack不能）
+		      0xC4=入口BB status 0x6001108c のsticky OR（原因bit）  */
+		uint32_t bbst = sil_rew_mem((const uint32_t *) 0x6001108CUL);
 		sil_wrw_mem((uint32_t *) 0x600080B8UL, esp_shim_int_count[1]);
+		sil_wrw_mem((uint32_t *) 0x600080C4UL,
+					sil_rew_mem((const uint32_t *) 0x600080C4UL) | bbst);
 		if (shim_isr_tbl[intno].fn != NULL) {
 			shim_isr_tbl[intno].fn(shim_isr_tbl[intno].arg);
 		}
-		sil_wrw_mem((uint32_t *) 0x600080C4UL,
-					sil_rew_mem((const uint32_t *) 0x600C2110UL));
+		sil_wrw_mem((uint32_t *) 0x600080C0UL,
+					sil_rew_mem((const uint32_t *) 0x600080C0UL)
+					| sil_rew_mem((const uint32_t *) 0x600C2110UL));
 		return;
 	}
 	if (shim_isr_tbl[intno].fn != NULL) {

@@ -417,11 +417,12 @@ esp_intr_alloc(int source, int flags, intr_handler_t handler, void *arg,
 	(void) flags;
 	bt_intr_handle.source = source;
 
-	/*  （D-2b(1) ISRストーム診断）blobが登録するBT割込みsource番号を
-	    RTC STORE6(0x600080C0, ROM生存reg)へ記録．esptool read-memで事後
-	    読み＝ストームsourceの特定（例: 8=RWBLE, 5=BT_BB, 7=RWBT）．
-	    ※0xBCはROMがusb-reset時に上書きするため不可．診断のみ・無害．  */
-	sil_wrw_mem((void *) 0x600080C0UL, (uint32_t) source);
+	/*  （D-2b(1) ISRストーム診断）source番号は実測で5(BT_BB)確定済み．
+	    (a)フェーズではshim_int_dispatchがBB status 0x6001108c を集計．
+	    0xC0=status非0のディスパッチ数, 0xC4=status sticky OR．蓄積reg
+	    0xC0/0xC4を0初期化（前回boot残値の混入防止）．診断のみ・無害．  */
+	sil_wrw_mem((void *) 0x600080C0UL, 0U);
+	sil_wrw_mem((void *) 0x600080C4UL, 0U);
 
 	sil_wrw_mem((void *)(uintptr_t)(BT_INTMTX_BASE_ADDR + (uint32_t) source * 4U),
 				BT_INTR_CPU_LINE);
