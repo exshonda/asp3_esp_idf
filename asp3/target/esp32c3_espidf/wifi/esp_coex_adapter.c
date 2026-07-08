@@ -246,13 +246,25 @@ esp_shim_coex_adapter_register(void)
 	 *  呼ぶ必要がある．
 	 */
 	esp_shim_coex_pre_init_entered = 1U;
+#if defined(TOPPERS_ESP32C6_WIFI)
 	/*
-	 *  実施54続き：coex_pre_init()がregi2c block=0x63（実施53で
-	 *  wait_i2c_sdm_stableが待つブロック，実施44でも既出）に
+	 *  実施54続き（C6専用診断）：coex_pre_init()がregi2c block=0x63
+	 *  （実施53でwait_i2c_sdm_stableが待つブロック，実施44でも既出）に
 	 *  何らかの影響を与えていないか，直前直後でROM常駐i2c_read
-	 *  （固定ROMテーブルWIFI_ROM_PHYFUNS_TABLE_ADDR，wifi_trace.cと
-	 *  同一の手法．blob初期化を待たずROM起動直後から有効）で
-	 *  直接読み比べる．
+	 *  （固定ROMテーブルWIFI_ROM_PHYFUNS_TABLE_ADDR=0x4087f954，
+	 *  wifi_trace.cと同一の手法．blob初期化を待たずROM起動直後から
+	 *  有効）で直接読み比べる．
+	 *
+	 *  ★このアドレスはC6のROM PHYFUNS表専用（C6は0x4087xxxx帯にROM
+	 *  ミラーを持つ）．C3の有効アドレス空間（DROM 0x3C000000-0x3C800000/
+	 *  IROM 0x42000000-0x42800000/ROM~0x40000000台）には該当せず，本
+	 *  ファイルはBT(`ESP32C3_BT`)/WiFi(`ESP32C3_WIFI`)双方のC3ビルドで
+	 *  共有されるため，従来は`#ifdef`無しでC3ビルドにもこの読み出しが
+	 *  混入していた（tbl[20]が指すのはC3では未定義領域の"たまたまの値"
+	 *  ＝間欠的NULL/非NULLの真因．非NULL時はwild pointer callとなり得る
+	 *  危険な潜在バグ）．D-2b(1)coex調査ラウンドで発見．C6専用診断ゆえ
+	 *  `TOPPERS_ESP32C6_WIFI`でガードしC3ビルドから完全除外（C6の
+	 *  従来動作は不変）．
 	 */
 	{
 		typedef uint8_t (*regi2c_read_fn_t)(uint8_t, uint8_t, uint8_t);
@@ -263,11 +275,8 @@ esp_shim_coex_adapter_register(void)
 		/*
 		 *  read_fn（ROM PHYFUNS表エントリtbl[20]）はブート直後は間欠的に
 		 *  NULLのことがあり，そのまま呼ぶとpc=0のIllegal instructionで
-		 *  クラッシュする（BTのbt_smoke経由で顕在化＝本セッションで
-		 *  観測したboot varianceの真因．docs/bt-shim.md参照）．診断値
-		 *  取得は非機能なのでNULL時はスキップする（read_fnが有効な
-		 *  場合の従来動作は不変＝WiFi C6診断への影響なし）．coex_pre_init
-		 *  本体は常に実行する．
+		 *  クラッシュすることがあった．診断値取得は非機能なのでNULL時は
+		 *  スキップする．coex_pre_init本体は常に実行する．
 		 */
 		if (read_fn != NULL) {
 			esp_shim_coex_pre_regi2c_63 = read_fn(0x63U, 1U, 0U);
@@ -277,6 +286,9 @@ esp_shim_coex_adapter_register(void)
 			esp_shim_coex_post_regi2c_63 = read_fn(0x63U, 1U, 0U);
 		}
 	}
+#else /* !TOPPERS_ESP32C6_WIFI */
+	pre_ret = coex_pre_init();
+#endif /* !TOPPERS_ESP32C6_WIFI */
 	esp_shim_coex_pre_init_done = 1U;
 	esp_shim_coex_pre_init_ret = (int32_t)pre_ret;
 	if (pre_ret != 0) {

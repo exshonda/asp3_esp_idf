@@ -1820,10 +1820,63 @@ status0でsource5線に立つ低レベルHW要因（INTMTX/割込み配線/coex/
 次段はstorm根本＝低レベルHW（BT_BB source5がstatus0で立つINTMTX/割込み配線/coex/NMI系，
 またはadv-enableでコントローラがBBに要求し続ける下層）に回帰して再攻略．
 
+#### (1)(n) ★最後の焦点ショット：coex角度＝反証．D-2b保留を最終確定（2026-07-09）
+
+**背景**：storm根本はclock/reset/ANA/BB-mask/lpclk/RF-cal＝全反証済み．C6-WiFi
+66-round調査の根本原因（`986ff62`＝`coexist_funcs`no-op化→coex PTI=0→MAC割込み
+ブロック）と同型がC3-BLEのBT単体ビルドにもないか，という最後の未検証角度．
+
+**検証1：coexist_funcs no-op化の有無**（board B, ASP3, JTAG live-read）：
+- `esp_shim_coex_pre_init_ret=0, _entered=1, _done=1` ＝ **`coex_pre_init()`は
+  正常に呼ばれ成功で返ってきている**（C6のno-op化パターンとは異なる）．
+- `coexist_funcs = 0x3fc81258` ＝ **ダミーno-opテーブル(`dummy_coexist_table`,
+  別アドレス)ではなく，coex_pre_init()が設定した実テーブル**．
+- ⇒ **C6型の「coexist_funcs no-op化」バグはC3-BLEには存在しない**
+  （このファイルは既にC6向けfix=`986ff62`/`de5cb2e`を含む共有実装で，
+  C3側でも同じ経路で正しく初期化されている）．
+- **C3にはC6の`0x600a4dd8`相当のPTI MMIOレジスタが存在しない**（C3は旧世代
+  coexアーキテクチャ＝closed-source `libcoexist.a`が内部管理，公開ヘッダに
+  PTIレジスタ定義なし）．直接のレジスタ比較は対象が無く適用不可．
+
+**★副次的発見（バグ・修正済み，storm原因ではないが是正すべき潜在欠陷）**：
+`esp_coex_adapter.c`は**C3(BT/WiFi)とC6(WiFi)で共有**されるファイルだが，
+実施53/54由来のC6専用診断コードが，**C6のROM PHYFUNS表アドレス
+`0x4087f954`をハードコードしたまま無条件でC3ビルドにもコンパイルされていた**．
+C3の有効アドレス空間（DROM 0x3C000000-0x3C800000／IROM 0x42000000-0x42800000／
+ROM~0x40000000台）には該当せず，`tbl[20]`の読み出しは**未定義領域の値**
+（間欠的NULL/非NULLの真因．非NULL時はwild pointer callの危険）．実機JTAG読み
+（board B）ではこの回で`entered=1,done=1,ret=0`かつ診断値レジスタ
+`pre/post_regi2c_63=0xFFFFFFFF`（初期値のまま＝read_fnがNULLでスキップされ
+今回は実害なし）を確認．**修正**：`#if defined(TOPPERS_ESP32C6_WIFI)`で
+この診断ブロックをガードしC3ビルドから完全除外（C6の動作は不変）．
+`asp3/target/esp32c3_espidf/wifi/esp_coex_adapter.c`．
+非回帰：ble_host_smoke/bt_smoke_hw/wifi_dhcp_hw/**c6_wifi_scan**の4ターゲット
+全て0-errorビルド確認（C6側は診断シンボル`esp_shim_coex_pre_regi2c_63`が
+リンクに残存＝ガード方向が正しいことも確認）．
+
+**修正後の実機再検証**：board Bへ再flash・起動．`esp_shim_coex_pre_init_ret=0`・
+`coexist_funcs=0x3fc81258`（修正前と同一＝coex経路は無変更）・
+sync marker=0x5ADE51C0（adv開始）・**storm count継続進行**（0x0041734e，
+修正なし時と同様のオーダー）＝**修正はcoex経路に無害だがstormは止まらず**．
+
+**★★判定＝coex反証．D-2b保留を最終確定**：coexist_funcs no-op化は再現せず，
+PTI相当レジスタはC3に存在せず比較不可，副次的に発見したwild-pointer潜在バグは
+修正したがstorm自体には無関係（今回は不発だった）．storm(BT_BB source5が
+status0でspurious発火し続ける)の根本は，本セッションで踏んだ全ての角度
+（クロック/リセット/BB mask/ANA/lpclk/RF-cal/ISR-EOI/割込み優先度/coex）を
+反証してなお**未特定**．**D-2b（connectable advertising）は深い低レベルHW/
+blob層のブロッカーとして保留を最終確定**する．D-1（controller+VHCI）・
+D-2a（NimBLE host sync）は達成済みで確定．次のセッションで再開する場合は
+INTMTXレベルの割込み配線精査，またはblob/ROM内部のsource5アサート条件の
+より深い計装（本セッションの計装資産＝`phy_cal_trace.c`パターンを転用可）
+から着手するのが妥当．C6 deaf-RXとの統合仮説（RF-cal共通）は反証済みにつき
+解消——両者は**別の未解決根本**として個別に扱う．
+
 ### 変更したファイル
 
 | ファイル | 内容 |
 |---|---|
+| `asp3/target/esp32c3_espidf/wifi/esp_coex_adapter.c` | （バグ修正・keeper）C6専用診断（ROM PHYFUNS表`0x4087f954`直読み）が無guardでC3ビルドにも混入していたのを`#if defined(TOPPERS_ESP32C6_WIFI)`でガードしC3から除外．C6の動作は不変．storm原因ではないが是正すべき潜在的wild-pointerバグ．D-2b(1)(n)coex調査で発見 |
 | `asp3/target/esp32c3_espidf/bt/phy_cal_trace.c` | （新規・診断）RF-cal regi2c＋SAR測定値＋caller PCトレース．`--wrap phy_get_romfuncs`でg_phyFuns枠差替え．option `ESP32C3_BT_PHY_CAL_TRACE`(既定OFF)時のみ |
 | `asp3/target/esp32c3_espidf/esp_bt.cmake` | option `ESP32C3_BT_PHY_CAL_TRACE`追加（ON時 phy_cal_trace.c＋`-Wl,--wrap=phy_get_romfuncs`） |
 | `asp3/target/esp32c3_espidf/target.cmake` | `wifi/esp_shim.*`を`ESP32C3_WIFI OR ESP32C3_BT`の共有ブロックへ分離。`ESP32C3_BT`オプション追加（`ESP32C3_WIFI`との同時ON禁止） |
