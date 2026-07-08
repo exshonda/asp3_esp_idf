@@ -23,11 +23,13 @@
 #define PCT_WRITEREG       0x400391e6UL	/* rom_i2c_writeReg(blk,host,reg,data)    */
 #define PCT_READREG_MASK   0x400391f4UL	/* rom_i2c_readReg_Mask(blk,host,reg,m,l) */
 #define PCT_WRITEREG_MASK  0x4003922aUL	/* rom_i2c_writeReg_Mask(blk,host,reg,m,l,d) */
+#define PCT_SARREAD        0x4003a2ccUL	/* g_phyFuns[82] SAR読み(buf), 測定値=*(u16*)(buf+2) */
 
 typedef int  (*pct_read_t)(int blk, int host, int reg);
 typedef void (*pct_write_t)(int blk, int host, int reg, int data);
 typedef int  (*pct_readm_t)(int blk, int host, int reg, int msb, int lsb);
 typedef void (*pct_writem_t)(int blk, int host, int reg, int msb, int lsb, int data);
+typedef void (*pct_sarread_t)(void *buf);
 
 #define PCT_N	1200	/* 線形バッファ長（cal先頭から。溢れは pct_count で判る） */
 
@@ -43,6 +45,7 @@ static pct_read_t	pct_orig_read;
 static pct_write_t	pct_orig_write;
 static pct_readm_t	pct_orig_readm;
 static pct_writem_t	pct_orig_writem;
+static pct_sarread_t	pct_orig_sarread;
 
 static void
 pct_log(uint32_t op, uint32_t blk, uint32_t reg,
@@ -53,7 +56,7 @@ pct_log(uint32_t op, uint32_t blk, uint32_t reg,
 		pct_buf[i * 3] = (op << 24) | ((blk & 0xffU) << 16)
 					   | ((reg & 0xffU) << 8)
 					   | (((msb & 0xfU) << 4) | (lsb & 0xfU));
-		pct_buf[i * 3 + 1] = ((host & 0xffU) << 16) | (val & 0xffU);
+		pct_buf[i * 3 + 1] = ((host & 0xffU) << 16) | (val & 0xffffU);
 		pct_buf[i * 3 + 2] = caller;
 	}
 }
@@ -89,6 +92,15 @@ pct_wrap_writem(int blk, int host, int reg, int msb, int lsb, int data)
 			(uint32_t) host, (uint32_t) data, (uint32_t) __builtin_return_address(0));
 }
 
+static void
+pct_wrap_sarread(void *buf)
+{
+	pct_orig_sarread(buf);
+	/*  測定値＝*(u16*)(buf+2)（get_tone_sar_dout の lhu 2(sp) と同じ）  */
+	uint32_t v = *(volatile uint16_t *)((char *) buf + 2);
+	pct_log(4U, 0U, 0U, 0U, 0U, 0U, v, (uint32_t) __builtin_return_address(0));
+}
+
 extern void **__real_phy_get_romfuncs(void);
 
 void **
@@ -116,6 +128,10 @@ __wrap_phy_get_romfuncs(void)
 		} else if (e == PCT_WRITEREG_MASK) {
 			pct_orig_writem = (pct_writem_t) tbl[i];
 			tbl[i] = (void *) pct_wrap_writem;
+			pct_swapped++;
+		} else if (e == PCT_SARREAD) {
+			pct_orig_sarread = (pct_sarread_t) tbl[i];
+			tbl[i] = (void *) pct_wrap_sarread;
 			pct_swapped++;
 		}
 	}

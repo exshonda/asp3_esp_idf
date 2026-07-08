@@ -1772,11 +1772,40 @@ get_tone_sar_dout戻り値＝測定値そのものをlog）→測定を成立さ
 SAR clock/mode）を特定→target補完でASP3測定値がNuttX並みに→0x6b収束点回復→
 storm停止・adv開通試行．
 
+#### (1)(l) ★★重要な反証：RF-cal測定は正常＝縮退説は誤り，RF-calは storm 原因でない（2026-07-09）
+
+`phy_cal_trace.c`をさらに拡張し**測定値そのもの**（`get_tone_sar_dout`が読むSAR ADC出力＝
+g_phyFuns[82]=0x4003a2cc をwrap，測定値=*(u16*)(buf+2)）をlog（op=4）．board B(ASP3)で
+rfcal_txcapの0x6b sweep中の cap→SAR測定 を捕捉（swapped=5, SAR events 347件）．
+
+- **★測定は正常＝山なり（responsive）**：reg1 sweep 0xf→0x8 で SAR=1565→1595→1641→1661→
+  1692→1702→**1704(peak@0x9)**→1678（明確な山なり）．reg2も同様に山なり．**TXトーン電力
+  測定(FE pwdet→SAR)はASP3で正しく応答しcalは極大を探索・収束している＝測定は縮退して
+  いない**．⇒ **(1)(i)-(k)の「ASP3のcal測定が縮退」仮説は反証**．
+- **0x6b→storm 因果テスト（live-poke）＝支持されず**：storm中ASP3へ 0x6b[1]=0x1e/0x6b[2]=0x5f
+  （NuttX値）をROM writeRegでpoke→resume．結果，chipがreset（storm count 0x03946a7f→
+  reboot後0x00069a13）し**storm再発**（~288k/s）．poke自体がRF擾乱でresetを誘発＝やや
+  inconclusiveだが，**0x6b trimをNuttX値にしてもstormは止まらない**．
+
+**★★判定＝RF-cal線は反証・storm根本ではない（大きな軌道修正）**：ASP3のRF-cal(TX-tone
+電力測定→cap探索)は**正常動作**．ASP3 0x6b[1]=0x17 vs NuttX 0x1e の差は**良性のcal変動**
+（測定は山なりで健全，多パス探索の着地＋noise）であり，**stormの原因ではない**．
+(1)(a)以降「regi2c trim差＝storm根本」と相関から仮定し3ラウンド深掘りしたが，
+**測定が正常＝相関≠因果でRF-calは無罪**．storm(BT_BB source5 spurious, status0)の
+真因は**依然未特定**（clock/reset/ANA/BB-mask/lpclk/RF-cal＝全て反証済み）．
+
+**次段の再考が必要**：RF-cal層は袋小路と判明．storm根本は別系統＝(A)BT_BB割込みが
+status0でsource5線に立つ低レベルHW要因（INTMTX/割込み配線/coex/NMI系）を再検討，
+(B)NuttX(adv可)とASP3(storm)でadv-enable(0x200a)**直後**のBT_BB/modem状態をより広く差分，
+(C)そもそもstormが致命かを再評価（storm下でもadvパケットが少しでも出るか host hci0で確認）．
+計装(phy_cal_trace)は診断用途としてoption OFF既定で温存．C6 deaf-RXとの結合は
+「RF-cal共通」ではなくなった＝再評価要．
+
 ### 変更したファイル
 
 | ファイル | 内容 |
 |---|---|
-| `asp3/target/esp32c3_espidf/bt/phy_cal_trace.c` | （新規・診断）RF-cal regi2cトレース＋caller PC記録．`--wrap phy_get_romfuncs`でg_phyFuns regi2c枠差替え．option `ESP32C3_BT_PHY_CAL_TRACE`(既定OFF)時のみ |
+| `asp3/target/esp32c3_espidf/bt/phy_cal_trace.c` | （新規・診断）RF-cal regi2c＋SAR測定値＋caller PCトレース．`--wrap phy_get_romfuncs`でg_phyFuns枠差替え．option `ESP32C3_BT_PHY_CAL_TRACE`(既定OFF)時のみ |
 | `asp3/target/esp32c3_espidf/esp_bt.cmake` | option `ESP32C3_BT_PHY_CAL_TRACE`追加（ON時 phy_cal_trace.c＋`-Wl,--wrap=phy_get_romfuncs`） |
 | `asp3/target/esp32c3_espidf/target.cmake` | `wifi/esp_shim.*`を`ESP32C3_WIFI OR ESP32C3_BT`の共有ブロックへ分離。`ESP32C3_BT`オプション追加（`ESP32C3_WIFI`との同時ON禁止） |
 | `asp3/target/esp32c3_espidf/wifi/esp_shim.c` | `psa/crypto.h`依存を`TOPPERS_ESP32C3_WIFI`ガードで除外（BT単体ビルドではmbedtls非リンクのため） |
