@@ -41,6 +41,52 @@
 
 /*
  *  ------------------------------------------------------------------
+ *  BLEベースバンド(BB)クロックの有効化（emi.c:164の真因対策）
+ *  ------------------------------------------------------------------
+ *  実ESP-IDF/NuttXはブート時に esp_perip_clk_init()（esp_system/port/soc/
+ *  esp32c3/clk.c）で SET_PERI_REG_MASK(SYSTEM_WIFI_CLK_EN_REG,
+ *  SYSTEM_WIFI_CLK_EN) を実行し，WiFi/BT共有ペリフェラルの各クロックを
+ *  有効化する。ASP3のDirect Bootはこの系初期化を通らないため，
+ *  SYSTEM_WIFI_CLK_EN のうちBLEベースバンド(0x60031xxx MMIO)の機能
+ *  クロックビット（bit6,11,12,16,17＝0x00031840）が未設定のままとなる。
+ *  その結果，esp_bt_controller_init() 内でコントローラタスクが走らせる
+ *  ROM関数 r_emi_em_base_init() のBBレジスタ書込み(0x60031204+)が
+ *  バス側でドロップされ，EM基底レジスタが0のままとなって
+ *  「BLE assert emi.c 164」に至る。
+ *
+ *  2ボードJTAG差分（基準機A=NuttX同一blob vs 被験機B=ASP3）で確定：
+ *  em_base_initストア停止時に，Aは0x60031204が書込み可・Bは不可，
+ *  唯一の差はSYSCON WIFI_CLK_EN(0x60026014)（A=0xff87f850 / B=0xff84e030）。
+ *  Bで本マスクをSETすると0x60031204が書込み可へ変わることを実機確認。
+ *  詳細は docs/bt-shim.md。
+ *
+ *  esp_bt_controller_init() より前に呼ぶこと（コントローラタスク生成前に
+ *  BBクロックを立てる）。レジスタ直叩きはbt.cのINTMTX処理と同様に
+ *  ASP3のsil_*で行う（hal submoduleは編集しない方針）。
+ */
+#define BT_SYSCON_WIFI_CLK_EN_REG	0x60026014U	/* SYSCON_WIFI_CLK_EN_REG */
+/*
+ *  必要最小のBLEベースバンド機能クロックビットのみを立てる．
+ *  0x00031840＝2ボード差分で確定したA(NuttX,成功)とB(ASP3,失敗)の
+ *  CLK_EN差分ビット（bit6,11,12,16,17）．SYSTEM_WIFI_CLK_EN全体
+ *  （0x00FB9FCF）をORするとWiFi/SDIO等の無関係クロックまで有効化され
+ *  （CLK_EN=0xffffffff），NuttXの正規値0xff87f850から乖離してphy_init
+ *  以降で不安定になるため，差分ビットのみに絞る．
+ */
+#define BT_BB_CLK_EN_MASK			0x00031840U
+
+void
+esp_shim_bt_clock_init(void)
+{
+	uint32_t	v;
+
+	v = sil_rew_mem((void *)(uintptr_t) BT_SYSCON_WIFI_CLK_EN_REG);
+	sil_wrw_mem((void *)(uintptr_t) BT_SYSCON_WIFI_CLK_EN_REG,
+				v | BT_BB_CLK_EN_MASK);
+}
+
+/*
+ *  ------------------------------------------------------------------
  *  esp_timer_*（BTコントローラのモデムスリープ用タイマ．本ビルドは
  *  sleep_mode=0固定のため実行時には未使用の見込みだが，リンクは必要
  *  ＝esp_shim.cのets_timer機構とは別の小さな専用実装とする）

@@ -260,9 +260,22 @@ esp_shim_coex_adapter_register(void)
 		regi2c_read_fn_t	read_fn =
 			(regi2c_read_fn_t)(uintptr_t)tbl[20U];
 
-		esp_shim_coex_pre_regi2c_63 = read_fn(0x63U, 1U, 0U);
+		/*
+		 *  read_fn（ROM PHYFUNS表エントリtbl[20]）はブート直後は間欠的に
+		 *  NULLのことがあり，そのまま呼ぶとpc=0のIllegal instructionで
+		 *  クラッシュする（BTのbt_smoke経由で顕在化＝本セッションで
+		 *  観測したboot varianceの真因．docs/bt-shim.md参照）．診断値
+		 *  取得は非機能なのでNULL時はスキップする（read_fnが有効な
+		 *  場合の従来動作は不変＝WiFi C6診断への影響なし）．coex_pre_init
+		 *  本体は常に実行する．
+		 */
+		if (read_fn != NULL) {
+			esp_shim_coex_pre_regi2c_63 = read_fn(0x63U, 1U, 0U);
+		}
 		pre_ret = coex_pre_init();
-		esp_shim_coex_post_regi2c_63 = read_fn(0x63U, 1U, 0U);
+		if (read_fn != NULL) {
+			esp_shim_coex_post_regi2c_63 = read_fn(0x63U, 1U, 0U);
+		}
 	}
 	esp_shim_coex_pre_init_done = 1U;
 	esp_shim_coex_pre_init_ret = (int32_t)pre_ret;

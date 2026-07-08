@@ -20,6 +20,12 @@
 #include "esp_bt.h"
 #include "esp_shim.h"
 
+/*
+ *  BLEベースバンドのクロックを立てる（emi.c:164対策．bt_shim.c）．
+ *  esp_bt_controller_init() より前に呼ぶ必要がある．詳細はdocs/bt-shim.md．
+ */
+extern void esp_shim_bt_clock_init(void);
+
 static volatile bool_t	hci_reset_done;
 
 static void
@@ -68,6 +74,16 @@ main_task(EXINF exinf)
 
 	esp_shim_initialize();
 	esp_shim_coex_adapter_register();
+
+	/*
+	 *  emi.c:164対策：BLEベースバンド(BB)のクロックを有効化する．
+	 *  実ESP-IDF/NuttXがブート時のesp_perip_clk_init()で立てる
+	 *  SYSTEM_WIFI_CLK_EN を，ASP3 Direct Bootは通らないため，
+	 *  コントローラ起動前にここで補完する．これが無いと
+	 *  esp_bt_controller_init()中のr_emi_em_base_initのBB書込みが落ち，
+	 *  「BLE assert emi.c 164」で停止する（2ボードJTAG差分で確定）．
+	 */
+	esp_shim_bt_clock_init();
 
 	syslog(LOG_NOTICE, "bt_smoke: esp_bt_controller_init");
 
@@ -147,6 +163,18 @@ main_task(EXINF exinf)
 		syslog(LOG_ERROR, "bt_smoke: esp_bt_controller_init -> %d", (int_t) err);
 		return;
 	}
+
+#ifdef BT_PROBE_STOP_AFTER_INIT
+	/*
+	 *  emi.c:164調査用プローブ：init成功直後（enable前）で無限停止する．
+	 *  JTAG halt時にBBのEMベースレジスタ（0x60031210=region3）を採取して
+	 *  「init時に書かれているか」を判定する．通常ビルドでは未定義．
+	 */
+	syslog(LOG_NOTICE, "bt_smoke: PROBE stop after init (0x60031210 ready)");
+	for (;;) {
+		(void) tslp_tsk(1000000);
+	}
+#endif
 
 	syslog(LOG_NOTICE, "bt_smoke: esp_bt_controller_enable(BLE)");
 	err = esp_bt_controller_enable(ESP_BT_MODE_BLE);
