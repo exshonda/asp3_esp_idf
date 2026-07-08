@@ -61,6 +61,14 @@
 #define CONFIG_BT_NIMBLE_HCI_EVT_HI_BUF_COUNT 30
 #define CONFIG_BT_NIMBLE_HCI_EVT_LO_BUF_COUNT 8
 #define CONFIG_BT_NIMBLE_GATT_MAX_PROCS 4
+/*
+ *  D-2b：接続可能アドバタイズ（ペリフェラル）．デバイス名は
+ *  ble_gap_adv_set_fields のadv dataで広告するため，GATTのGAPサービス
+ *  （ble_svc_gap）は必須ではない．GATTサーバ有効化（GATT_SERVER=1）は
+ *  実機で adv 経路の NULL 関数ポインタ呼出し／ブロッキング（要調査）を
+ *  誘発したため，まず最小の adv 単体を通す段階では OFF のままとする．
+ *  （GATTサービス立ち上げは追調査．docs/bt-shim.md「Phase D-2b」）．
+ */
 #define CONFIG_BT_NIMBLE_RPA_TIMEOUT 900
 #define CONFIG_BT_NIMBLE_HS_STOP_TIMEOUT_MS 2000
 #define CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT 1

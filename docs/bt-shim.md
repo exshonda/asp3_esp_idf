@@ -1086,6 +1086,65 @@ BLE対応リスクを先取りするための依頼だったため）。
      `esp_shim_enter/exit_critical`（本docのPhase D-1修正節）。**構造は流用元と
      して有用だが，per-core化とspinlock追加を必ず行うこと。**
 
+## Phase D-2b：GAP接続可能アドバタイズ（進行中・ブロッカー特定）
+
+目標＝D-2aのNimBLE host（sync到達）の上にGAPを立て，接続可能な
+アドバタイズを開始しデバイスが外部から見える状態まで（bleprph相当）。
+
+### 実装（アプリ）
+`apps/ble_host_smoke/ble_host_smoke.c`を拡張：`on_sync`（sync完了後）で
+`start_advertising()`を呼ぶ。`start_advertising`＝`ble_hs_id_infer_auto`→
+`ble_gap_adv_set_fields`（flags＋完全ローカル名`ASP3-C3-BLE`）→
+`ble_gap_adv_start`（`conn_mode=UND`/`disc_mode=GEN`, duration=`BLE_HS_FOREVER`,
+`gap_event_cb`）。`gap_event_cb`はCONNECT/DISCONNECT/ADV_COMPLETEを処理
+（切断時再アドバタイズ）。観測用グローバル：`g_adv_rc`（adv_start戻り値，
+init=-1）／`g_adv_active`／`g_gap_conn_count`／`g_gap_event_count`＋RTC
+マーカ（adv=`0x60008054`, connect=`0x60008058`）。GAP/GATTソース
+（`ble_gap.c`/`ble_gatts.c`/`ble_svc_gap.c`/`ble_svc_gatt.c`等）はD-2aで
+既にコンパイル済み＝`esp_bt.cmake`変更不要。
+
+### RAM実績
+アドバタイズ広告名はadvデータで送るため，接続可能advには
+GATT GAPサービス（`ble_svc_gap_init`）は必須でない．最小adv構成の
+RAM＝**92.38%（302700B/320KB，D-2aから±0）**。
+
+### ★実機ブロッカー（JTAG bare-run＋attach，`ESP32C3_QEMU=OFF`）
+- **sync到達（`g_ble_sync_done=1`）・startup HCI全完了・adv HCIコマンドの
+  `LE Set Adv Params`(0x2006)/`LE Set Adv Data`(0x2008)も完了**まで正常
+  （`ble_hs_hci_cmd_tx` 0x4200984e にopcodeを積むトレースで確認：0x0c03 Reset
+  →…→0x1009 Read BD Addr→0x2006/0x2008→0x200a）。
+- **ブロッカー＝`LE Set Advertising Enable`(0x200a)のcommand-completeが
+  返らず，host taskが`ble_hs_hci_cmd_tx`のackセマフォ待ちでブロック**．
+  ＝`ble_gap_adv_start`(0x420075b6)が戻らず`g_adv_rc`は-1のまま／
+  `g_adv_active`=0．CPUはdispatcher/割込み処理で**生存**（クラッシュ・
+  リセットではない）．0x2006/0x2008は完了したのに0x200aだけ未完＝
+  **実際のRF送信を開始するSet Adv Enableで詰まる**＝D-1/D-2aで見た
+  「RF活動開始で不調」と同系の可能性（コントローラ側でadv-enableの
+  complete生成orイベント配送が破綻）．外部スキャナ未確認＝コントローラが
+  実際にadv TXしているか（＝hostのack待ちだけの問題か，adv自体未起動か）は
+  未判定．
+- **別事象：GATTサーバ有効化（`CONFIG_BT_NIMBLE_GATT_SERVER=1`＋
+  `GAP_SERVICE=1`＋`ble_svc_gap_init/gatt_init`呼出し）を入れると，adv経路で
+  NULL関数ポインタ呼出し（`mcause=2` Illegal Instruction, `mepc=0`）→
+  `_kernel_default_exc_handler`→`ext_ker`→`_kernel_target_exit`spinで
+  カーネル終了（sync後）**．NULL呼出しは`ble_gap_adv_start.part.0`の直接
+  npl_funcs呼出し（offset132/136＝いずれも非NULL）より深く，未特定．
+  GATTサーバはadv接続可視には必須でないため一旦OFFに戻し（RAMも復帰），
+  GATTサービス立ち上げは追調査とした．
+- 非回帰：`bt_smoke_hw`（BT単体）・`wifi_dhcp_hw`（WiFi）とも0エラー再ビルド
+  （D-2b設定は`ESP32C3_BT_NIMBLE`/`APPLNAME==ble_host_smoke`ゲートで両者に
+  影響しない）。
+
+### 次段（申し送り＝判断待ち）
+`LE Set Adv Enable`(0x200a)のcomplete未達の切り分け：(a) コントローラが
+0x200aを受理しadv TX開始しているか（外部スキャナ or VHCI RX callback
+`esp_nimble_hci`のhost_recv_pktにbpして0x200a complete eventの有無確認），
+(b) hostのackセマフォへのsignal経路がstartup期と定常期（on_sync文脈）で
+差がないか，(c) adv-enable時のRF活動がD-1/D-2a同様にコントローラ内部で
+不調を起こしていないか（bare-run+attachでコントローラ状態採取）．
+GATTサーバのNULL呼出しは別途（adv経路のどのfn-ptrがNULLか，`ble_hs_cfg`
+コールバック or GATT登録の未初期化を精査）．
+
 ### 変更したファイル
 
 | ファイル | 内容 |

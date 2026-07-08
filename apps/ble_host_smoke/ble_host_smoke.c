@@ -33,6 +33,11 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
+#include "host/ble_gap.h"
+#include "host/ble_hs_id.h"
+#include "host/ble_hs_adv.h"
+#include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
 
 /*
  *  BLEベースバンドのクロックを立てる（emi.c:164対策．bt/bt_shim.c）．
@@ -46,9 +51,120 @@ extern void esp_shim_bt_clock_init(void);
  */
 volatile uint32_t	g_ble_sync_done;
 
-/*  RTC_CNTL scratch（STORE0 近傍）．リセットを跨いで残り，JTAG読出し容易  */
+/*
+ *  D-2b：GAPアドバタイズ観測用グローバル（JTAGでシンボル読出し）．
+ */
+volatile uint32_t	g_adv_active;		/* 1=接続可能アドバタイズ実行中 */
+volatile int32_t	g_adv_rc = -1;		/* 最後の ble_gap_adv_start 戻り値 */
+volatile uint32_t	g_gap_conn_count;	/* CONNECT イベント回数 */
+volatile uint32_t	g_gap_disc_count;	/* DISCONNECT イベント回数 */
+volatile uint32_t	g_gap_event_count;	/* 全 GAP イベント回数 */
+volatile uint8_t	g_own_addr_type;
+
+#define BLE_DEVICE_NAME		"ASP3-C3-BLE"
+
+/*  RTC_CNTL scratch（STORE系）．リセットを跨いで残り，JTAG読出し容易  */
 #define BLE_SYNC_MARK_ADDR	((void *) 0x60008050UL)
 #define BLE_SYNC_MARK_VAL	0x5ADE51C0UL
+#define BLE_ADV_MARK_ADDR	((void *) 0x60008054UL)	/* adv開始マーカ */
+#define BLE_ADV_MARK_VAL	0x0ADE5000UL
+#define BLE_CONN_MARK_ADDR	((void *) 0x60008058UL)	/* connectマーカ */
+#define BLE_CONN_MARK_VAL	0xC0117EC7UL
+
+static int gap_event_cb(struct ble_gap_event *event, void *arg);
+
+/*
+ *  接続可能アドバタイズ（undirected connectable / general discoverable）を
+ *  開始する．sync完了後および切断後に呼ぶ．
+ */
+static void
+start_advertising(void)
+{
+	struct ble_hs_adv_fields	fields;
+	struct ble_gap_adv_params	adv_params;
+	int							rc;
+
+	/*  アドレス型を自動決定（privacy=0＝public/static）  */
+	rc = ble_hs_id_infer_auto(0, (uint8_t *) &g_own_addr_type);
+	if (rc != 0) {
+		g_adv_rc = rc;
+		syslog(LOG_ERROR, "ble_host_smoke: id_infer_auto rc=%d", (int_t) rc);
+		return;
+	}
+
+	/*  アドバタイズデータ：flags＋完全ローカル名  */
+	memset(&fields, 0, sizeof(fields));
+	fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+	fields.name = (const uint8_t *) BLE_DEVICE_NAME;
+	fields.name_len = (uint8_t) strlen(BLE_DEVICE_NAME);
+	fields.name_is_complete = 1;
+
+	rc = ble_gap_adv_set_fields(&fields);
+	if (rc != 0) {
+		g_adv_rc = rc;
+		syslog(LOG_ERROR, "ble_host_smoke: adv_set_fields rc=%d", (int_t) rc);
+		return;
+	}
+
+	memset(&adv_params, 0, sizeof(adv_params));
+	adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+	adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+
+	rc = ble_gap_adv_start(g_own_addr_type, NULL, BLE_HS_FOREVER,
+						   &adv_params, gap_event_cb, NULL);
+	g_adv_rc = rc;
+	if (rc == 0) {
+		g_adv_active = 1U;
+		sil_wrw_mem(BLE_ADV_MARK_ADDR, BLE_ADV_MARK_VAL);
+		syslog(LOG_NOTICE,
+			   "ble_host_smoke: advertising started as '%s' (own_addr_type=%d)",
+			   BLE_DEVICE_NAME, (int_t) g_own_addr_type);
+	}
+	else {
+		syslog(LOG_ERROR, "ble_host_smoke: adv_start rc=%d", (int_t) rc);
+	}
+}
+
+/*
+ *  GAPイベントコールバック（接続/切断/アドバタイズ完了を最小処理）．
+ */
+static int
+gap_event_cb(struct ble_gap_event *event, void *arg)
+{
+	(void) arg;
+	g_gap_event_count++;
+
+	switch (event->type) {
+	case BLE_GAP_EVENT_CONNECT:
+		g_gap_conn_count++;
+		sil_wrw_mem(BLE_CONN_MARK_ADDR, BLE_CONN_MARK_VAL);
+		syslog(LOG_NOTICE,
+			   "ble_host_smoke: GAP CONNECT status=%d handle=%d",
+			   (int_t) event->connect.status,
+			   (int_t) event->connect.conn_handle);
+		if (event->connect.status != 0) {
+			/*  接続確立失敗＝再アドバタイズ  */
+			g_adv_active = 0U;
+			start_advertising();
+		}
+		break;
+	case BLE_GAP_EVENT_DISCONNECT:
+		g_gap_disc_count++;
+		g_adv_active = 0U;
+		syslog(LOG_NOTICE, "ble_host_smoke: GAP DISCONNECT reason=%d",
+			   (int_t) event->disconnect.reason);
+		start_advertising();	/*  切断後に再アドバタイズ  */
+		break;
+	case BLE_GAP_EVENT_ADV_COMPLETE:
+		g_adv_active = 0U;
+		syslog(LOG_NOTICE, "ble_host_smoke: GAP ADV_COMPLETE reason=%d",
+			   (int_t) event->adv_complete.reason);
+		break;
+	default:
+		break;
+	}
+	return 0;
+}
 
 static void
 on_sync(void)
@@ -56,6 +172,10 @@ on_sync(void)
 	g_ble_sync_done = 1U;
 	sil_wrw_mem(BLE_SYNC_MARK_ADDR, BLE_SYNC_MARK_VAL);
 	syslog(LOG_NOTICE, "ble_host_smoke: ble_hs SYNC, host up");
+
+	/*  sync完了＝コントローラ同期済み．接続可能アドバタイズを開始する
+	    （ble_gap_*はsync後のイベント文脈で呼ぶのが作法．NimBLE設計）．  */
+	start_advertising();
 }
 
 static void
@@ -173,6 +293,12 @@ main_task(EXINF exinf)
 		syslog(LOG_ERROR, "ble_host_smoke: esp_nimble_init -> %d", (int_t) err);
 		return;
 	}
+
+	/*
+	 *  D-2b（最小adv）：GAP/GATTサービス（ble_svc_gap_init等）は
+	 *  接続可能アドバタイズには必須でないため，まずは登録しない．
+	 *  デバイス名はadvデータで広告する（start_advertising）．
+	 */
 
 	/*
 	 *  sync/reset コールバックを登録してからホストタスクを起動する．
