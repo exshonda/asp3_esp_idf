@@ -1145,6 +1145,79 @@ RAM＝**92.38%（302700B/320KB，D-2aから±0）**。
 GATTサーバのNULL呼出しは別途（adv経路のどのfn-ptrがNULLか，`ble_hs_cfg`
 コールバック or GATT登録の未初期化を精査）．
 
+#### 0x200a complete未達の切り分け結果（2026-07-08，焦点調査）
+VHCI RXコールバック`host_rcv_pkt`(`0x42005a68`)にbpして実機観測
+（bare-run+attach，QEMU=OFF）：
+- **command-complete処理はインライン**（コントローラタスク文脈．
+  `host_rcv_pkt`→`ble_hci_trans_ll_evt_tx`→`ble_transport_to_hs_evt`→
+  `ble_hs_hci_evt_process`→`ble_hs_hci_rx_ack`が`ble_hs_hci_sem`をsignal）．
+  だからstartup期にhost taskが`ble_hs_hci_cmd_tx`でsem待ちブロック中でも
+  各completeが処理され進行できた（enqueue方式なら初回でデッドロックする筈＝
+  インラインで確定）．
+- **`host_rcv_pkt`は0x200a送信後も高頻度で呼ばれ続けるが，届くのは
+  最古の2イベント＝`0c03`(Reset)と`1001`(Read Local Version)の
+  command-complete(evt=0x0e, status=0x00)を無限リプレイするのみ．
+  0x200a(Set Adv Enable)のcompleteは一度も来ない**（`evtrace.py`で
+  distinct=`{(0x0e,0x0c03),(0x0e,0x1001)}`のみ）．
+- `host_rcv_pkt`の呼出し文脈＝**SHIM_TSK1（コントローラタスク）のスタック
+  （sp∈0x3fcc7a20..9a20）**，ra=ROM`0x400091ec`＝ROM側HCI-event-TX-to-host
+  がコントローラタスクで走る．halt時PCはblob各所に散る＝busy（tight spin
+  ではないがコントローラは0x200a completeを生成せず古いイベント再送を
+  churnしている）．host task側は`ble_hs_hci_sem`(=`0x3fc87a40`,非NULL)待ちで
+  ブロック，`g_adv_rc`=-1．
+- **結論（切り分け＝コーディネータ判定木の「返ってこない」側）**：
+  コントローラが**Set Adv Enable(RF送信開始)のcommand-completeを生成しない**
+  ＝より下層．ただし症状「最古の2completeを無限リプレイ」は純RF障害より
+  **ソフトのバッファ/キュー・ポインタ再生バグ**（コントローラのHCI-event-to-host
+  링/mempool，またはtransport event pool）を強く示唆．RF自体はD-2a syncで
+  使え，adv params/dataも受理済み＝壊れているのはadv-enable後の
+  イベント配送のみ．**深掘り（ROM HCI-TX-to-host経路 or transport
+  event mempool/queueの再生バグ精査）はコントローラ下層＝ユーザー判断待ち**．
+- 次段候補：(1) transport event pool（`pool_evt`/`ble_transport_alloc_evt`/
+  `ble_transport_free`）の消費・解放が0x200a後に破綻していないか
+  （`os_memblock`のfree漏れ→リング再生），(2) コントローラのHCI-to-host
+  TXキュー（ROM）の読みポインタがadv-enableでリセットされていないか，
+  (3) `notify_host_send_available`(controller_rcv_pkt_ready)のクレジット/
+  フロー制御経路．いずれもtarget側（`esp_nimble_hci`ラッパ/shim/config）で
+  介入余地があるか要精査．
+
+#### ★重要な再枠組み：これはデッドロックではなく「ホスト再初期化ループ」（2026-07-08 option1調査）
+option1（トランスポートevt mempool）を実機で追った結果，症状の解釈が
+根本的に変わった：
+- **プール枯渇は反証**：`pool_evt`（`0x3fcb1864`）＝`mp_block_size=70`,
+  `mp_num_blocks=30`, `mp_num_free=29`＝**29/30空き＝枯渇していない**．
+  alloc/freeは均衡．「最古2件リプレイ」はプール枯渇ではない．
+- **ack取りこぼしも反証**：`ble_hs_hci_rx_ack`（inline）は各completeで
+  `ble_npl_sem_get_count`→`esp_shim_sem_get_count`(`0x420011ee`)を呼ぶが，
+  戻り値は**常に0**（16連続確認）＝semカウントは正しく0＝ackを
+  ドロップしていない．sem releaseも正常．
+- **★真の症状＝ホスト再初期化ループ**：`ble_hs_hci_cmd_tx`(`0x4200984e`)は
+  ack異常（wait_for_ackタイムアウト／process_ackのopcode不一致／status異常）
+  のとき`ble_hs_sched_reset(reason)`(`0x42008b18`)を呼ぶ．実機で
+  **`ble_hs_startup_go`(`0x4200ab6e`)が繰り返し発火**＝ホストが
+  startup（Reset 0x0c03→Read Local Ver 0x1001→…）を**再送し続けている**．
+  ＝**先の「コントローラが最古2completeを無限リプレイ」という解釈は誤りで，
+  実体はホスト自身がreset/再initを繰り返し，そのstartup HCIトラフィック
+  （0x0c03/0x1001のcomplete）を観測していた**．adv経路のあるコマンドの
+  ack異常→`ble_hs_sched_reset`→ホストreset→再init→再sync→on_sync→
+  再adv→また異常→ループ．`g_adv_rc`が-1のままなのは，adv_startが
+  ループ内で正常復帰しないため．
+- **未確定（次の1手）**：`ble_hs_sched_reset`のreason（a0）の採取に失敗
+  （ループ周期が短くbpタイミングが合わず）．reasonが
+  **`BLE_HS_ETIMEOUT_HCI`ならadv-enable(0x200a)のcompleteが実際に来ていない
+  （2s HCI timeout）＝コントローラ/トランスポート下層**，
+  **`BLE_HS_ECONTROLLER`ならcompleteは来るがopcode不一致＝
+  トランスポートの順序/取り違え or ホスト側**，と切り分く．
+  （※ASP3 TMO単位は**μs**＝`TMAX_RELTIM=4e9`が66分40秒＝1単位=1μs．
+  `esp_shim_tick_to_tmo`のms→μs換算（×1000）は正しく，2s timeoutは
+  正常に発火し得る＝timeout自体はbounded bugではない）．
+- **今回コード変更なし（調査のみ）**．次段はreason採取（bp
+  `0x42008b18`をループ周期に合わせて確実に捕捉，または`ble_hs_hci_cmd_tx`の
+  各`goto done`直前にbpして異常種別を特定）で，コントローラ側（timeout）か
+  トランスポート/ホスト側（mismatch）かを確定させてから修正方針を決める．
+  ＝**boundedソフト（reset loop）だが，proximate trigger（0x200a complete
+  未達 or 取り違え）の層をreasonで確定させる段階＝一旦区切って判断を仰ぐ**．
+
 ### 変更したファイル
 
 | ファイル | 内容 |
