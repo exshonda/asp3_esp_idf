@@ -69,6 +69,24 @@ main_task(EXINF exinf)
 	(void) exinf;
 	(void) get_tid(&main_tskid);
 
+#ifdef WIFI_IDLE_SECS
+	/*
+	 *  ブートカウンタ（RTC FAST RAM 0x50000008）を毎起動でインクリメント．
+	 *  アイドル計測窓の途中でチップがリセット/再起動すると >1 になるので，
+	 *  「真のフリーズ（boot=1・カウンタ凍結）」と「リセットループ（boot>1）」
+	 *  を事後に区別できる（計測アーチファクト排除）．
+	 */
+	{
+		volatile uint32_t *rtc_boot = (volatile uint32_t *)0x50000008u;
+		volatile uint32_t *rtc_bmagic = (volatile uint32_t *)0x5000000Cu;
+		if (*rtc_bmagic != 0xB007B007u) {	/* コールドスタート初期化 */
+			*rtc_bmagic = 0xB007B007u;
+			*rtc_boot = 0u;
+		}
+		*rtc_boot = *rtc_boot + 1u;
+	}
+#endif
+
 	netif_esp32c3_start();
 	esp_shim_initialize();
 	(void) esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
@@ -150,4 +168,33 @@ main_task(EXINF exinf)
 		syslog(LOG_NOTICE, "wifi_dhcp: DHCP FAILED (timeout)");
 	}
 	syslog(LOG_NOTICE, "wifi_dhcp: done (ping result logged by net_task)");
+
+#ifdef WIFI_IDLE_SECS
+	/*
+	 *  【S3→C3 アイドルフリーズ再現テスト】
+	 *  GOT IP後，送受信を一切行わず WIFI_IDLE_SECS 秒だけ接続維持する
+	 *  純アイドル経路．生存秒カウンタを RTC FAST RAM（0x50000000＝
+	 *  リンカ未使用・リセット非依存）へ毎秒書き，syslogでも二重に出す．
+	 *  カウンタが増え続ける限り生存＝停止した秒が凍結時刻．
+	 *  通常ビルドでは -DWIFI_IDLE_SECS 未定義のため一切影響しない．
+	 *  詳細: docs/s3-idle-freeze-findings-for-c3.md
+	 */
+	{
+		volatile uint32_t *rtc_alive = (volatile uint32_t *)0x50000000u;
+		volatile uint32_t *rtc_magic = (volatile uint32_t *)0x50000004u;
+		int idle_t;
+
+		*rtc_magic = 0xA11EA11Eu;	/* 生存中マジック */
+		*rtc_alive = 0u;
+		syslog(LOG_NOTICE, "wifi_dhcp: IDLE test start (%d s), pure idle",
+			   (int_t)WIFI_IDLE_SECS);
+		for (idle_t = 1; idle_t <= WIFI_IDLE_SECS; idle_t++) {
+			(void) tslp_tsk(1000000);	/* 1秒（送受信なし） */
+			*rtc_alive = (uint32_t)idle_t;
+			syslog(LOG_NOTICE, "idle t=%d s alive", (int_t)idle_t);
+		}
+		syslog(LOG_NOTICE, "wifi_dhcp: IDLE test SURVIVED %d s",
+			   (int_t)WIFI_IDLE_SECS);
+	}
+#endif /* WIFI_IDLE_SECS */
 }
