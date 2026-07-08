@@ -9470,3 +9470,347 @@ RXバッファ供給系）を明記した上で，次に取るべき優先順位
 ボード未接続のため実機検証は未実施．次回はCodexの優先順位（特に
 (3)＝実施38-49系の現行ビルドでの再検証）を軸に着手する。安価な
 (1)(3)から着手し，効果が無ければ(2)(4)，最後に(5)の順で進める方針。
+
+## 実施68：Codex優先順位(3)を実行——★決定的な負の結果★＝現行ビルド（s_ticks_per_us修正＋coex_pre_init導入後）でram_pbus_force_mode／set_rx_gain_cal_dc_newの戻り値をASP3・NuttX双方で再取得，2ブート×2プラットフォームとも完全一致（0x140）．実施36-38の元々の中心的発見（戻り値がASP3/NuttXで異なる）は現行ビルドでは完全に解消済みと確定．この仮説クラスは全面的に下げられる
+
+### 背景
+
+実施67でCodex（GPT-5）に相談した際，実施36-38の元々の中心的発見
+（`ram_pbus_force_mode`/`set_rx_gain_cal_dc_new`の戻り値がASP3・NuttX
+で異なる＝ASP3=0x6a／NuttX=0x140）について，実施48-49で「メカニズム
+（ROM tick-calib artifact，`s_ticks_per_us`未申告）は説明したが，
+修正後に較正の**実際の結果値**（0x140相当の値）がNuttXと一致する
+ようになったかどうかは，実施50以降が別スレッド（HRT/coex/バッファ）
+へ進んでしまったため未確認のまま」という盲点を指摘された。本ラウンドは
+既存の`wifi_trace.c`計装（trace id=45／39，`--wrap`済み，削除・変更
+不要）をそのまま使い，現行ビルド（`de5cb2e`：`s_ticks_per_us`修正
+＋`coex_pre_init()`導入の両方を含む，`git log`で確認済み）で
+この値を再取得し，ASP3・NuttX間で一致するかを確認した。
+
+### 実装・手順
+
+ソース変更なし（既存計装の再利用＋再ビルド＋実機JTAG計測のみ）。
+
+1. `build/c6_wifi_scan_uart`（`-DESP32C6_CONSOLE=uart0`設定済み，既存
+   ビルドディレクトリ）を`cmake --build`で**現行ソースから再ビルド**。
+   ビルド成功（FLASH 12.92%／RAM 89.38%，警告のみ・エラーなし）。
+2. `nm -S`で現行ELFのシンボルアドレスを再確認（過去ラウンドの記載
+   アドレスは再ビルドで変わり得るため毎回必須）：`wifi_tr`＝
+   `0x40858cc8`（サイズ`0x7000`＝28byte×1024エントリ，構造体
+   `{t_us_low(4),id(2),ctx(2),a0,a1,a2,a3,ret(各4)}`），`wifi_tr_pos`＝
+   `0x4081a958`，`wifi_trace_frozen`＝`0x4081a954`。
+3. **★重要：現在USBバスにEspressifボードが複数（7台）接続されている**。
+   C6ターゲットボードのserialは`58:E6:C5:12:D4:D0`（本ラウンド開始時
+   `/dev/ttyACM6`，ポート番号は変動するため`ls -l /dev/serial/by-id/`と
+   `python -m serial.tools.list_ports`でserialを都度確認）。C3ボード
+   （`60:55:F9:57:C9:88`＝`/dev/ttyACM4`，`60:55:F9:57:C2:60`＝
+   `/dev/ttyACM3`，BLE Phase D-2b調査で使用中）には一切触れず（書込み・
+   リセット・OpenOCD接続を含め不実行）。全操作で`esptool --port
+   /dev/ttyACM6`／OpenOCD`-c "adapter serial 58:E6:C5:12:D4:D0"`を
+   明示指定した。
+4. esptool（`~/TOPPERS/ASP3CORE/tools/esptool-venv`，v5.3.1，新CLI
+   構文`write-flash`）で`build/c6_wifi_scan_uart/asp_flash_trunc1M.bin`
+   （1MBトランケート版，`dd`で都度`asp_flash.bin`から再生成）を
+   `0x0`へ書込み。OpenOCD実体は引き続き
+   `/home/honda/tools/espressif/tools/openocd-esp32/
+   v0.12.0-esp32-20250422/openocd-esp32/bin/openocd`，
+   `board/esp32c6-builtin.cfg`。
+5. **JTAGでの生バッファdump**（`dump_image`で`wifi_tr`全体28672byteを
+   ファイルへ落とし，Pythonで`struct.unpack`しid=39/45/21のエントリを
+   全件表示）——実施20の教訓通り，syslogダンプ（バースト・ロス既知）
+   ではなく生メモリ読出しをロスレスな主手段とした。
+6. NuttX側は`/home/honda/.claude/jobs/494f98a3/tmp/nuttx-c6/nuttx/
+   nuttx.bin`（実施46-49で使われた計装版，同一blob・同一hal commit，
+   `esp_wifi_trace.c`のtrace id割当がASP3と同一＝39/45で一致）を
+   同一手順で書込み。このビルドはブート時に自動でWi-Fi初期化・
+   `wifi_trace_dump()`をコンソール（USB-Serial-JTAG，`/dev/ttyACM6`の
+   CDC-ACM側，OpenOCDのJTAGアクセスと同一USBデバイス上で共存可能）へ
+   出力する設計だったため，シリアル読出しでテキストダンプをそのまま
+   取得できた（JTAG生読みとの二重確認は行わず，テキストダンプの
+   数値を直接使用——値のフォーマットはASP3と同一構造体でid/オフセット
+   も一致するため取り違えの心配はない）。
+7. 再現性確保のため，ASP3・NuttXともに**独立2ブート**でindex
+   [70]（`ram_pbus_force_mode(a0=0,a1=0x45,a2=0x600a7000,a3=0x7f)`）・
+   [85]・[102]（`set_rx_gain_cal_dc_new`）・[185]（`register_chipv7_phy`
+   戻り値）を採取した（実施41の教訓：単一ブート同士の比較はブート間
+   ノイズとプラットフォーム差を混同しうる）。
+
+### 結果
+
+**ASP3（2ブート，JTAG生バッファdump）**：
+
+```
+run1: [70] ram_pbus_force_mode a0=0x0 a1=0x45 a2=0x600a7000 a3=0x7f ret=0x140
+      [85] set_rx_gain_cal_dc_new a0=0x0 a1=0x1 ret=0x140
+      [102] set_rx_gain_cal_dc_new a0=0x0 a1=0x0 ret=0x140
+      [185] register_chipv7_phy ret=0x1
+run2: [70] ret=0x140  [85] ret=0x140  [102] ret=0x140  [185] ret=0x1
+      （run1と全フィールド完全一致）
+```
+
+**NuttX（2ブート，コンソールtextダンプ）**：
+
+```
+run1: [70] ram_pbus_force_mode a0=00000000 a1=00000045 a2=600a7000 a3=0000007f ret=00000140
+      [85] set_rx_gain_cal_dc_new ret=00000140
+      [102] set_rx_gain_cal_dc_new ret=00000140
+      [185] register_chipv7_phy ret=00000001
+run2: [70] ret=00000140  [85] ret=00000140  [102] ret=00000140  [185] ret=00000001
+      （run1と全フィールド完全一致）
+```
+
+**ASP3 2ブート・NuttX 2ブートの計4サンプル全てが，index [70]/[85]/[102]
+でret=`0x140`，index [185]でret=`1`（phy_init健全完了）を示し，
+完全に一致した。** 実施36-38当時記録されていたASP3側の値（`0x6a`）は
+現行ビルドには一切現れなかった。
+
+なお本ラウンド中，ASP3の実機ブートが**間欠的に実施53-55の
+「wifi_tr_pos=9で停止（`phy_bbpll_cal`→`wait_i2c_sdm_stable`が
+regi2c block=0x63の安定を待って収束しない）」という既知の環境依存
+ハングを再現した**（新規flashで4/4連続再現する場面もあった）。
+実施55/56の前例（同一の未修正コードでも間欠的に発生し，再flashで
+解消することがある「ボード状態ドリフト」）を踏まえ，追加のflash
+リトライで健全な完了（`wifi_tr_pos`=186，`wifi_trace_frozen`=1）に
+到達させてから測定した。またNuttX側でも同一ボードで直近ブートが
+`wait_i2c_sdm_stable`と同じregi2c block=0x63待ちで停止するかを
+誤って疑ったが，実際にはNuttXは正常に`esp_cpu_wait_for_intr`
+（アイドルタスクの`wfi`）で待機していただけであり（disassembleで
+確認），ハングではなかった——コンソールの起動時自動ダンプ
+（`total=186`）を見れば当該ブートでNuttXが正常に完走していたことが
+直接確認できた。ASP3のハング再現自体はソース変更なしで観測された
+純粋な環境ノイズであり，本ラウンドの結論（0x140一致）には影響しない
+（複数回のflashリトライを経て両プラットフォームとも健全完了状態で
+比較できている）。
+
+### 解釈：実施36-38の中心的発見は現行ビルドで完全に解消済み．この仮説クラスは全面的に下げてよい
+
+実施48-49の「メカニズム説明＋修正」（ROM`s_ticks_per_us`が未申告
+のまま`esp_rom_delay_us`が短時間しか待たず，`ram_pbus_force_mode`の
+戻り値としてトレースされていた値が実は`2*s_ticks_per_us`という
+副産物だった件）は，**メカニズムの説明にとどまらず，較正の実際の
+結果値（0x140）自体をNuttXと一致させる効果を持っていた**ことが，
+本ラウンドで初めて直接確認された。Codexが実施67で指摘した盲点
+（「メカニズムは直したが結果値の一致は未確認」）はこれで解消された：
+
+- ASP3・NuttXの`ram_pbus_force_mode`／`set_rx_gain_cal_dc_new`戻り値
+  は，2ブート×2プラットフォームの全4サンプルで一致（`0x140`）。
+- `register_chipv7_phy`もASP3・NuttXとも`ret=1`（健全完了）で一致。
+- したがって**実施36-38の「戻り値がASP3・NuttXで異なる」という
+  発見は，現行ビルド（`s_ticks_per_us`修正後）では完全に解消済み**
+  であり，この一致は「たまたま」ではなく実施48-49の修正の直接的な
+  効果である。
+
+実施66までに「TX正常・RXが一度もbit14を立てない」ことが確定して
+おり，本ラウンドで「AGC/PBUS較正の結果値そのもの」というリードも
+完全に排除されたことで，**deaf-RXの説明空間から「静的config／
+アンテナ／dwell／RFPLLロック／RXクロック／RX-FEアナログ設定／
+RXバッファ供給系／AGC較正結果値」の8クラス全てが除外**された。
+これは実施66の結論（ブロッカーはPHY/RF復調そのもの＝バッファ供給
+より上流）をさらに補強し，実施50以降の方向転換（HRT/coex thread）
+が正しかったことの追認でもある。
+
+### まとめ・申し送り
+
+1. **★実施36-38（`ram_pbus_force_mode`/`set_rx_gain_cal_dc_new`戻り値
+   差）は完全解決済み，仮説クラスとして全面的に下げる★**。今後の
+   ラウンドでこの角度への回帰は不要。
+2. 恒久修正なし（本ラウンドは既存計装の再利用による確認のみ，
+   ソース未編集）。
+3. 副次的な運用メモ：この物理ボードは今日のセッション中，
+   複数回のJTAG/flash操作の後で実施53-55型のブート時ハング
+   （`wifi_tr_pos`=9で停止）を間欠的に再現した。再現時は**追加の
+   flashリトライ**（`esptool write-flash`を数回繰り返す）で解消する
+   ことが多い（実施56の前例と一致）。単発の失敗観測で「regressionだ」
+   と早合点しないこと。
+4. 次はタスク(1)（promiscuousモードでbit14テスト，実施69参照）。
+
+### 変更ファイル
+
+- ソース変更なし。`build/c6_wifi_scan_uart`を現行ソースで
+  `cmake --build`により再ビルドしたのみ（バイナリ成果物，リポジトリ
+  管理対象外）。`docs/wifi-shim-c6.md`に本実施68を追記。
+
+### 検証
+
+- `cmake --build build/c6_wifi_scan_uart`：エラーなくビルド成功
+  （FLASH 12.92%／RAM 89.38%）。
+- `nm -S`でASP3 ELFの`wifi_tr`＝`0x40858cc8`（size`0x7000`）／
+  `wifi_tr_pos`＝`0x4081a958`／`wifi_trace_frozen`＝`0x4081a954`を確認。
+  NuttXの`esp_wifi_trace.c`のtrace id割当（39/45）がASP3
+  `wifi_trace.c`と一致することをソース比較で確認。
+- ASP3 2ブート・NuttX 2ブート（計4サンプル）で index[70]/[85]/[102]
+  ret=`0x140`，index[185]ret=`1`が完全一致することを確認（JTAG
+  `dump_image`生バッファ／NuttXコンソールtextダンプ）。
+- 全JTAGは`adapter serial 58:E6:C5:12:D4:D0`で本ボードに固定
+  （同一USBホスト上に他のEspressifボード多数，特にC3ボード
+  `60:55:F9:57:C9:88`・`60:55:F9:57:C2:60`には一切触れず）。
+
+## 実施69：Codex優先順位(1)を実行——promiscuousモードでbit14／RX成功が立つかテスト．★決定的な負の結果★＝promiscuousモード（filter一切なし，全フレーム受信設定）でも3秒間のリスン窓で1件もフレームを捕捉せず（`promisc_rx_count`=0，MAC割込み総数=0，MACイベントOR=0），n=2で再現．フィルタ／ポリシー層は無罪確定，PHY/BB/RX-arm層の受信不全がさらに補強される。副次的に，OpenOCDの`reset halt`（JTAG駆動リセット）がこのボード／ビルドで決定論的なクラッシュを誘発する新しいJTAG計測アーチファクトを発見・回避手順を確立
+
+### 背景
+
+実施66までで「TX正常・RXがMAC HW成功ビット（bit14）を一度も立てない」
+ことが確定していたが，これが**スキャンの管理フレームフィルタ／
+ポリシー層の問題**なのか，**PHY/BB/RX-arm層そのものが受信していない**
+のかは未切り分けだった。Codexが実施67で最優先（最安・最高判別力）と
+した実験：promiscuousモード（`esp_wifi_set_promiscuous(true)`＋
+コールバック登録，フィルタなしで全フレーム種別を受信）でbit14相当の
+指標が立つかを確認する。
+
+### 実装・手順
+
+`apps/wifi_scan/wifi_scan.c`を確認したところ，**promiscuousモードの
+テストコードは既に実装済み**であることが判明した（`promisc_rx_cb`
+コールバック，`esp_wifi_set_promiscuous_rx_cb`→`esp_wifi_set_
+promiscuous(true)`→3秒`tslp_tsk`→`promisc_rx_count`確認→
+`esp_wifi_set_promiscuous(false)`という一連の処理が，`esp_wifi_start()`
+成功直後・`esp_wifi_scan_start()`呼出し前に無条件で実行される，
+`#ifdef`によるガードなし）。新規実装は不要で，既存ビルド
+（実施68で再ビルド済みの`build/c6_wifi_scan_uart`）をそのまま使い，
+実機JTAGで`promisc_rx_count`（BSS，`0x4081a8c0`）と，実施59由来の
+MACイベントOR蓄積（RTC`0x500000B0`〜）・`esp_shim_int_count[1]`
+（`0x4081be64`）を，promiscuousの3秒窓の間に読み取った。
+
+途中，**OpenOCDの`reset halt`（JTAGコマンドによるハードリセット＋
+即時halt）を使うと，このボード／ビルドの組合せで実行が進行した後
+（`wifi_tr_pos`=186でphy_init完了・スキャン相当の状態に達した後）
+`_kernel_target_exit`（`0x42029004`の無限ループ，カーネル異常終了時の
+最終到達点）へ落ちる，という新しいJTAG計測アーチファクトを発見した**
+（詳細は後述）。これを避けるため，**esptoolのRTSピン経由ハードリセット
+で起動し，OpenOCDは`reset halt`を使わず「既に走っているターゲットへ
+plainな`halt`でattach」する方式**に切り替えた。
+
+1. esptool（`--after hard-reset`）で`asp_flash_trunc1M.bin`を書込み
+   （このハードリセットで正常起動）。
+2. OpenOCDで`init`→`halt`（**`reset halt`ではない**，走行中ターゲット
+   へのattach）→RTC`0x500000B0`〜`0x500000BC`と`promisc_rx_count`
+   （`0x4081a8c0`）をゼロクリア（attach直後・十分早い時点＝
+   `wifi_tr_pos`=0を確認できる早さ）→`resume`。
+3. 短い`sleep`刻み（500ms〜1000ms）で`halt`→`mdw`→`resume`を繰返し，
+   `wifi_tr_pos`（phy_init完了＝186到達）と`esp_shim_int_count[1]`
+   （0→非零への遷移＝promiscuousテスト終了・`esp_wifi_scan_start`
+   開始のタイミング）を時系列で特定した。
+4. `esp_wifi_set_promiscuous(true)`の戻り値を直接確認するため，呼出し
+   直後の命令アドレス（`objdump`で特定，`0x420004f2`）へHWブレーク
+   ポイントを設置——**このbp設置・`wait_halt`自体は`reset halt`を
+   使わない限り安全に動作する**ことを確認（`reset halt`固有の問題と
+   判明）。ヒット時の`a0`レジスタ（RISC-V ABIの戻り値レジスタ）を読む。
+5. n=2（独立2回のesptool再flash＋JTAG計測）で再現性を確認。
+
+### 結果
+
+1. **★esp_wifi_set_promiscuous(true)は成功している★**：呼出し直後の
+   `a0`＝`0x00000000`（`ESP_OK`）。promiscuousモードは実際に有効化
+   されている（silent failureではない）。
+2. **タイミング特定**：phy_init完了（`wifi_tr_pos`=186）は起動後
+   約1秒以内。`esp_shim_int_count[1]`（MAC割込み総数）は起動後
+   2.5〜2.9秒の時点でも`0`のまま，3.1秒付近で初めて非零（`2`）に
+   転じ，3.5秒で`0x80`（128）に達する——これは`esp_wifi_scan_start`
+   開始後のTX-complete割込み（実施59由来の既知パターン）であり，
+   promiscuousの3秒`tslp_tsk`窓が約0.1〜3.1秒の区間に対応することが
+   分かった。
+3. **★promiscuousモードの3秒窓で1件も受信していない★**（n=2で
+   再現）：
+   - `promisc_rx_count`（コールバック起動回数）＝**0**（両ブート，
+     窓内の複数時点でゼロクリア後2.7〜2.9秒経過を確認）。
+   - `esp_shim_int_count[1]`（MAC割込み総数）＝**0**（同区間）。
+   - MACイベントOR蓄積（RTC`0x500000B0`）＝**0**（bit14どころか
+     いかなるMAC割込みイベントも一度も発生していない）。
+   - 参考：promiscuous窓を過ぎてscanが始まった後は，従来通り
+     MACイベントOR＝`0x80`のみ（TX-complete，実施59-66と整合）。
+4. **★JTAG計測アーチファクトの発見：`reset halt`がこのボード／ビルド
+   で決定論的なクラッシュを誘発する★**：`reset halt`→（`mww`の有無に
+   かかわらず）`resume`→数秒後に`halt`すると，phy_init完了
+   （`wifi_tr_pos`=186）は正常に進むにもかかわらず，PC が
+   `_kernel_target_exit`（`0x42029004`，`_kernel_chip_terminate()`
+   呼出し後の無限`j`ループ＝カーネル異常終了の最終到達点）に到達して
+   いた（`Halt cause (2) - Illegal Instruction`という表示も伴う）。
+   これは**複数回（4回以上）再現**したが，**esptoolのRTSピン経由
+   ハードリセットで起動し，OpenOCDは`reset halt`を使わず走行中の
+   ターゲットへ`halt`でattachする方式に切り替えたところ，同一の
+   flashイメージで一度もクラッシュが再現しなかった**（本ラウンドの
+   全ての有効な測定は後者の方式で取得）。すなわち：**OpenOCDの
+   `reset halt`コマンド（JTAGデバッグモジュール経由のリセット）
+   そのものが，このボード／esp32c6ビルドの組合せで実際の異常終了を
+   誘発する副作用を持つ**——プログラム側のバグではなく，計測手法
+   固有のアーチファクトである。
+
+### 解釈：フィルタ／ポリシー層は無罪，PHY/BB/RX-arm層の受信不全がさらに補強された
+
+`esp_wifi_set_promiscuous(true)`が成功し（`a0=0`），フィルタを一切
+かけない全フレーム受信モードで3秒間リスンしても，管理フレーム・
+データフレーム・制御フレームのいずれも，そしてMAC割込みそのものすら
+一度も発生しなかった。これはCodexが実施67で示した判別ロジック通り：
+
+- **bit14が立つ→フィルタ/ポリシー層の問題**（棄却）
+- **bit14が一度も立たない→PHY/BB/RX-arm層の問題**（★こちらが成立★）
+
+スキャンの管理フレームフィルタや`wifi_set_rx_policy`等のポリシー層は
+無罪であることが確定した。実施58-66で局在化してきた「PHY/RF復調
+そのものが有効フレームを一度も生成しない」という結論が，フィルタ層を
+経由しない生のpromiscuousモードでも成立することで，さらに強く
+補強された。
+
+副次的なJTAG計測アーチファクトの発見は，今後のC6実機調査の手順に
+直接影響する重要な運用知見である：**このボード／ビルドでは`reset
+halt`を避け，esptoolのハードリセットで起動してから走行中ターゲットへ
+plainな`halt`でattachする方式を標準手順とすべき**（過去のラウンドの
+一部が`reset halt`を使っていた可能性があり，もし今後同種の原因不明の
+クラッシュに遭遇した場合はこのアーチファクトを疑うこと）。
+
+### まとめ・申し送り
+
+1. **★promiscuousモードでも受信ゼロ（n=2で再現）：フィルタ/ポリシー層
+   は無罪，PHY/BB/RX-arm層の受信不全を確定★**。Codex優先順位(1)は
+   完了・判定は「PHY確定」側。
+2. **新しい運用知見（今後のラウンドへの申し送り）**：OpenOCD
+   `reset halt`はこのボード／ビルドで実行が進行した後にカーネル
+   異常終了を誘発しうる（決定論的に4回以上再現，`plain halt`
+   attachでは非再現）。今後は**esptool `--after hard-reset`で起動
+   →OpenOCD`init`→`halt`（走行中ターゲットへattach，`reset halt`は
+   使わない）**を標準手順とする。ゼロクリアが必要なRTC/BSS計装は
+   attach直後（`wifi_tr_pos`=0付近，十分早いタイミング）に行う。
+3. 恒久修正なし（本ラウンドは既存計装＋実機計測のみ，`apps/wifi_scan/
+   wifi_scan.c`のpromiscuousテストコードは既存のまま変更なし）。
+4. **本調査（実施1-69）は依然未解決（0 AP）**。ただし実施66・68・69で
+   「バッファ供給系」「AGC較正結果値」「フィルタ/ポリシー層」の
+   3クラスが立て続けに除外され，探索空間はPHY/BB/RX-arm層内部の
+   一過性の起動・reset・arm操作（Codex実施67指摘(2)：`enable_agc()`／
+   `set_rxclk_en()`／`rx_pbus_reset()`／`fe_txrx_reset()`／
+   `mac_enable_bb()`等，静的スナップショット比較では原理的に見えない
+   もの）へさらに絞り込まれた。次の最優先候補（Codex優先順位(2)(4)）：
+   - native/NuttXで`lmacProcessRxSucData`発火＝bit14が立つ**その瞬間**
+     の受信機動的状態（AGC`0x600a7000`／RXゲイン／RX状態機械／
+     regi2c RFブロック）をASP3のスキャン中状態と直接比較する。
+   - MAC空間`0x600a4000`〜`0x600a4fff`全域の，native RX成功直後／
+     ASP3スキャン中の時系列diff。
+   - `g_phyFuns`経由のPHY関数トレースを`enable_agc`／`rx_pbus_reset`／
+     `fe_txrx_reset`／`mac_enable_bb`等の一過性起動系関数まで拡張し，
+     呼出し有無・引数をnative/NuttXと突合する。
+
+### 変更ファイル
+
+- ソース変更なし。`apps/wifi_scan/wifi_scan.c`のpromiscuousテスト
+  コードは既存のまま（新規実装不要だった）。`docs/wifi-shim-c6.md`に
+  本実施69を追記。
+
+### 検証
+
+- `esp_wifi_set_promiscuous(true)`直後のHW bp（`0x420004f2`，
+  `objdump`で特定）で`a0`＝`0x00000000`（ESP_OK）を2ブートとも確認。
+- タイミング較正：500ms〜1000ms刻みのfree-run+halt+mdwで，
+  `wifi_tr_pos`=186到達（~1秒以内）と`esp_shim_int_count[1]`の
+  0→非零遷移（~3.1秒）を時系列特定。
+- `promisc_rx_count`（`0x4081a8c0`）＝0，MACイベントOR蓄積
+  （`0x500000B0`）＝0，`esp_shim_int_count[1]`＝0を，promiscuous窓内
+  （起動後2.7〜2.9秒）でn=2（独立2回のflash+計測）とも確認。
+- `reset halt`使用時のcrash（`_kernel_target_exit`，`0x42029004`）を
+  4回以上（`mww`の有無を問わず）再現し，`reset halt`を使わない
+  「plain halt attach」方式に切替えたところ同一flashイメージで
+  crashが再現しないことを確認（n>4 vs n=0）。
+- 全JTAGは`adapter serial 58:E6:C5:12:D4:D0`で本ボードに固定
+  （同一USBホスト上の他のEspressifボード，特にC3ボード
+  `60:55:F9:57:C9:88`・`60:55:F9:57:C2:60`には一切触れず）。
+- ボードは実施69終了時点でASP3（`asp_flash_trunc1M.bin`，
+  esptoolハードリセットで正常起動・スキャンループ稼働中）に
+  戻して残置。
