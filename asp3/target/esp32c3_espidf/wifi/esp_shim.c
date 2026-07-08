@@ -62,6 +62,49 @@ esp_shim_int_restore(uint32_t state)
 	}
 }
 
+/*
+ *  ネスト対応クリティカルセクション（FreeRTOS portENTER/EXIT_CRITICAL用）
+ *
+ *  esp_shim_int_disable()の退避値を「muxに格納」する方式は，同一muxを
+ *  入れ子で取得する（BTコントローラのGLOBAL_INT_DISABLE系＝osiの
+ *  _global_intr_disable/restoreはRW/LLDスタックが深くネストする）と，
+ *  内側の取得が外側の退避値（MIE=1）をMIE=0で上書きし，最外の解放でも
+ *  MIEが復元されず割込み禁止（CPUロック）のまま残る．その文脈で
+ *  block-foreverのtwai_semを呼ぶとブロック不可でE_CTX→take失敗→
+ *  btdm_controller_taskがexit→RTC_SW_SYS_RESET（docs/bt-shim.md
+ *  「リセット点の局所化」）．
+ *  ESP-IDF FreeRTOSと同じく，割込み状態はコア単位（単一コアなので大域）に
+ *  ネストカウンタで退避し，最外(0→1)で退避・最外(1→0)でのみ復元する．
+ *  muxは単一コアでは無意味なため参照しない．
+ */
+static volatile uint32_t	esp_shim_crit_nest = 0U;
+static volatile uint32_t	esp_shim_crit_saved = 0U;
+
+void
+esp_shim_enter_critical(void)
+{
+	uint32_t state;
+
+	/* mstatus.MIEを読みつつクリア（この時点以降はISRが入らない＝以降の
+	   カウンタ/退避値更新はアトミック） */
+	Asm("csrrci %0, mstatus, 8" : "=r"(state));
+	if (esp_shim_crit_nest == 0U) {
+		esp_shim_crit_saved = state & 8U;
+	}
+	esp_shim_crit_nest++;
+}
+
+void
+esp_shim_exit_critical(void)
+{
+	if (esp_shim_crit_nest > 0U) {
+		esp_shim_crit_nest--;
+		if ((esp_shim_crit_nest == 0U) && (esp_shim_crit_saved != 0U)) {
+			Asm("csrsi mstatus, 8");
+		}
+	}
+}
+
 #define SHIM_LOCK()		uint32_t shim_lock_ = esp_shim_int_disable()
 #define SHIM_UNLOCK()	esp_shim_int_restore(shim_lock_)
 

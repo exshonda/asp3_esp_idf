@@ -109,6 +109,14 @@ extern uint32_t esp_shim_int_disable(void);
 extern void esp_shim_int_restore(uint32_t state);
 
 /*
+ *  ネスト対応クリティカルセクション（FreeRTOS portENTER/EXIT_CRITICAL用．
+ *  割込み状態を大域ネストカウンタで退避／復元＝同一muxの入れ子でも
+ *  MIEを取りこぼさない．esp_shim.c参照）
+ */
+extern void esp_shim_enter_critical(void);
+extern void esp_shim_exit_critical(void);
+
+/*
  *  割込みディスパッチ（Wi-Fi系のCPU割込み線の動的ハンドラ登録）
  *
  *  cfgでDEF_INHした共通入口（esp_shim_wifi_int_handler）から，

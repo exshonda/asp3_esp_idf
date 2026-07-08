@@ -24,19 +24,23 @@ typedef void (*TaskFunction_t)(void *);
 
 /*
  *  クリティカルセクション（ESP32-C3は単一コアのためスピンロックは
- *  意味を持たない．mux変数自体をesp_shim_int_disable()の退避値の
- *  格納先として再利用する）
+ *  意味を持たない．割込み状態はmuxではなく大域ネストカウンタで退避する
+ *  ＝BTコントローラが同一muxを入れ子で取得（GLOBAL_INT_DISABLE系）しても
+ *  最外の解放でMIEが正しく復元される．旧実装＝退避値をmuxに格納する方式は
+ *  内側取得が外側のMIE退避値を上書きし，割込み禁止のまま残る欠陥が
+ *  あった＝コントローラ実行ループのsemphr_takeがE_CTXでtake失敗→
+ *  タスクexit→RTC_SW_SYS_RESET．docs/bt-shim.md参照）
  */
 #ifndef TOPPERS_MACRO_ONLY
-extern uint32_t esp_shim_int_disable(void);
-extern void esp_shim_int_restore(uint32_t state);
+extern void esp_shim_enter_critical(void);
+extern void esp_shim_exit_critical(void);
 #endif
 
 typedef uint32_t portMUX_TYPE;
 #define portMUX_INITIALIZER_UNLOCKED	0
 
-#define portENTER_CRITICAL(mux)		(*(mux) = esp_shim_int_disable())
-#define portEXIT_CRITICAL(mux)		(esp_shim_int_restore(*(mux)))
+#define portENTER_CRITICAL(mux)		(esp_shim_enter_critical(), (void)(mux))
+#define portEXIT_CRITICAL(mux)		(esp_shim_exit_critical(),  (void)(mux))
 #define portENTER_CRITICAL_ISR(mux)	portENTER_CRITICAL(mux)
 #define portEXIT_CRITICAL_ISR(mux)	portEXIT_CRITICAL(mux)
 #define portENTER_CRITICAL_SAFE(mux)	portENTER_CRITICAL(mux)

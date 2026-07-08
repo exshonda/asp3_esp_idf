@@ -793,6 +793,86 @@ block-forever `semphr_take`へ入る，という非対称が本命。
 watchpoint不可のため要別手法。**RF/regi2cの深掘り（C6 66ラウンド層）は
 不要と判明した**のが最大の収穫。
 
+##### 修正（2026-07-08 修正フェーズ）：クリティカルセクションのネスト対応化 → enable完走・VHCI往復成功＝Phase D-1完了
+
+前段で確定した真因（コントローラ実行ループでの割込み禁止残置→
+`semphr_take`がE_CTX→タスクexit→SWリセット）の**発生源をソース監査で
+一意に特定**し，修正・実機検証した。
+
+**発生源（確定）＝`portENTER_CRITICAL`が退避値をmuxに格納する方式**。
+`asp3/target/esp32c3_espidf/bt/stub/include/freertos/FreeRTOS.h`の旧実装：
+```c
+#define portENTER_CRITICAL(mux)  (*(mux) = esp_shim_int_disable())
+#define portEXIT_CRITICAL(mux)   (esp_shim_int_restore(*(mux)))
+```
+`esp_shim_int_disable()`は「旧MIEを返し，MIEをクリア」，
+`esp_shim_int_restore(s)`は「s≠0ならMIEをセット」で**単体では正しい
+退避／復元**。しかし退避値を**呼び手のmux変数に格納**するため，
+**同一muxを入れ子で取得すると内側の取得が外側の退避値（MIE=1）を
+MIE=0で上書き**し，最外の解放で`restore(0)`＝**割込み禁止のまま残る**。
+BTコントローラの`global_interrupt_disable/restore`（bt.cの
+`_global_intr_disable/restore` osi関数）は**単一の共有mux
+`global_int_mux`**（bt.c:493）を使い，RW/LLDスタックがこれを深く
+ネストする＝旧方式では最外解放後もMIE=0が残る。これが実機で採取した
+「失敗する`semphr_take`直前の`mstatus.MIE=0`」の正体。ESP-IDF本家の
+FreeRTOSは割込み状態を**muxではなくコア単位のネストカウンタ**で退避
+（最外0→1で退避・最外1→0で復元）するため破綻しない。
+
+**修正（target/シム側のみ．submodule不可を遵守）**：
+- `asp3/target/esp32c3_espidf/wifi/esp_shim.c`：**ネスト対応
+  クリティカルセクション**`esp_shim_enter_critical()`/
+  `esp_shim_exit_critical()`を追加。大域ネストカウンタ
+  `esp_shim_crit_nest`＋退避`esp_shim_crit_saved`で，`csrrci`で
+  MIEを読みつつクリア→最外(nest 0→1)でのみMIEを退避，最外(1→0)でのみ
+  復元。単一コアのためmuxは不要（参照しない）。同一muxの入れ子でも
+  MIEを取りこぼさない。
+- `asp3/target/esp32c3_espidf/wifi/esp_shim.h`：上記のextern宣言追加。
+- `asp3/target/esp32c3_espidf/bt/stub/include/freertos/FreeRTOS.h`：
+  マクロを`portENTER_CRITICAL(mux) = (esp_shim_enter_critical(),(void)(mux))`
+  ／`portEXIT_CRITICAL(mux) = (esp_shim_exit_critical(),(void)(mux))`へ変更
+  （`_ISR`/`_SAFE`版も同一へ委譲）。`(void)(mux)`はunused警告抑止用で
+  副作用なし。BT専用ヘッダのためWiFi経路は不変。
+- `SHIM_LOCK`/`BT_LOCK`（局所変数に退避＝入れ子でも安全）は変更なし。
+
+**実機検証（被験機B `60:55:F9:57:C2:60`）**＝**★enable完走・VHCI往復成功
+＝Phase D-1完了基準を達成**：
+- 修正版`bt_smoke_hw`を`--before usb-reset --after watchdog-reset
+  --no-stub write-flash`で書込み→JTAGで状態採取（CDC非接続・
+  bare-run＋attach）。
+- **`hci_reset_done`(`0x3fc806f0`)=`0x00000001`＝真**。この大域は
+  `vhci_notify_host_recv`でHCI Command Complete（0x04/0x0E）を受信した
+  ときのみ`true`にする＝**HCI Reset送信→Command Complete受信の
+  VHCIループバックが成立**＝コントローラ生存の証明。
+- **PC=`dispatcher_2`(`0x42003d8c/90`)＝idle**（`_kernel_start_r`
+  `0x42003dac`のリセットループではない）。**RTC_SW_SYS_RESETループは消滅**。
+- **再現性**：`reset halt`→`resume`のクリーン再起動を複数回，いずれも
+  4s以内に`hci_reset_done=1`＋idle到達，以後安定（遅延リセットなし）。
+- コントローラがHCI Reset→Command CompleteのVHCI往復を完了した＝
+  イベントループが生存し`semphr_take`が正しくブロック（E_CTX消滅）した
+  ことの**エンドツーエンドの証明**（0x4201e958の単発take戻り値確認より
+  強い）。
+  （※修正でシンボルアドレスは移動：`dispatcher_2`=`0x42003d8c`,
+  `_kernel_start_r`=`0x42003dac`, `hci_reset_done`=`0x3fc806f0`,
+  `btdm_controller_task`=`0x4201e9f0`。以前の値は再ビルドで無効。）
+- **WiFi非回帰**：共有`esp_shim.c`変更は関数追加のみ（既存WiFi経路の
+  プリミティブ不変，マクロ変更はBT専用ヘッダ限定）。`wifi_dhcp_hw`
+  （`ESP32C3_WIFI=ON`）を再ビルドし0エラーを確認。
+
+**＝Phase D-1（コントローラ起動＋VHCIループバック）完了**。依頼
+`bt-emi-2board-request.md`のPhase D-1完了基準（HCI Reset往復）を満たす。
+次はPhase D-2（NimBLEホスト統合）。
+
+**S3移植メモ（このネスト不整合修正）**：本修正は**チップ非依存でS3の
+シムにも直結**する。S3も同一`bt.c`＝同じ`global_interrupt_disable`/
+共有`global_int_mux`のネストを踏むため，S3側`portENTER/EXIT_CRITICAL`が
+同じ「退避値をmuxに格納」方式なら同一のE_CTX→SWリセットが起きる公算大。
+`MEMORY.md`のS3欠陥ファミリ（OSAシム共有欠陥）と同種。S3では
+`esp_shim_enter/exit_critical`相当をネストカウンタ方式で実装し，
+BT stubの`portENTER/EXIT_CRITICAL`マクロを委譲させること
+（RISC-V`mstatus.MIE`はS3も同機構だがデュアルコアのためコア単位の
+カウンタ／スピンロックの扱いは要検討＝S3のマルチコア臨界区間は
+本C3単一コア実装をそのまま流用不可，コア別退避が必要）。
+
 #### 併発する既知バグ（boot variance の真因）
 本セッションを通した「boot variance」（em store bp命中率≈1/3，
 `dbg_assert_block`揺れ）の真因は，**共有ファイル
@@ -840,6 +920,14 @@ C6調査資産への影響を避け未修正．要判断）。
 | `apps/bt_smoke/bt_smoke.c` | `esp_bt_controller_init()`直前で`esp_shim_bt_clock_init()`を呼ぶ。調査用プローブ`BT_PROBE_STOP_AFTER_INIT`（`#ifdef`ガード，通常ビルド無影響）を残置。 |
 | `asp3/target/esp32c3_espidf/wifi/esp_coex_adapter.c` | `esp_shim_coex_adapter_register()`内のC6調査用一時診断（`read_fn(0x63)`）に**NULLガード**追加＝間欠クラッシュ（boot variance）の解消。`read_fn`が有効な場合の従来動作は不変。 |
 | `asp3/target/esp32c3_espidf/target_kernel_impl.c` | `hardware_init_hook()`に`esp_rom_set_cpu_ticks_per_us(160)`追加＝ROMの`s_ticks_per_us`を実CPUクロックへ更新（`esp_rom_delay_us`が1/8時間しか待たない問題の修正、C6 実施48/49と同機構）。RF較正の遅延精度に必須（ただしRF較正リセットの解消は別要因で未達）。 |
+
+### 変更したファイル（2026-07-08 クリティカルセクション・ネスト対応化＝Phase D-1完了）
+
+| ファイル | 内容 |
+|---|---|
+| `asp3/target/esp32c3_espidf/wifi/esp_shim.c` | **ネスト対応クリティカルセクション**`esp_shim_enter_critical()`/`esp_shim_exit_critical()`追加。大域ネストカウンタ＋退避で，最外(0→1)でMIE退避・最外(1→0)で復元＝同一muxの入れ子でもMIEを取りこぼさない。**「semphr_takeがE_CTX→タスクexit→SWリセット」の真因修正**。既存プリミティブ（`esp_shim_int_disable/restore`, `SHIM_LOCK`）は不変＝WiFi非回帰。 |
+| `asp3/target/esp32c3_espidf/wifi/esp_shim.h` | 上記2関数のextern宣言追加。 |
+| `asp3/target/esp32c3_espidf/bt/stub/include/freertos/FreeRTOS.h` | `portENTER_CRITICAL`/`portEXIT_CRITICAL`（`_ISR`/`_SAFE`版含む）を，退避値をmuxに格納する旧方式から`esp_shim_enter/exit_critical()`委譲へ変更。BT専用ヘッダのためWiFi不変。 |
 
 ### Git情報
 
