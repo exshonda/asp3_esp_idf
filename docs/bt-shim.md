@@ -1553,6 +1553,39 @@ phy_init_data・同じcalモードでregister_chipv7_phy/esp_phy_load_cal_and_in
 trim差はcal実行前提=クロック/PLL/温度/regi2cマスタ状態の差，入力相違ならtarget補完可）．
 併せてASP3-固定/NuttX-ノイジーの追加boot確証．
 
+#### (1)(e) ★確証：ASP3のRF-cal比較器は反復しない＋cal入力は同一（2026-07-08）
+
+**追加boot（同一board B rev3, NuttX/ASP3切替え）**：
+- **ASP3＝5 boot全て完全一致**（0x66/0=18, 0x6a/5=18, 0x6b/1=17, 0x6b/2=4b, 0x6d/6=98, 0x6d/0=f0）．
+- **NuttX＝3 boot(1/2/5)で 0x6a/5=19/18/19・0x6b/1=1f/1e/1e・0x6b/2=6f/5f/5f が変動**
+  （successive-approximation cal比較器のアナログノイズ）．0x6d/6=9c・0x66/0=18は安定．
+- ⇒ **NuttXがcalノイズを示すブロックで，ASP3は同一silicon上でも完全固定＝ASP3のRF-cal
+  比較器(SAループ)が反復していない＝calが実際に走っていない/不完全，を確証**
+  （同一siliconゆえアナログノイズは物理的に同じはず＝固定は「cal未実行」の強い証拠）．
+
+**cal入力の同一性（コード解析）**：BTビルド(ble_host_smoke)は**実phy_init.c**をリンク
+（esp_bt.cmake:112 `esp_phy/src/phy_init.c`）．`esp_phy_enable`(0x42003636)は
+`phy_module_enable`→`s_is_phy_calibrated`==0なら`esp_phy_load_cal_and_init`(0x42003556)
+→`register_chipv7_phy(init_data, cal_data, PHY_RF_CAL_FULL)`を呼ぶ．
+`CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE`未定義＝**NVS cal-data非ロード＝毎回
+PHY_RF_CAL_FULL固定・既定phy_init_data.c使用**．emi.c期の実測で
+register_chipv7_phy入口`s_is_phy_calibrated=0`は両者共通（full分岐）．
+⇒ **ASP3もフルRF-cal(register_chipv7_phy)を呼んでおり，入力(init_data/mode/cal_data)は
+NuttXと同一**．
+
+**★判定**：入力同一・full-cal呼出しも同じ・にもかかわらずASP3だけcal比較器が反復
+しない ⇒ **差は"cal実行前提"にある**（register_chipv7_phy実行中のクロック(cal用/
+regi2cマスタ)・PLLロック・bias・温度センサ等のランタイム前提）．**入力欠落ではない**．
+これはtarget側で補完し得る前提欠落の可能性が高く（C6 発見1「clk_i2c_mst_en未有効化」
+＝Direct Bootがregi2cマスタ前提を飛ばす、と同一クラスの疑い；ただしregi2c *read* は
+成功しているので単純な同型ではない）、かつC6 deaf-RX（同じくPHY/RFがフレーム未復調）と
+**同一機序＝突破すれば両者に効く可能性大**．`docs/wifi-shim-c6.md`相互参照．
+
+**次段（判断待ち）**：(step: cal反復の"理由"を直接掴む) register_chipv7_phy内部の
+SA/cal比較ループ（regi2c write_mask→read_mask反復）にbp/計装し，**イテレーション
+回数をNuttX vs ASP3で比較**＝どこで反復せず早期exit/skipするか特定．反復阻害の前提
+（cal用クロック/PLLロック/regi2cマスタ/bias）を掴めればtarget補完を試す．
+
 ### 変更したファイル
 
 | ファイル | 内容 |
