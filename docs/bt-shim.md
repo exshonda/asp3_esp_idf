@@ -669,6 +669,42 @@ enableは`emi.c:164`を越えたが，**`phy_init`のRF較正（`register_chipv7
    後追いattachでの状態採取が必須。UARTを付けても同種のUSB-JTAGリセット懸念は
    残るため，JTAG主体継続が妥当。）
 
+##### 追加調査（2026-07-08 続きの続き）：WiFi成功 vs BT失敗のphy_init経路A/B差分
+
+同一ボードで**動くWiFi（`wifi_scan`）** と**落ちるBT（`bt_smoke`）** を，
+それぞれ`register_chipv7_phy`入口（WiFi=`0x42028076`／BT=`0x4201687c`）で
+JTAG停止（OpenOCDのみ・CDC非接続なのでWiFiもリセットしない）し，直前状態を採取・diff：
+
+| 項目 | WiFi（成功） | BT（失敗） |
+|---|---|---|
+| `s_phy_modem_flag` | 0 | 0（同じ＝初回enableのfull init分岐） |
+| `s_is_phy_calibrated` | 0 | 0（同じ） |
+| `I2C_MST[0]` (`0x6000E000`) | `0x042f0669` | `0x04000000`（既定） |
+| `I2C_MST[1]` (`0x6000E004`) | `0x054b026b` | `0x04000000`（既定） |
+| `I2C_MST_ANA_CONF0` (`0x6000E040`) | `0x2900e448` | `0x2900e408`（bit6差） |
+| `ANA_CONFIG` (`0x6000E044`) | `0x00ffefff` | `0x0000002d` |
+| `ANA_CONFIG2` (`0x6000E048`) | `0x0001fe04` | `0x00000004` |
+
+**＝アナログI2Cマスタ／regi2c関連レジスタ（`0x6000E000`〜`E048`）がWiFiでは
+設定/使用済み，BTでは既定のまま**という顕著な差を発見。ただし：
+- BTの`register_chipv7_phy`入口でこれら（`E040/E044/E048`）にWiFi値を
+  直接書いてから継続しても，**依然リセット**（`btdm_controller_enable`未到達）。
+- `I2C_MST[0/1]`の値（`0x042f0669`/`0x054b026b`）はregi2cのトランザクション
+  状態に見え，「BTに欠けている静的config」ではなく「WiFiが既にregi2cを
+  使った痕跡（症状）」の可能性が高い。
+- ＝**差分は見つかったが，その値の強制ではリセットは解消せず**。真因は
+  regi2c値そのものより，**register_chipv7_phy内でregi2c/BBPLL較正が
+  BT経路特有の前提（PLL/アナログ電源/タイミング）で破綻している**深い層
+  （C6のRF/regi2c 66ラウンドと同一）にある。
+
+**現時点の到達点（正直な区切り）**：WiFi/BT経路差分で「regi2c/ANA周辺の差」
+までは特定したが，値の補完では解消せず。次は(a) `register_chipv7_phy`内の
+どの命令/regi2cブロックアクセスでリセットするかをbp二分で局所化，
+(b) C6資産（regi2c block 0x6b/0x66/0x6d/BBPLL自己較正，`docs/wifi-shim-c6.md`）
+との突合，(c) BBPLL較正の前提（`I2C_MST_ANA_CONF0`のBBPLL_STOP_FORCE，
+`regi2c_ctrl_ll_bbpll_calibration_start`）のA/B動的比較——いずれも**深いRF層**。
+**続行判断を仰ぐため一旦区切る**。
+
 #### 併発する既知バグ（boot variance の真因）
 本セッションを通した「boot variance」（em store bp命中率≈1/3，
 `dbg_assert_block`揺れ）の真因は，**共有ファイル
