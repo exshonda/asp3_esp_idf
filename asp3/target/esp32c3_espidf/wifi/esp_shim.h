@@ -147,6 +147,12 @@ extern void esp_shim_coex_adapter_register(void);
  */
 extern void esp_shim_log_write(const char *format, ...);
 
+/*
+ *  （D-2b(1) ISRストーム診断）0でOFF（既定）．appが1でBLE ISR（CPU線1）の
+ *  ストーム率／level割込みclear残存をRTC STORE4-7へ計装記録する．
+ */
+extern volatile uint32_t esp_shim_isr_storm_probe;
+
 #ifdef __cplusplus
 }
 #endif

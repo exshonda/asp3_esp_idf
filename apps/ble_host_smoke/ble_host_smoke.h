@@ -14,8 +14,12 @@
 #define MAIN_PRIORITY	10
 #define STACK_SIZE		8192
 
+/*  HRT凍結検証プローブ（最低優先度16＝アイドル時のみ回る．調査用）  */
+#define HRT_PROBE_PRIORITY	16
+
 #ifndef TOPPERS_MACRO_ONLY
 extern void main_task(EXINF exinf);
+extern void probe_task(EXINF exinf);
 #endif
 
 #endif /* BLE_HOST_SMOKE_H */

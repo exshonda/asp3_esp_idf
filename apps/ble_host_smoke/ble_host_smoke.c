@@ -60,6 +60,38 @@ volatile uint32_t	g_gap_conn_count;	/* CONNECT イベント回数 */
 volatile uint32_t	g_gap_disc_count;	/* DISCONNECT イベント回数 */
 volatile uint32_t	g_gap_event_count;	/* 全 GAP イベント回数 */
 volatile uint8_t	g_own_addr_type;
+volatile int32_t	g_reset_reason = 0x7fffffff;	/* ble_hs_cfg.reset_cb の reason */
+volatile uint32_t	g_reset_count;		/* ホストリセット回数 */
+
+/*
+ *  D-2b調査（HRT凍結検証）：SYSTIMER HWカウンタ直読みプローブ．
+ *  カーネルHRT割込み/timeout処理とは独立に，SYSTIMER HWが
+ *  advertising中に進み続けるかを記録する（JTAGライブhaltがRF中に
+ *  OpenOCDを落とす問題を回避＝busy-loopでグローバル/RTCへ記録し，
+ *  単発attachで事後読み）．
+ */
+#define HRT_PROBE	1
+extern uint32_t	_kernel_current_hrtcnt;
+volatile uint32_t	g_probe_systimer;	/* 直近のSYSTIMER HW値（下位32bit） */
+volatile uint32_t	g_probe_systimer_first;	/* プローブ開始時のSYSTIMER値 */
+volatile uint32_t	g_probe_hrtcache;	/* 直近の _kernel_current_hrtcnt キャッシュ */
+volatile uint32_t	g_probe_hrtcache_first;	/* プローブ開始時の hrtcnt キャッシュ */
+volatile uint32_t	g_probe_count;		/* プローブ反復回数 */
+
+/*  SYSTIMER unit0 の52bitカウンタ下位32bitを raw レジスタで直読み（snapshot）  */
+static uint32_t
+raw_systimer_lo(void)
+{
+	int	guard;
+
+	sil_wrw_mem((void *) 0x60023004UL, 0x40000000UL);	/* UNIT0_UPDATE */
+	for (guard = 0; guard < 100000; guard++) {
+		if ((sil_rew_mem((void *) 0x60023004UL) & (1UL << 29)) != 0U) {
+			break;			/* VALUE_VALID */
+		}
+	}
+	return sil_rew_mem((void *) 0x60023044UL);		/* UNIT0_VALUE_LO */
+}
 
 #define BLE_DEVICE_NAME		"ASP3-C3-BLE"
 
@@ -113,6 +145,12 @@ start_advertising(void)
 	rc = ble_gap_adv_start(g_own_addr_type, NULL, BLE_HS_FOREVER,
 						   &adv_params, gap_event_cb, NULL);
 	g_adv_rc = rc;
+#ifdef HRT_PROBE
+	/*  （D-2b(1)(i)）ble_gap_adv_startが返ったことをROM生存reg 0xC4へ
+	    記録＝ストームが止まりホストタスクが再開し0x200a完了が届いた証拠．
+	    0xAD0000xx=戻り値xxで復帰／0=依然ブロック（ストーム継続）．  */
+	sil_wrw_mem((void *) 0x600080C4UL, 0xAD000000UL | ((uint32_t) rc & 0xffUL));
+#endif
 	if (rc == 0) {
 		g_adv_active = 1U;
 		sil_wrw_mem(BLE_ADV_MARK_ADDR, BLE_ADV_MARK_VAL);
@@ -181,6 +219,16 @@ on_sync(void)
 static void
 on_reset(int reason)
 {
+	/*  D-2b調査：ble_hs_sched_reset の reason を timing非依存で記録．
+	    JTAGで g_reset_reason / g_reset_count / 0x6000805c を読む．  */
+	g_reset_reason = (int32_t) reason;
+	g_reset_count++;
+	/*  タグ付きでRTC 0x60008050へ記録＝esptool read-mem（JTAG不要）で
+	    事後読み．上位バイト0x5E=reset識別，下位=reason，中位=count下位．
+	    （プローブのRTC番地0x54/58/5cとは別番地＝衝突回避）  */
+	sil_wrw_mem((void *) 0x60008050UL,
+				0x5E000000UL | ((g_reset_count & 0xffUL) << 8)
+				| ((uint32_t) reason & 0xffUL));
 	syslog(LOG_ERROR, "ble_host_smoke: ble_hs RESET, reason=%d", (int_t) reason);
 }
 
@@ -265,6 +313,12 @@ main_task(EXINF exinf)
 	cfg.ble_aa_check = false;
 	cfg.adv_en = true;
 
+#ifdef HRT_PROBE
+	/*  （D-2b(1)）BLEコントローラISR（CPU線1）のストーム率／level割込み
+	    clear残存をRTC STORE4-7へ計装記録．advertising中はJTAGが死ぬので
+	    esptool read-mem（JTAG不要）で0x600080B8-C4を事後読みする．  */
+	esp_shim_isr_storm_probe = 1U;
+#endif
 	syslog(LOG_NOTICE, "ble_host_smoke: esp_bt_controller_init");
 	err = esp_bt_controller_init(&cfg);
 	if (err != ESP_OK) {
@@ -329,3 +383,36 @@ main_task(EXINF exinf)
 	}
 	syslog(LOG_NOTICE, "ble_host_smoke: done");
 }
+
+#ifdef HRT_PROBE
+/*
+ *  HRT凍結検証プローブタスク（最低優先度＝アイドル時に回る）．
+ *  SYSTIMER HW値（直読み）とカーネルHRTキャッシュをbusy-loopで記録．
+ *  カーネルtimeout（tslp/dly_tsk）に一切依存しないので，HRTが凍結して
+ *  いてもこのループは回り，SYSTIMER HWがadvertising中に進むか否かが
+ *  分かる．JTAG単発attachで g_probe_systimer/g_probe_count/g_probe_hrtcache
+ *  または RTC 0x60008058(SYSTIMER)/0x6000805c(count) を事後読み．
+ */
+void
+probe_task(EXINF exinf)
+{
+	(void) exinf;
+	/*  開始時の基準値（reset halt後にRTC 0x60008054=first, 0x60008058=latest,
+	    0x6000805c=count を読み，latest-first が進んでいればSYSTIMER HWは
+	    advertising中も生きている＝計測アーチファクト側，凍結ならBLE固有）  */
+	g_probe_systimer_first = raw_systimer_lo();
+	g_probe_hrtcache_first = _kernel_current_hrtcnt;
+	sil_wrw_mem((void *) 0x60008054UL, g_probe_systimer_first);
+	for (;;) {
+		g_probe_systimer = raw_systimer_lo();
+		g_probe_hrtcache = _kernel_current_hrtcnt;
+		g_probe_count++;
+		sil_wrw_mem((void *) 0x60008058UL, g_probe_systimer);
+		sil_wrw_mem((void *) 0x6000805cUL, g_probe_count);
+		{
+			volatile int	k;
+			for (k = 0; k < 20000; k++) { }	/* 短いbusy間隔 */
+		}
+	}
+}
+#endif /* HRT_PROBE */

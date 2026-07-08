@@ -75,6 +75,18 @@
  */
 #define BT_BB_CLK_EN_MASK			0x00031840U
 
+/*
+ *  （D-2b(1)(i) 実験・REFUTED 2026-07-08）advertising(0x200a)後にBT_BB
+ *  (割込みsource5,level)が~百万回/秒の割込みストームを起こしCPU飽和→
+ *  ホストタスク飢餓でble_gap_adv_startが返らない．BT_BBのINTMTXクリアは
+ *  効く（EIP_STATUS bit1はISR後に落ちる）がBBが即座に再アサートする．
+ *  最小マスクにWIFI_BT_COMMON(0x0078078F＝WiFi/BT共有modem/FE/PHY
+ *  データパスクロック)を加えても（→0x007B1FCF）ストームは止まらず
+ *  adv_startも返らなかった＝単純なCOMMONクロックビット欠落説は反証．
+ *  最小マスク(EM-init用・D-1 VHCI動作実績)に戻す．詳細＝docs/bt-shim.md
+ *  Phase D-2b(1)．次候補: lpclk/modem別レジスタ, ISRハンドラ監査, 2板差分．
+ */
+
 void
 esp_shim_bt_clock_init(void)
 {
@@ -405,9 +417,25 @@ esp_intr_alloc(int source, int flags, intr_handler_t handler, void *arg,
 	(void) flags;
 	bt_intr_handle.source = source;
 
+	/*  （D-2b(1) ISRストーム診断）blobが登録するBT割込みsource番号を
+	    RTC STORE6(0x600080C0, ROM生存reg)へ記録．esptool read-memで事後
+	    読み＝ストームsourceの特定（例: 8=RWBLE, 5=BT_BB, 7=RWBT）．
+	    ※0xBCはROMがusb-reset時に上書きするため不可．診断のみ・無害．  */
+	sil_wrw_mem((void *) 0x600080C0UL, (uint32_t) source);
+
 	sil_wrw_mem((void *)(uintptr_t)(BT_INTMTX_BASE_ADDR + (uint32_t) source * 4U),
 				BT_INTR_CPU_LINE);
-	sil_wrw_mem((void *)(uintptr_t) BT_INTMTX_PRI_REG(BT_INTR_CPU_LINE), 2U);
+	/*
+	 *  （D-2b(A)）BTコントローラISR（CPU線1）をINTMTX優先度1（最低）にし，
+	 *  カーネルタイマISR（CPU線16・優先度2）が**プリエンプトできる**ように
+	 *  する．両者が同レベル(2)だとadvertising中のBT ISR活動がタイマISRを
+	 *  スターブし2秒HCIタイムアウトが不発でホストがハングする疑いがあった．
+	 *  （ただし単独では未解決＝真のブロッカーはadv-enable後の割込みストーム
+	 *  疑い＝CPU飽和でホストタスクスターブ．docs/bt-shim.md「Phase D-2b」．
+	 *  優先度を上げてもBB割込みが立ち続けるか＝ack不能/クロックゲートかを
+	 *  esp_shim_int_count[1]のストーム率で観測する．）
+	 */
+	sil_wrw_mem((void *)(uintptr_t) BT_INTMTX_PRI_REG(BT_INTR_CPU_LINE), 1U);
 	esp_shim_set_isr(BT_INTR_CPU_LINE, (void *) handler, arg);
 	sil_wrw_mem((void *)(uintptr_t) BT_INTMTX_ENABLE_REG,
 				sil_rew_mem((void *)(uintptr_t) BT_INTMTX_ENABLE_REG)

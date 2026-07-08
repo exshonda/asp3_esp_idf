@@ -977,10 +977,37 @@ esp_shim_set_isr(int32_t cpu_intno, void *handler, void *arg)
 
 volatile uint32_t esp_shim_int_count[ESP_SHIM_MAX_WIFI_INTNO + 1];
 
+/*
+ *  （D-2b(1) ISRストーム診断）実行時フラグ．既定0=無効なので通常ビルド
+ *  （WiFi/bt_smoke_hw）は完全に非回帰．appが1を書くとBLEコントローラ
+ *  ISR（CPU線1）発火ごとにRTC STORE4-7へストーム率とlevel割込みの
+ *  clear残存を記録し，esptool read-mem（JTAG不要）で事後読みする．
+ *    STORE4 0x600080B8 = esp_shim_int_count[1]（ストーム累積回数）
+ *    STORE5 0x600080BC = INTMTX CPU_INT_EIP_STATUS(0x600C2110) 入口
+ *    STORE6 0x600080C0 = INTMTX CPU_INT_TYPE(0x600C2108, bit1=線1のedge/level)
+ *    STORE7 0x600080C4 = INTMTX CPU_INT_EIP_STATUS 出口（blob ISR実行後）
+ *  出口でbit1が残る＝ソース未clear＝再発火＝ストーム（(i)クロックゲート
+ *  or (ii)シムISR-clear欠落の判別材料）．詳細＝docs/bt-shim.md Phase D-2b．
+ */
+volatile uint32_t esp_shim_isr_storm_probe;
+
 static void
 shim_int_dispatch(int intno)
 {
 	esp_shim_int_count[intno]++;
+	if (esp_shim_isr_storm_probe != 0U && intno == 1) {
+		/*  STORE4(0xB8)=ストーム累積回数．STORE6(0xC0)=source番号は
+		    bt_shim esp_intr_allocが一度書く（ROM生存reg）．STORE7(0xC4)=
+		    blob ISR実行後のINTMTX EIP_STATUS（線1のclear残存確認）．
+		    ※0xBCはROMがusb-reset時に上書きするため使用不可．  */
+		sil_wrw_mem((uint32_t *) 0x600080B8UL, esp_shim_int_count[1]);
+		if (shim_isr_tbl[intno].fn != NULL) {
+			shim_isr_tbl[intno].fn(shim_isr_tbl[intno].arg);
+		}
+		sil_wrw_mem((uint32_t *) 0x600080C4UL,
+					sil_rew_mem((const uint32_t *) 0x600C2110UL));
+		return;
+	}
 	if (shim_isr_tbl[intno].fn != NULL) {
 		shim_isr_tbl[intno].fn(shim_isr_tbl[intno].arg);
 	}
