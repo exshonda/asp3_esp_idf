@@ -630,6 +630,45 @@ enableは`emi.c:164`を越えたが，**`phy_init`のRF較正（`register_chipv7
   より忠実に再現する方向**（ただしASP3自前のコンソール/タイマ用クロックを
   止めない配慮が必要）。C6のRF/regi2c知見が直結。
 
+##### 追加調査（2026-07-08 さらに続き）：CLEAR側再現の反証＋WiFi回帰確認＋重要な再枠組み
+
+1. **`esp_perip_clk_init`のCLEAR側再現はRF較正リセットを解消しない（反証）**：
+   差分ビット`0x88418068`（B=リセット既定 has，A=clears）は WDG/UART1/SPI2-4/
+   SPI-DMA/TIMG1 のみで，**ASP3が使うSYSTIMER(bit29)・USB-JTAG(USB_DEVICE bit23)は
+   A値でも保持される**ことを静的に確認（安全）。実機で`esp_bt_controller_enable`
+   入口にて `PERIP_CLK_EN0=0x71806007`＋`WIFI_CLK_EN=0xff87f850`（A値）を直接書いて
+   継続→**依然リセット（`btdm_controller_enable`未到達）**。＝クロック差分は
+   RF較正リセットの真因ではない。
+
+2. **s_ticks修正はC3 WiFiを回帰させていない（Task 2）**：`wifi_scan`
+   （`-DESP32C3_WIFI=ON`）をs_ticks修正**有り／無し両方**でビルド・実機起動。
+   コンソール（USB-CDC passive read）では両方とも`esp_wifi_start -> 0`直後に
+   `rst:0x15 USB_UART_CHIP_RESET`でリセット。**しかし何も接続しないbare run
+   （esptoolでwatchdog-reset起動→CDCに触れず8s→JTAGでPC確認）ではPCが
+   `dispatcher_2`(idle)＝リセットループではなくアプリが正常に走っている**。
+   ＝**C3 WiFiのリセットはCDCアクセス（passive read）に誘発される計測
+   アーチファクト**（このボードのUSB-Serial-JTAGがRF活動中のCDCアクセスで
+   チップリセットを起こす）で，**s_ticks修正の回帰ではない**（有無で挙動同一）。
+
+3. **★重要な再枠組み：BTのリセットはチップ内部（bare でも発生）だが，
+   WiFiは bare で正常動作する**（同一ボード・同一`register_chipv7_phy`）：
+   - BT bare run（s_ticks 有／無 両方）：PC=`_kernel_start_r`＝リセットループ，
+     `hci_reset_done`=0。＝**BT固有のチップ内部リセット**。
+   - WiFi bare run：PC=`dispatcher_2`(idle)＝正常。
+   - ＝**WiFiは同一ボードで`register_chipv7_phy`（RF較正）を完走できる**＝
+     RF較正自体・ボード・電源は問題なし。BTだけがRF較正中にリセットする＝
+     **BT固有の初期化差**（BT enable経路の`esp_phy_enable`前後の環境設定が，
+     esp_wifi_start経路と異なる）。
+   - **次段の最有力アプローチ：同一ボードで「動くWiFiのphy_init経路」と
+     「落ちるBTのphy_init経路」を突き合わせる**（esp_wifi_startとBT enableの
+     phy_init前提設定の差＝クロック/regi2c/PHY_modem_flag/coex順序）。WiFiが
+     同一ボードで動く＝RF層のA/B比較にNuttXを使わずWiFiビルドを内部参照に
+     できる（より安価）。
+   （なお，このボードのUSB-Serial-JTAGはRF活動中のCDCアクセスでチップ
+   リセットを誘発するため，**RF段階のコンソール観測は不可**＝JTAG bare-run＋
+   後追いattachでの状態採取が必須。UARTを付けても同種のUSB-JTAGリセット懸念は
+   残るため，JTAG主体継続が妥当。）
+
 #### 併発する既知バグ（boot variance の真因）
 本セッションを通した「boot variance」（em store bp命中率≈1/3，
 `dbg_assert_block`揺れ）の真因は，**共有ファイル
