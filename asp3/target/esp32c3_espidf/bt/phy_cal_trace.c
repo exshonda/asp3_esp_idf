@@ -29,13 +29,15 @@ typedef void (*pct_write_t)(int blk, int host, int reg, int data);
 typedef int  (*pct_readm_t)(int blk, int host, int reg, int msb, int lsb);
 typedef void (*pct_writem_t)(int blk, int host, int reg, int msb, int lsb, int data);
 
-#define PCT_N	2000	/* 線形バッファ長（cal先頭から。溢れは pct_count で判る） */
+#define PCT_N	1200	/* 線形バッファ長（cal先頭から。溢れは pct_count で判る） */
 
 /*  JTAG mdw で読む対象（.bss RAM 常駐）  */
 volatile uint32_t pct_magic;			/* 0x50435431("PCT1")＝差替え成功 */
 volatile uint32_t pct_count;			/* 記録試行総数（>PCT_Nなら溢れ）  */
 volatile uint32_t pct_swapped;			/* 差替えたエントリ数（4期待）      */
-volatile uint32_t pct_buf[PCT_N * 2];	/* 各イベント2語: w0=op/blk/reg/msb/lsb, w1=host/val */
+/*  各イベント3語: w0=op/blk/reg/msb/lsb, w1=host/val, w2=caller PC
+ *  （w2＝regi2c呼出し元＝0x6b sweepを回すcal関数の局所化用）  */
+volatile uint32_t pct_buf[PCT_N * 3];
 
 static pct_read_t	pct_orig_read;
 static pct_write_t	pct_orig_write;
@@ -44,14 +46,15 @@ static pct_writem_t	pct_orig_writem;
 
 static void
 pct_log(uint32_t op, uint32_t blk, uint32_t reg,
-		uint32_t msb, uint32_t lsb, uint32_t host, uint32_t val)
+		uint32_t msb, uint32_t lsb, uint32_t host, uint32_t val, uint32_t caller)
 {
 	uint32_t i = pct_count++;
 	if (i < PCT_N) {
-		pct_buf[i * 2] = (op << 24) | ((blk & 0xffU) << 16)
+		pct_buf[i * 3] = (op << 24) | ((blk & 0xffU) << 16)
 					   | ((reg & 0xffU) << 8)
 					   | (((msb & 0xfU) << 4) | (lsb & 0xfU));
-		pct_buf[i * 2 + 1] = ((host & 0xffU) << 16) | (val & 0xffU);
+		pct_buf[i * 3 + 1] = ((host & 0xffU) << 16) | (val & 0xffU);
+		pct_buf[i * 3 + 2] = caller;
 	}
 }
 
@@ -59,21 +62,23 @@ static int
 pct_wrap_read(int blk, int host, int reg)
 {
 	int v = pct_orig_read(blk, host, reg);
-	pct_log(0U, (uint32_t) blk, (uint32_t) reg, 0U, 0U, (uint32_t) host, (uint32_t) v);
+	pct_log(0U, (uint32_t) blk, (uint32_t) reg, 0U, 0U, (uint32_t) host, (uint32_t) v,
+			(uint32_t) __builtin_return_address(0));
 	return v;
 }
 static void
 pct_wrap_write(int blk, int host, int reg, int data)
 {
 	pct_orig_write(blk, host, reg, data);
-	pct_log(1U, (uint32_t) blk, (uint32_t) reg, 0U, 0U, (uint32_t) host, (uint32_t) data);
+	pct_log(1U, (uint32_t) blk, (uint32_t) reg, 0U, 0U, (uint32_t) host, (uint32_t) data,
+			(uint32_t) __builtin_return_address(0));
 }
 static int
 pct_wrap_readm(int blk, int host, int reg, int msb, int lsb)
 {
 	int v = pct_orig_readm(blk, host, reg, msb, lsb);
 	pct_log(2U, (uint32_t) blk, (uint32_t) reg, (uint32_t) msb, (uint32_t) lsb,
-			(uint32_t) host, (uint32_t) v);
+			(uint32_t) host, (uint32_t) v, (uint32_t) __builtin_return_address(0));
 	return v;
 }
 static void
@@ -81,7 +86,7 @@ pct_wrap_writem(int blk, int host, int reg, int msb, int lsb, int data)
 {
 	pct_orig_writem(blk, host, reg, msb, lsb, data);
 	pct_log(3U, (uint32_t) blk, (uint32_t) reg, (uint32_t) msb, (uint32_t) lsb,
-			(uint32_t) host, (uint32_t) data);
+			(uint32_t) host, (uint32_t) data, (uint32_t) __builtin_return_address(0));
 }
 
 extern void **__real_phy_get_romfuncs(void);
