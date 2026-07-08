@@ -19,6 +19,7 @@
 
 #define portMAX_DELAY		0xffffffffUL	/* ESP_SHIM_BLOCK_FOREVERと同値 */
 #define portTICK_PERIOD_MS	1		/* esp_shim側もtick=1msの前提 */
+#define configTICK_RATE_HZ	1000		/* tick=1ms（NimBLE NPLの時間換算用） */
 
 typedef void (*TaskFunction_t)(void *);
 

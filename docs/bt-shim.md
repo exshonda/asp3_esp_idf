@@ -897,6 +897,80 @@ C6調査資産への影響を避け未修正．要判断）。
   `phy_init`ブロッカーもS3で再現・別途対処が必要。**S3実機再現確認は
   本依頼範囲外＝別途必須**。
 
+## Phase D-2a：NimBLE host sync（進行中）
+
+目標＝NimBLEホストをD-1のコントローラ（VHCI往復OK）上に立ち上げ，
+`ble_hs`のsyncコールバック発火（HCIハンドシェイク完了・BDアドレス確定）
+まで。GAP/GATTはD-2b以降。
+
+### Stage 1（完了）：NPLシムAPIの追加
+
+`hal/components/bt/porting/npl/freertos/src/npl_os_freertos.c`（ESP-IDFの
+NPL＝FreeRTOS+esp_timerベースのOS抽象．1269行）が要求するFreeRTOS APIの
+うち，既存BTシム（D-1）に無かったものを実測で洗い出し，同じ方式
+（`esp_shim_*`プリミティブへ委譲）で追加した：
+
+| 追加API | 委譲先 | 備考 |
+|---|---|---|
+| `xQueueSendToBack/ToFront(+FromISR)` | `esp_shim_queue_send(_from_isr)` | ToFrontは先頭送信非対応のため通常送信で代用（NimBLE稀用途） |
+| `xQueueReset` | **新規`esp_shim_queue_reset`** | `prcv_dtq`で全item排出しヒープ解放 |
+| `xQueueIsQueueEmptyFromISR`／`uxQueueMessagesWaitingFromISR` | `esp_shim_queue_msg_waiting` | |
+| `xSemaphoreCreateRecursiveMutex`／`Take/GiveRecursive` | **既存`esp_shim_mutex_*`**（owner/count追跡＝再帰対応が既に実装済み） | TakeRecursiveのtmo引数は無視（下地`loc_mtx`＝永久ブロック） |
+| `uxSemaphoreGetCount` | **新規`esp_shim_sem_get_count`** | `ref_sem`→semcnt |
+| `xTaskGetCurrentTaskHandle` | `get_tid` | tskidをhandleとして返す |
+| `xTaskGetSchedulerState` | 定数`taskSCHEDULER_RUNNING` | ASP3はsta_ker後常時RUNNING |
+| `xTaskGetTickCount(FromISR)` | `esp_shim_time_us()/1000` | SYSTIMERのms換算．レジスタ読取りのみでISRセーフ |
+| `configTICK_RATE_HZ`＝1000 | — | tick=1ms（NPLの時間換算用） |
+
+コールアウトは`CONFIG_BT_NIMBLE_USE_ESP_TIMER=1`（nuttx sdkconfig.h）→
+`BLE_NPL_USE_ESP_TIMER=1`のため**esp_timer経路**（`bt_shim.c`が既に
+`esp_timer_create/start_once/stop/delete`を提供）。追加で
+`esp_timer_get_expiry_time`／`esp_timer_is_active`が必要（Stage 2で追加予定）。
+
+変更＝`wifi/esp_shim.c`（`esp_shim_sem_get_count`／`esp_shim_queue_reset`
+追加），`bt/stub/include/freertos/{queue,semphr,task,FreeRTOS}.h`（上表の
+inline委譲）。**bt_smoke_hw（D-1）再ビルドで0エラー・RAM 84.88%不変
+＝D-1非回帰**（追加APIはコントローラ未使用のためサイズ不変）。
+
+### 残Stage（未着手．スコープと★RAMリスクを実地マップ済み）
+
+ESP-IDF正本`hal/components/bt/CMakeLists.txt`（1167行）から構成を抽出：
+
+- **Stage 2 ビルド統合（大）**：NimBLE host本体 約60ソース
+  （`host/nimble/nimble/nimble/host/src/ble_hs*.c`／`ble_gap.c`／`ble_gatts*.c`／
+  `ble_gattc*.c`／`ble_att*.c`／`ble_l2cap*.c`／`ble_sm*.c`／`ble_uuid.c`等）＋
+  NPL（`porting/npl/freertos/src/npl_os_freertos.c`）＋mem
+  （`porting/mem/{bt_osi_mem,os_msys_init}.c`）＋HCIトランスポート
+  （`porting/transport/src/hci_transport.c`＋
+  `porting/transport/driver/vhci/hci_driver_nimble.c`＋
+  `nimble/transport/esp_ipc/src/hci_esp_ipc.c`）＋esp-hci
+  （`host/nimble/esp-hci/src/esp_nimble_hci.c`）＋nimble_port
+  （`porting/nimble/src/nimble_port.c`＋`porting/npl/freertos/src/nimble_port_freertos.c`）を
+  `esp_bt.cmake`へ追加，インクルードパス（`host/nimble/nimble/nimble/host/include`／
+  `.../nimble/include`／`porting/include`／`porting/npl/freertos/include`／
+  `porting/transport/include`／`host/nimble/port/include`／`host/nimble/esp-hci/include`）を通す。
+- **config**：NimBLEアプリ設定は**既存`hal/nuttx/esp32c3/include/sdkconfig.h`
+  （D-1で既にinclude path）が保有**（`CONFIG_BT_NIMBLE_ENABLED=1`／
+  `USE_ESP_TIMER=1`／`LEGACY_VHCI_ENABLE=1`／`MSYS_1_BLOCK=12×256`／
+  `MSYS_2=24×320`／`ACL_BUF=24×255`／`HOST_TASK_STACK=4096`／`MAX_CONNECTIONS=3`等）。
+  ただしESP-IDFビルド構造フラグ（`SOC_ESP_NIMBLE_CONTROLLER`＝os_mbuf/mempoolを
+  ROM/コントローラ供給とするか，`CONFIG_BT_LE_CONTROLLER_NPL_OS_PORTING_SUPPORT`／
+  `HCI_INTERFACE_USE_RAM`）はsoc_caps/Kconfig由来でnuttx sdkconfigに無い＝要組立。
+- **crypto決定点**：`CONFIG_BT_NIMBLE_CRYPTO_STACK_MBEDTLS=1`（sdkconfig）。
+  sync単体では暗号不要だが，`ble_sm*.c`のリンクにmbedTLS（RAM重・BTで未リンク）
+  or tinycrypt or SECURITY無効化のいずれかの判断が要る。sdkconfig.hは
+  submodule外だが編集不可のhal配下＝**target側で上書きsdkconfigを噛ませる**要検討。
+- **静的カーネルオブジェクトプール拡張**：`esp_shim`は固定プール
+  （**DTQは4本のみ**／SEM24／MTX8／TSK6，`bt.cfg`/`esp_shim_cfg`）。NimBLEは
+  eventq（host/transport）＋mutex数本を要求＝`bt.cfg`のDTQ/TSK/SEM/MTX増設が必要
+  （＝制御ブロック＋タスクスタック分のRAM増）。
+- **★RAM予算（最重要リスク）**：現状 **278124B/320KB＝84.88%，空き約48KB**。
+  NimBLE最小構成の追加RAM見積り＝host taskスタック4KB＋msys(3+7.7KB)＋
+  ACLバッファ約6KB＋HCI evtバッファ約2.7KB＋mempool/ble_hs .bss＋シムプール拡張
+  ＝**概ね35〜50KB**。**48KBに収まるかは極めて際どく，未削減では溢れる公算**。
+  削減案：`MAX_CONNECTIONS`を3→1，msys/ACLバッファ数削減，host taskスタック縮小，
+  SECURITY無効化（暗号除外）等。→**続行前にRAM戦略の判断を仰ぐのが妥当**。
+
 ### 変更したファイル
 
 | ファイル | 内容 |

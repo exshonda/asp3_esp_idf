@@ -20,6 +20,7 @@ extern int32_t esp_shim_queue_send_from_isr(void *que, void *item);
 extern int32_t esp_shim_queue_recv(void *que, void *item,
 									uint32_t block_time_tick);
 extern uint32_t esp_shim_queue_msg_waiting(void *que);
+extern void esp_shim_queue_reset(void *que);
 
 static inline QueueHandle_t
 xQueueCreate(UBaseType_t uxQueueLength, UBaseType_t uxItemSize)
@@ -72,6 +73,69 @@ static inline UBaseType_t
 uxQueueMessagesWaiting(QueueHandle_t xQueue)
 {
 	return (UBaseType_t) esp_shim_queue_msg_waiting(xQueue);
+}
+
+/*
+ *  NimBLE NPL（npl_os_freertos.c）が要求する追加API．
+ *  すべて既存のesp_shim_queue_*へ委譲する．
+ *  ・ToBack＝通常送信，ToFront＝esp_shim側で先頭送信非対応のため通常送信で
+ *    代用（NimBLE eventq_put_to_frontは稀用途．順序が厳密に要る箇所は無い）．
+ */
+static inline BaseType_t
+xQueueSendToBack(QueueHandle_t xQueue, const void *pvItemToQueue,
+				 TickType_t xTicksToWait)
+{
+	return (BaseType_t) esp_shim_queue_send(xQueue, (void *) pvItemToQueue,
+											 xTicksToWait, false);
+}
+
+static inline BaseType_t
+xQueueSendToBackFromISR(QueueHandle_t xQueue, const void *pvItemToQueue,
+						BaseType_t *pxHigherPriorityTaskWoken)
+{
+	if (pxHigherPriorityTaskWoken != NULL) {
+		*pxHigherPriorityTaskWoken = pdFALSE;
+	}
+	return (BaseType_t) esp_shim_queue_send_from_isr(xQueue,
+													  (void *) pvItemToQueue);
+}
+
+static inline BaseType_t
+xQueueSendToFront(QueueHandle_t xQueue, const void *pvItemToQueue,
+				  TickType_t xTicksToWait)
+{
+	return (BaseType_t) esp_shim_queue_send(xQueue, (void *) pvItemToQueue,
+											 xTicksToWait, true);
+}
+
+static inline BaseType_t
+xQueueSendToFrontFromISR(QueueHandle_t xQueue, const void *pvItemToQueue,
+						 BaseType_t *pxHigherPriorityTaskWoken)
+{
+	if (pxHigherPriorityTaskWoken != NULL) {
+		*pxHigherPriorityTaskWoken = pdFALSE;
+	}
+	return (BaseType_t) esp_shim_queue_send_from_isr(xQueue,
+													  (void *) pvItemToQueue);
+}
+
+static inline void
+xQueueReset(QueueHandle_t xQueue)
+{
+	esp_shim_queue_reset(xQueue);
+}
+
+static inline UBaseType_t
+uxQueueMessagesWaitingFromISR(QueueHandle_t xQueue)
+{
+	return (UBaseType_t) esp_shim_queue_msg_waiting(xQueue);
+}
+
+static inline BaseType_t
+xQueueIsQueueEmptyFromISR(QueueHandle_t xQueue)
+{
+	return (BaseType_t) (esp_shim_queue_msg_waiting(xQueue) == 0U ?
+						 pdTRUE : pdFALSE);
 }
 #endif /* TOPPERS_MACRO_ONLY */
 

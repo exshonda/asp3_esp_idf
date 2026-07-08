@@ -374,6 +374,20 @@ esp_shim_sem_give(void *sem)
 }
 
 /*
+ *  現在のセマフォ資源数（FreeRTOS uxSemaphoreGetCount相当．NimBLE NPL用）
+ */
+uint32_t
+esp_shim_sem_get_count(void *sem)
+{
+	T_RSEM		rsem;
+
+	if (ref_sem((ID)(intptr_t)sem, &rsem) != E_OK) {
+		return(0U);
+	}
+	return((uint32_t)rsem.semcnt);
+}
+
+/*
  *		ミューテックスプール（再帰対応ラッパ）
  */
 typedef struct {
@@ -590,6 +604,23 @@ esp_shim_queue_msg_waiting(void *que)
 		return(0U);
 	}
 	return((uint32_t)rdtq.sdtqcnt);
+}
+
+/*
+ *  キューを空にする（FreeRTOS xQueueReset相当．NimBLE eventq_reset用）．
+ *  格納中の全itemをprcv_dtq（ポーリング受信）で取り出しヒープを解放する．
+ */
+void
+esp_shim_queue_reset(void *que)
+{
+	SHIM_QUE	*q = (SHIM_QUE *)que;
+	intptr_t	data;
+
+	if (q != NULL) {
+		while (prcv_dtq(q->dtqid, &data) == E_OK) {
+			esp_shim_free((void *)data);
+		}
+	}
 }
 
 /*

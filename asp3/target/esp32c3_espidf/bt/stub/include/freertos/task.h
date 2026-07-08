@@ -14,8 +14,18 @@ typedef void *TaskHandle_t;
  */
 #define tskNO_AFFINITY	((BaseType_t) 0x7fffffff)
 
+/*
+ *  スケジューラ状態（NimBLE NPL npl_freertos_os_startedは
+ *  != taskSCHEDULER_NOT_STARTED で判定．ASP3はカーネル起動後は常に
+ *  RUNNING．configTICK_RATE_HZはFreeRTOS.hで1000＝1ms/tick）
+ */
+#define taskSCHEDULER_NOT_STARTED	0
+#define taskSCHEDULER_SUSPENDED		1
+#define taskSCHEDULER_RUNNING		2
+
 #ifndef TOPPERS_MACRO_ONLY
-#include <kernel.h>	/* bool_t／sns_ctx() */
+#include <kernel.h>	/* bool_t／sns_ctx()／get_tid()／esp_shim_time_us() */
+extern int64_t esp_shim_time_us(void);
 extern int32_t esp_shim_task_create(void (*entry)(void *), const char *name,
 									 uint32_t stack_size, void *param,
 									 uint32_t freertos_prio, void **task_handle);
@@ -65,6 +75,41 @@ static inline BaseType_t
 xPortInIsrContext(void)
 {
 	return (BaseType_t) sns_ctx();
+}
+
+/*
+ *  NimBLE NPL（npl_os_freertos.c）が要求する追加API．
+ */
+static inline TaskHandle_t
+xTaskGetCurrentTaskHandle(void)
+{
+	ID	self = 0;
+
+	(void) get_tid(&self);
+	return (TaskHandle_t)(intptr_t) self;
+}
+
+static inline BaseType_t
+xTaskGetSchedulerState(void)
+{
+	/*  ASP3はカーネル起動（sta_ker）後は常時スケジューリング動作中  */
+	return (BaseType_t) taskSCHEDULER_RUNNING;
+}
+
+/*
+ *  現在のtick（configTICK_RATE_HZ=1000＝1ms単位）．SYSTIMER（μs）を
+ *   msへ換算．レジスタ読取りのみでISRセーフ．
+ */
+static inline TickType_t
+xTaskGetTickCountFromISR(void)
+{
+	return (TickType_t)(esp_shim_time_us() / 1000);
+}
+
+static inline TickType_t
+xTaskGetTickCount(void)
+{
+	return (TickType_t)(esp_shim_time_us() / 1000);
 }
 #endif /* TOPPERS_MACRO_ONLY */
 
