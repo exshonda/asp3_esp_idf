@@ -1036,6 +1036,56 @@ mbedTLSのRAM＋リンク負担を回避）で承認・実施。
 - upstream npl/mem採用（`SOC_ESP_NIMBLE_CONTROLLER`非該当）・legacy VHCI・
   `bt_nimble_config.h`のcoex回避はS3も同型の見込み（要確認）。
 
+#### ★S3 BTシム着手前に必読：割込みネスト臨界区間の設計（デュアルコア対応）
+
+Phase D-1で潰した「クリティカルセクション・ネスト不整合バグ」（コントローラ
+enable後に`btdm_controller_task`がSWリセットループ）について，**S3でも
+同一のバグを踏むか**を検討した結論を明記する（この調査自体がS3 FMP3移植の
+BLE対応リスクを先取りするための依頼だったため）。
+
+**結論：バグの"トリガ"はチップ非依存で確実にS3にも存在する。ただし実際に
+踏むかはS3の（未実装の）BTシム実装次第であり，C3の修正はそのままは
+流用できない（デュアルコア対応が必須）。**
+
+1. **トリガはS3にもある（チップ非依存）**：
+   - S3もC3と同一のBTコントローラ系列（`libbtdm_app`＋`controller/esp32c3/bt.c`）。
+     `global_interrupt_disable/restore`（osiの`_global_intr_disable/restore`）が
+     **単一の共有`global_int_mux`をRW/LLDスタックで深くネスト取得**する挙動は
+     blob側なのでS3でも全く同じ。
+   - FMP3（S3側カーネル）も，CPUロック（割込み禁止）文脈でブロッキング待ち
+     サービスを呼べばコンテキストエラー（`E_CTX`相当）を返す。＝割込みが
+     禁止のまま残れば同じ失敗モード（block-forever take失敗→タスクexit→
+     SWリセット）になる。
+   - S3が**まだBTシムを持たない**（WiFiは完動・BLEはこれから）ため，今はまだ
+     踏んでいないだけ。S3のBTシムが**C3の旧実装パターン（saved-MIEをmuxに
+     格納）をコピーすれば，C3と全く同じネスト上書きバグを踏む**。
+
+2. **★C3の修正はS3にそのまま流用不可（S3はデュアルコア/SMP）**：
+   C3の修正（`esp_shim_enter/exit_critical`＝**大域**ネストカウンタ＋saved-MIE，
+   muxは無視。commit `b3129c9`，本doc「クリティカルセクション・ネスト対応化」節）は
+   **単一コア前提**。S3では以下が必要：
+   - **ネスト状態・saved割込み状態を「コア単位」で持つ**（各コアが独立した
+     `mstatus.MIE`とネスト深度を持つ。C3の単一大域カウンタはSMPでは誤り＝
+     別コアの状態を混ぜる）。
+   - **muxを無視できない＝本物のスピンロックとして実際にacquire/releaseする**。
+     SMPでは`portENTER_CRITICAL(mux)`は「割込み禁止」に加え「muxスピンロックで
+     コア間相互排除」も担う。C3修正はmuxを無視するが，これはSMPではコア間
+     排他を壊す。
+   - ＝S3の正しい実装は**ESP-IDF SMP FreeRTOSと同じフルセマンティクス**
+     （コア単位ネストカウンタ＋saved割込み状態＋muxスピンロック）。
+
+3. **S3への推奨**：
+   - `portENTER/EXIT_CRITICAL`を**最初から「コア単位ネスト＋muxスピンロック」で
+     実装**する（C3の単一コア版をコピーしない）。BT stubの`portENTER/EXIT_CRITICAL`
+     マクロを，S3版の`esp_shim_enter/exit_critical`相当（per-core＋spinlock）へ委譲。
+   - 可能なら**BTをコア0固定**にすると，そのコアに対しては実質単一コア的に
+     扱えて実装が単純化する（S3のWiFiも「コア0固定」で類似の地雷を回避した
+     経緯がS3側ドキュメントにある）。ただしそれでもmuxスピンロック自体は
+     残す方が安全（他コアからの臨界区間アクセスがゼロと断言できない限り）。
+   - 参照：C3の単一コア実装＝`asp3/target/esp32c3_espidf/wifi/esp_shim.c`の
+     `esp_shim_enter/exit_critical`（本docのPhase D-1修正節）。**構造は流用元と
+     して有用だが，per-core化とspinlock追加を必ず行うこと。**
+
 ### 変更したファイル
 
 | ファイル | 内容 |
