@@ -82,9 +82,15 @@ set(ESP32C6_CONSOLE usbjtag
 #  コンパイル定義
 #
 #  USE_TIM_AS_HRT：高分解能タイマにSYSTIMERを使用（Machine Timer不使用）
+#  TOPPERS_SUPPORT_TLS：タスク実行開始時(start_r)のTLS(スレッドローカル
+#    ストレージ)初期化(tp設定)を有効化．picolibcのrand()等TLS依存libc
+#    関数を使うとtp未初期化(=0)でLoad access faultになるため常時有効
+#    （詳細はasp3_coreのarch/riscv_gcc/esp32c6/chip_asm.incの
+#    init_additional_regs_start_r参照）．
 #
 list(APPEND ASP3_COMPILE_DEFS
     USE_TIM_AS_HRT
+    TOPPERS_SUPPORT_TLS
 )
 
 #

@@ -26,6 +26,7 @@
 #include <kernel.h>
 #include <t_syslog.h>
 #include <stddef.h>
+#include <string.h>
 #include <sys/lock.h>
 #include <errno.h>
 #include "esp_shim.h"

@@ -107,6 +107,19 @@ SECTIONS
         . = ALIGN(8);
         __global_pointer$ = . + 0x800;
         *(.sdata .sdata.*)
+        /*
+         *  TLS(スレッドローカルストレージ)初期化イメージ．
+         *  init_additional_regs_start_r（asp3_coreのarch/riscv_gcc/
+         *  esp32c3/chip_asm.inc）がタスク実行開始時にここから読み出し，
+         *  タスクスタック最下位へコピーする．本ldは.dataと同じ
+         *  DROM→RAMコピー機構（__idata_*）をそのまま使うため，.data
+         *  出力セクションの一部として同時にコピーされる（独立したロード
+         *  処理は追加しない）．
+         */
+        . = ALIGN(8);
+        _thread_local_data_start = .;
+        *(.tdata .tdata.*)
+        _thread_local_data_end = .;
         . = ALIGN(4);
     } > RAM
     /*
@@ -125,5 +138,18 @@ SECTIONS
         *(COMMON)
         . = ALIGN(4);
         __bss_end = .;
+    } > RAM
+
+    /*
+     *  TLS(スレッドローカルストレージ)テンプレートのBSS部分の境界
+     *  シンボル（サイズ計算専用．NOLOADのため内容は読まない．
+     *  init_additional_regs_start_rはこのサイズ分だけタスクスタック
+     *  最下位をゼロ埋めする）．
+     */
+    .tbss (NOLOAD) : ALIGN(8) {
+        _thread_local_bss_start = .;
+        *(.tbss .tbss.*)
+        *(.tcommon)
+        _thread_local_bss_end = .;
     } > RAM
 }
