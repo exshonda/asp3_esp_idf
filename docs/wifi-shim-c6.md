@@ -10296,3 +10296,252 @@ duty-cycling），またはOSプリミティブ／タイマ連携の別の差異
 - ボードは実施71終了時点でASP3（`WIFI_SCAN_PS_MIN_MODEM`無効の
   既定ビルド，esptoolハードリセットで正常起動・スキャンループ
   稼働中）に戻して残置。
+
+## 実施72：blobがesp_phy_enable/disableを呼ぶ呼出し元を逆アセンブルで完全追跡——★真の起点を発見・target側で修正・実機検証★＝ASP3自身の設定ヘッダ`hal_stub/include/nuttx/config.h`が`CONFIG_ESPRESSIF_WIFI_STA_DISCONNECT_PM`を明示的に`0`固定していたのが全連鎖の起点．`1`へ修正しesp_phy_enable/disableサイクルとphy_wakeup_init/fe_txrx_resetの再現に完全成功したが，★deaf-RX（bit14／sta_rx_cb）自体は解消せず★——この経路は真因ではなく独立した別の欠落だったと判明
+
+### 背景
+
+実施70-71で，`fe_txrx_reset`はnativeで1スキャン中4回呼ばれる
+`esp_phy_enable()`のうち2回目以降（`s_is_phy_calibrated`既true時の
+"wakeup"経路）でのみ実行されるが，ASP3は`esp_phy_enable`を起動時に
+1回しか呼ばず，この経路に到達しないことを突き止めた。本ラウンドは
+コーディネータの指示通り，**osi_funcsの`_phy_enable`/`_phy_disable`
+スロット（`phy_enable_wrapper`/`phy_disable_wrapper`）を呼んでいる
+blob側の真の呼出し元**を逆アセンブルで遡り，何がnativeで4回・ASP3で
+1回という差を生んでいるかを突き止める。
+
+### 実装・手順
+
+ソース変更は最終段のみ（`asp3/target/esp32c3_espidf/hal_stub/include/
+nuttx/config.h`，submoduleではない）。手法は全て実施69-71で確立した
+JTAG手順（`esptool --after hard-reset`起動→`halt`attach，`wait_halt`，
+`rbp all`/`rwp all`，ROM ELF `nm`由来の実アドレス）を踏襲。
+
+1. `phy_enable_wrapper`（ASP3`0x42002490`／native
+   `esp_phy_enable_wrapper`0x42091f30）・`phy_disable_wrapper`
+   （ASP3`0x420024da`／native`0x42091f4e`）へHWブレークポイントを
+   張り，ヒット時の`ra`（リターンアドレス）を採取——呼出し元を
+   直接特定する。
+2. native側：`ra`は`enable`初回のみ`0x4203909a`（別経路），2回目以降
+   は一貫して`0x40016ad0`（`wifi_rf_phy_enable`内），`disable`は
+   一貫して`0x40016b48`（`wifi_rf_phy_disable`内）——両方とも**ROM
+   常駐関数**（`nm`で`esp32c6_rev0_rom.elf`から確定，全プラット
+   フォーム共通アドレス）。
+3. ASP3側：**同一ROMアドレス`0x40016a68`（`wifi_rf_phy_enable`）／
+   `0x40016afc`（`wifi_rf_phy_disable`）へ直接bpを張り，90秒の監視
+   窓で一度もヒットしないことを確認**——ROM関数自体が一度も呼ばれて
+   いない。
+4. `wifi_rf_phy_enable`/`wifi_rf_phy_disable`（ROM）を逆アセンブルし，
+   さらにその呼出し元を`ra`採取で遡る：native側`ra`は`enable`が
+   `0x4204e83e`，`disable`が`0x4204e8f2`——いずれも
+   **`pm_disconnected_wake`（`0x4204e812`）／`pm_disconnected_sleep`
+   （`0x4204e87c`）** 内（`nm`で確認，ASP3にも同一シンボルが存在：
+   `pm_disconnected_wake=0x42055470`）。
+5. ASP3で`pm_disconnected_wake`（`0x42055470`）へbpを張ると**頻繁に
+   ヒットする**（30秒で22回）——呼ばれてはいるが，`wifi_rf_phy_enable`
+   には到達していない。`pm_disconnected_wake`を逆アセンブルすると，
+   冒頭で`g_pm[289]`（構造体`g_pm`のオフセット289バイト，ASP3
+   `0x40874648+289=0x40874769`）を読み，**値が`3`でなければ即
+   return**（`wifi_rf_phy_enable`を呼ばない）という単純なガードが
+   判明。
+6. ASP3で`pm_disconnected_wake`ヒット時に`g_pm[289]`を読むと**14/15回
+   すべて`0`**（ガード条件`==3`を満たさず常に早期return）。native側
+   同一箇所を読むと`0,1,1,1,1,3,3,2,2,2`と**遷移する状態機械**
+   （0→1→3で`wifi_rf_phy_enable`実行→2で"awake"状態）——ASP3は
+   このステートマシンの初期値0から一切進まない。
+7. 状態遷移`0→1`を担う関数を特定するため，`g_pm[289]`への write
+   アクセスへ**ハードウェアウォッチポイント**（`wp <addr> 1 w`）を
+   張り，native起動直後から監視。捕捉したPC/呼出しコンテキストから
+   `pm_enable_sta_disconnected_power_management(a0)`（`0x4205076a`）
+   を特定——`a0!=0`のとき`g_pm[289]=1`をセットする関数。
+8. `pm_enable_sta_disconnected_power_management`の唯一の呼出し元
+   （native`0x420511e6`，`ic_init`内）を特定。逆アセンブルすると：
+   `a5 = g_wifi_menuconfig[0x48]`（バイトフラグ）；`if (a5 != 0)
+   pm_enable_sta_disconnected_power_management(1)`——**この1バイトの
+   フラグが全連鎖の起点**。
+9. `g_wifi_menuconfig+0x48`をASP3・native双方でJTAG直読み：
+   **native=`0x01`，ASP3=`0x00`**（フレッシュフラッシュ・複数回とも
+   再現）。
+10. `g_wifi_menuconfig`はBSSシンボル（実行時に populate される）。
+    populate元を`wifi_menuconfig_init`（native`0x4203950e`）の逆
+    アセンブルで特定：**入力引数（`esp_wifi_init()`に渡される
+    `wifi_init_config_t*`）のオフセット128（`lbu a4,128(s0)`）を
+    そのまま`g_wifi_menuconfig+0x48`へコピー**（`sb a4,72(a5)`）。
+11. `wifi_init_config_t`（`esp_wifi.h`）のオフセット128に対応する
+    フィールドを構造体定義から特定：**`bool sta_disconnected_pm`**
+    （コメント："WiFi Power Management for station at disconnected
+    status"）。`WIFI_INIT_CONFIG_DEFAULT()`マクロでは
+    `.sta_disconnected_pm = WIFI_STA_DISCONNECTED_PM_ENABLED`，これは
+    `#if CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE`で`true`/`false`
+    に展開される。
+12. ASP3実機のcfg構造体をJTAGで直接ダンプ（`esp_wifi_init`エントリで
+    bp・`a0`＝&cfgを採取・`mdw`でダンプ）し，オフセット128
+    ＝`sta_disconnected_pm`＝**`0x00000000`**であることを確認。
+13. `-DASP3_EXTRA_COMPILE_DEFS=CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=1`
+    で再ビルド・再検証したが**値は依然0のまま**——コマンドラインの
+    `-D`が効かない。`gcc -E -Wall`でプリプロセス警告を確認したところ
+    **`hal/nuttx/esp32c6/include/sdkconfig.h`が
+    `#define CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE
+    CONFIG_ESPRESSIF_WIFI_STA_DISCONNECT_PM`で再定義しており**，
+    コマンドライン`-D`をヘッダの再定義が上書きしていた（警告
+    "redefined"で発覚）。
+14. **`asp3/target/esp32c3_espidf/hal_stub/include/nuttx/config.h`
+    （C3・C6双方のWi-Fiビルドで共有，submoduleではない）が
+    `#define CONFIG_ESPRESSIF_WIFI_STA_DISCONNECT_PM  0`と明示的に
+    0固定していた**（コメント：「省電力連動切断（Modem-sleep関連）：
+    未使用のため無効」）——これが全連鎖の**真の起点**であり，
+    target側で修正可能な設定ミスだった。
+
+### 結果
+
+**修正**：`hal_stub/include/nuttx/config.h`の該当行を
+`CONFIG_ESPRESSIF_WIFI_STA_DISCONNECT_PM 0`→`1`に変更（コメントで
+本ラウンドの経緯を記録）。再ビルド・実機検証：
+
+1. `g_wifi_menuconfig+0x48`＝**`0x01`**（修正前は`0x00`）に変化。
+2. `esp_phy_enable`・`esp_phy_disable`・`phy_wakeup_init`へのbp同時
+   監視（30イテレーション×2秒）で**`esp_phy_enable`=9回，
+   `esp_phy_disable`=9回，`phy_wakeup_init`=8回**——修正前（各1/0/0）
+   から劇的に変化し，nativeと同様のenable/disable往復サイクルが
+   ASP3でも回るようになった（機構としては完全復旧）。
+3. **★しかしdeaf-RX自体は解消しなかった★**：RTC`0x500000B0`
+   （MACイベントOR蓄積，実施59由来）をゼロクリア後，8秒間の自由
+   実行を2回（独立2ブート）行い読み出したが，**依然として厳密に
+   `0x00000080`（TX完了のみ，bit14は一度も立たず）**。`sta_rx_cb`
+   （RTC`0x50000090`，実施57由来）も**2ブートとも`0`のまま**。
+   AP検出は達成されなかった。
+
+### 解釈：欠落は本物で完全修正されたが，deaf-RXの根本原因ではなかった
+
+`CONFIG_ESPRESSIF_WIFI_STA_DISCONNECT_PM=0`は，ASP3の設定に実在した
+本物の欠陥であり（native/ESP-IDFの既定値`1`と異なる），その結果
+`esp_phy_enable()`の"PHY wakeup"経路（`phy_wakeup_init`／
+`fe_txrx_reset`のFEリセットパルスを含む）がASP3では構造的に一度も
+実行され得なかった——これは実施70-72で完全に，逆アセンブルによる
+1行単位の追跡で証明された。この意味で実施70の疑問（「原因か症状か」）
+には，**「(a)ASP3側の設定ミスによる構造的欠落であり，(b)deaf-RXの
+症状ではない（deaf-RXとは独立に存在した別の欠陥）」**という形で
+決着がついた——ただし**この欠落を修正してもdeaf-RXは直らなかった**
+ため，deaf-RXの原因としては**反証**されたことになる。
+
+これは実施60-71で反証されてきた「一過性PHY起動/reset/arm操作」
+バケット全体（`enable_agc`/`set_rxclk_en`/`rx_pbus_reset`/
+`fe_txrx_reset`/`mac_enable_bb`）に対する，最初の**直接的な決定実験**
+（設定を実際に直して結果を見る）であり，その結果は明確な負——
+「PHYが定期的にwakeup/再初期化されないから受信できない」という
+仮説は**反証された**。deaf-RXの真因は依然未特定のまま，探索空間は
+振り出しに戻ったのではなく，**この特定の枝（PHY wakeupサイクル
+欠如）が閉じた**という前進として記録する。
+
+### 修正の扱い：恒久修正として保持
+
+本修正（`CONFIG_ESPRESSIF_WIFI_STA_DISCONNECT_PM`を`1`へ）は：
+
+- **deaf-RXは解決しないが，それ自体は正当な設定修正**である
+  （native/ESP-IDFの実際の既定動作に合わせる本来あるべき値であり，
+  診断専用のハックではない）。実機検証でscan自体の動作に悪影響
+  （クラッシュ・新規ハング等）は観測されなかった。
+- **共有ヘッダにつきC3ビルドにも影響する**：`hal_stub/include/
+  nuttx/config.h`はC3・C6のWi-Fiビルド双方から参照される
+  （submoduleではなく本リポジトリ側）。C3の禁則対象ボード
+  （`60:55:F9:57:C9:88`・`60:55:F9:57:C2:60`）には本ラウンドでも
+  一切触れていないため実機再検証はできなかったが，**C3向けWi-Fi
+  ビルド（`build/wifi_dhcp_hw`）が本修正後もコンパイル成功する
+  ことは確認済み**（リンクエラー・警告増加なし）。
+- 恒久修正として保持し，revertしない（今後の比較ラウンドでは
+  ASP3のPHY enable/disableサイクルがnativeと同様に回る前提で
+  比較すること——実施60-71までの一部の静的比較は，本修正前の
+  「PHY常時有効・wakeupサイクルなし」状態で取得されたものである
+  点に注意）。
+
+### まとめ・申し送り
+
+1. **★呼出し元の完全特定に成功★**：`phy_enable_wrapper`／
+   `phy_disable_wrapper`（osi_funcs）→ROM `wifi_rf_phy_enable`／
+   `wifi_rf_phy_disable`→`pm_disconnected_wake`／
+   `pm_disconnected_sleep`→（`g_pm[289]`状態機械，`0→1→3→2`の遷移）
+   →`pm_enable_sta_disconnected_power_management(1)`→
+   `g_wifi_menuconfig[0x48]`→`wifi_init_config_t.sta_disconnected_pm`
+   →`WIFI_STA_DISCONNECTED_PM_ENABLED`マクロ→
+   `CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE`→（NuttX互換シム
+   `sdkconfig.h`経由で）`CONFIG_ESPRESSIF_WIFI_STA_DISCONNECT_PM`
+   （ASP3の`hal_stub/config.h`で明示的に`0`固定）という，**Kconfig
+   から実機RFリセットパルスまでの完全な因果連鎖**を1行単位で
+   実証した。
+2. **target側で完全に修正可能だった**（`hal_stub/config.h`の1行）。
+   修正・実機検証済み，esp_phy_enable/disableサイクルと
+   `phy_wakeup_init`/`fe_txrx_reset`の実行を回復。
+3. **★しかしdeaf-RX自体（bit14／sta_rx_cb）は解消しなかった★**
+   （2ブートで再現，決定的な負の結果）。この経路は deaf-RX の
+   原因ではなかった。
+4. **今後の申し送り**：この枝は閉じられたので，実施60-71の
+   反証済みリスト（静的config，アンテナ，dwell，RFPLLロック，
+   RXクロック，RX-FEアナログ設定，RXバッファ供給系，AGC較正結果値，
+   フィルタ/ポリシー層，PHY wakeupサイクル）に加える。残る未検証
+   領域は，実施70の申し送り(c)（MAC空間diffのブレークポイント同期
+   再実施，実施71で部分着手したが`0x600a4e4c`の意味論は未特定）や，
+   より深いROM/blob内部の受信復調そのもの（AGCゲイン設定値・
+   RX状態機械・regi2c RFブロックの，bit14が実際に立つ瞬間の動的
+   比較——実施66/70で部分着手も未完了）。また，今回発見した
+   `pm_disconnected_wake`/`wifi_rf_phy_enable`のような**ROM常駐の
+   グローバル関数トレース手法**（osi_funcsラッパへのbp→ra採取で
+   呼出し元を遡る）は，今後同様の「呼ばれるべき関数が呼ばれない」
+   系の調査に再利用できる汎用パターンとして記録する。
+5. 本調査全体（実施1〜72）は依然**未解決**（0 AP）。ただし今回は
+   「target側の設定を実際に修正して検証する」という初めての決定
+   実験を行い，明確な負の結果を得たという意味で，調査の質が
+   一段階進んだ。
+
+### 変更ファイル
+
+- `asp3/target/esp32c3_espidf/hal_stub/include/nuttx/config.h`：
+  `CONFIG_ESPRESSIF_WIFI_STA_DISCONNECT_PM`を`0`→`1`に変更（コメント
+  で本ラウンドの経緯・因果連鎖を記録）。恒久修正として保持
+  （revertしない）。`asp3/asp3_core/`・`hal/`いずれのsubmoduleも
+  変更していない（CLAUDE.md禁則1・2を遵守）。
+- `docs/wifi-shim-c6.md`に本実施72を追記。
+
+### 検証
+
+- `phy_enable_wrapper`(ASP3`0x42002490`)/`phy_disable_wrapper`
+  (ASP3`0x420024da`)へのbp＋`ra`採取でROM`wifi_rf_phy_enable`
+  (`0x40016a68`)/`wifi_rf_phy_disable`(`0x40016afc`)を特定。ASP3で
+  これらROMアドレスへ直接bp→90秒間0ヒット（修正前）を確認。
+- `wifi_rf_phy_enable`/`disable`逆アセンブル→呼出し元
+  `pm_disconnected_wake`(`0x4204e812`)/`pm_disconnected_sleep`
+  (`0x4204e87c`)を特定（native `ra`採取），ASP3同一シンボル
+  (`0x42055470`)確認。
+- `pm_disconnected_wake`冒頭の分岐条件（`g_pm[289]==3`）を逆
+  アセンブルで確認。ASP3で14/15回のヒット全てで`g_pm[289]=0`
+  （修正前），native実測で`0,1,1,1,1,3,3,2,2,2`の状態遷移を確認。
+- HWウォッチポイント（`wp 0x4081ec10 1 w`相当，native
+  `g_wifi_menuconfig+0x48`）で書込み元`wifi_menuconfig_init`
+  (`0x4203950e`)を特定，逆アセンブルで入力オフセット128→出力
+  オフセット72(0x48)のコピーを確認。
+- `wifi_init_config_t`定義（`esp_wifi.h`）でオフセット128
+  ＝`sta_disconnected_pm`（`feature_caps`(uint64_t,offset112-119)の
+  直後）であることをフィールド列挙で確認。ASP3実機cfg構造体を
+  `esp_wifi_init`エントリのbpで`a0`アドレス採取後`mdw`ダンプし，
+  offset128=0（修正前）を実測で確認。
+- `-DASP3_EXTRA_COMPILE_DEFS=CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=1`
+  では効果なし（`gcc -E -Wall`で`hal/nuttx/esp32c6/include/
+  sdkconfig.h:772`の"redefined"警告により`sdkconfig.h`の再定義が
+  コマンドライン`-D`を上書きすると判明）。
+- `hal_stub/include/nuttx/config.h`の
+  `CONFIG_ESPRESSIF_WIFI_STA_DISCONNECT_PM`を修正・再ビルド後：
+  `g_wifi_menuconfig+0x48`=`0x01`（修正前`0x00`）を確認。
+  `esp_phy_enable`/`esp_phy_disable`/`phy_wakeup_init`の3bp同時監視
+  （30イテレーション×2秒）で各9/9/8回ヒット（修正前は1/0/0）を確認。
+- 修正後，RTC`0x500000B0`（MACイベントOR）ゼロクリア→8秒自由実行
+  →`0x00000080`（bit14立たず，2ブートとも再現）。`sta_rx_cb`
+  （RTC`0x50000090`）も2ブートとも`0`のまま——deaf-RX継続を確認。
+- C3向けWi-Fiビルド（`build/wifi_dhcp_hw`）が本修正後もコンパイル
+  成功することを確認（リンクエラーなし，`IROM 10.54%／DROM
+  12.33%／RAM 94.70%`）。実機再検証はC3禁則ボードのため未実施。
+- 全JTAGは`esptool --after hard-reset`起動後，OpenOCD`init`→`halt`
+  （`reset halt`不使用）→`rbp all`/`rwp all`→`bp`設置の実施69-71
+  手順を踏襲。`adapter serial 58:E6:C5:12:D4:D0`で本ボードに固定
+  （同一USBホスト上の他のEspressifボード，特にC3ボード
+  `60:55:F9:57:C9:88`・`60:55:F9:57:C2:60`には一切触れず）。
+- ボードは実施72終了時点でASP3（修正後ビルド，esptoolハードリセット
+  で正常起動・スキャンループ稼働中）に戻して残置。

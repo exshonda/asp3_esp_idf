@@ -63,8 +63,19 @@
 #define CONFIG_ESPRESSIF_WIFI_ENABLE_SAE_H2E                0
 #define CONFIG_ESPRESSIF_WIFI_SOFTAP_SAE_SUPPORT           0
 #define CONFIG_ESPRESSIF_WIFI_ENABLE_WPA3_OWE_STA          0
-/*  省電力連動切断（Modem-sleep関連）：未使用のため無効  */
-#define CONFIG_ESPRESSIF_WIFI_STA_DISCONNECT_PM            0
+/*
+ *  実施72（docs/wifi-shim-c6.md）：この値が0だと`wifi_init_config_t.
+ *  sta_disconnected_pm`がfalseになり，blob内部の`ic_init()`が
+ *  `pm_enable_sta_disconnected_power_management(1)`を呼ばず，
+ *  `g_pm`のPM状態バイト（オフセット289）が初期値0のまま遷移せず，
+ *  `pm_disconnected_wake()`が常に早期returnし，`esp_phy_enable()`が
+ *  起動時の1回しか呼ばれず（native実測は1scan中に4回），PHY
+ *  wakeup経路（`phy_wakeup_init`／`fe_txrx_reset`のFEリセット
+ *  パルス）が一度も実行されない——というdeaf-RXの新規かつ完全に
+ *  追跡された原因連鎖の起点であることが判明した．有効化（1）に
+ *  切替え，PHY wakeupサイクルが回復しRXが復活するか実機検証する．
+ */
+#define CONFIG_ESPRESSIF_WIFI_STA_DISCONNECT_PM            1
 /*  WAPI（CONFIG_WPA_WAPI_PSK）：esp_wifi.cmake差分2の通りOFF固定  */
 #define CONFIG_WPA_WAPI_PSK                                0
 
