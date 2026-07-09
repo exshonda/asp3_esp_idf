@@ -170,17 +170,24 @@ main_task(EXINF exinf)
 		return;
 	}
 #endif /* HANDOFF_SKIP_WIFI_INIT */
-#ifndef HANDOFF_SKIP_WIFI_INIT
+#if !defined(HANDOFF_SKIP_WIFI_INIT) && defined(TOPPERS_ESP32C6_WIFI)
+	/*  DIAG_G_IC_BASE/DIAG_G_WIFI_NVS_ADDRはC6のlibnet80211.aブロブで
+	 *  実測したアドレス（実施12/13）——C3では別blob・別アドレスのため
+	 *  無guardのまま実行すると無関係な値を誤ってg_ic/nvsとして表示する
+	 *  （docs/wifi-scan-c3-crash.md 実施1で発見，crash自体は別要因だが
+	 *  同じ「C6専用診断のguard漏れ」系統のためついでにguard）．*/
 	syslog(LOG_NOTICE, "wifi_scan: DIAG post-init g_ic[497]=%d g_ic[499]=%d",
 		   (int_t)diag_g_ic_byte(497), (int_t)diag_g_ic_byte(499));
 	syslog(LOG_NOTICE, "wifi_scan: DIAG post-init nvs_ptr=%x nvs[0]=%d",
 		   (int_t)diag_wifi_nvs_ptr(), (int_t)diag_wifi_nvs_byte0());
-#endif /* HANDOFF_SKIP_WIFI_INIT */
+#endif /* !HANDOFF_SKIP_WIFI_INIT && TOPPERS_ESP32C6_WIFI */
 
 #ifndef HANDOFF_SKIP_WIFI_INIT
 	(void) esp_wifi_set_mode(WIFI_MODE_STA);
+#ifdef TOPPERS_ESP32C6_WIFI
 	syslog(LOG_NOTICE, "wifi_scan: DIAG post-set_mode g_ic[497]=%d g_ic[499]=%d",
 		   (int_t)diag_g_ic_byte(497), (int_t)diag_g_ic_byte(499));
+#endif /* TOPPERS_ESP32C6_WIFI */
 	(void) esp_wifi_set_storage(WIFI_STORAGE_RAM);
 #ifdef WIFI_SCAN_PS_MIN_MODEM
 	/*
@@ -214,10 +221,12 @@ main_task(EXINF exinf)
 
 	err = esp_wifi_start();
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_start -> %d", (int_t)err);
+#ifdef TOPPERS_ESP32C6_WIFI
 	syslog(LOG_NOTICE, "wifi_scan: DIAG post-start g_ic[497]=%d g_ic[499]=%d",
 		   (int_t)diag_g_ic_byte(497), (int_t)diag_g_ic_byte(499));
 	syslog(LOG_NOTICE, "wifi_scan: DIAG post-start nvs_ptr=%x nvs[0]=%d",
 		   (int_t)diag_wifi_nvs_ptr(), (int_t)diag_wifi_nvs_byte0());
+#endif /* TOPPERS_ESP32C6_WIFI */
 	if (err != 0) {
 		return;
 	}
@@ -258,7 +267,16 @@ main_task(EXINF exinf)
 		uint32_t lsemt = g[2], lqr = g[4], lqs = g[5], lqsi = g[6], lta = g[7];
 		int sec;
 		for (sec = 0; sec < 20 && !scan_done; sec++) {
+#ifdef TOPPERS_ESP32C6_WIFI
+			/*  0x600af018=MODEM_LPCON_CLK_CONF_REGはC6(H2/H4/H21/C61等の
+			 *  新modem系統)にのみ存在する周辺で，C3のペリフェラルバスには
+			 *  対応レジスタが存在しない（hal/esp32c3のreg_base.hに該当
+			 *  ベースなし）．無guardのままC3でも毎秒書込みしていたが，
+			 *  未使用領域への書込みでクラッシュはしないため今回のIllegal
+			 *  instruction本体とは無関係——ただし同種のguard漏れなのでC6
+			 *  専用にguardする（docs/wifi-scan-c3-crash.md 実施1）．*/
 			*(volatile uint32_t *)0x600af018U = 0x7U;	/* 追記10：クロック再アサート */
+#endif /* TOPPERS_ESP32C6_WIFI */
 			(void) tslp_tsk(1000000);	/* 1秒 */
 			syslog(LOG_NOTICE,
 				"OSIRATE/s semTake=%d qRecv=%d qSend=%d qSendISR=%d timerArm=%d",
@@ -305,10 +323,21 @@ main_task(EXINF exinf)
 		}
 		*(volatile uint32_t *)0x5000002CU = wsum;	/* [11]=Wi-Fi int総数 */
 	}
+#ifdef TOPPERS_ESP32C6_WIFI
+	/*
+	 *  DIAGNOSTIC（C6専用，実施(追記12)）：C6の固定ROM PHYFUNS表アドレス
+	 *  (0x4087f954)のidx23=read_mask関数ポインタを直接呼ぶ．
+	 *  ★C3では未guardのままこの分岐を素通しした結果，このアドレスの
+	 *  idx23エントリが未設定(NULL)のままjalrされ，Illegal instruction
+	 *  (pc=0)でクラッシュすることを確認した（docs/wifi-scan-c3-crash.md
+	 *  実施1）．esp_coex_adapter.cで既に確立している同種のC6専用診断
+	 *  （同じ0x4087f954直読み，そちらは#if defined(TOPPERS_ESP32C6_WIFI)
+	 *  で正しくguard済み）と同じパターンで，本ファイルだけguard漏れして
+	 *  いた．native(受信OK)と同じ読み出しをして比較＝RF較正の正否を
+	 *  判定するためのC6専用計装なので，C3を含む他チップでは実行しない．
+	 */
 	{
-		/*  追記12：RF較正regi2cブロックを読み戻してRTC[16..](0x50000040)へ．
-		 *  ROM PHY funsテーブル(0x4087f954)のidx23=read_mask関数で全8bit取得．
-		 *  native(受信OK)と同じ読み出しをして比較＝RF較正の正否を判定． */
+		/*  追記12：RF較正regi2cブロックを読み戻してRTC[16..](0x50000040)へ． */
 		uint32_t *romtbl = (uint32_t *)0x4087f954U;
 		uint8_t (*rd)(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t) =
 			(uint8_t (*)(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t))
@@ -317,12 +346,15 @@ main_task(EXINF exinf)
 		static const uint8_t blk[4] = {0x6bU, 0x6aU, 0x66U, 0x6dU};
 		static const uint8_t hst[4] = {1U, 1U, 0U, 1U};
 		int bi, r, o = 0;
-		for (bi = 0; bi < 4; bi++) {
-			for (r = 0; r < 16; r++) {
-				out[o++] = rd(blk[bi], hst[bi], (uint8_t)r, 7U, 0U);
+		if (rd != NULL) {
+			for (bi = 0; bi < 4; bi++) {
+				for (r = 0; r < 16; r++) {
+					out[o++] = rd(blk[bi], hst[bi], (uint8_t)r, 7U, 0U);
+				}
 			}
 		}
 	}
+#endif /* TOPPERS_ESP32C6_WIFI */
 	syslog(LOG_NOTICE, "wifi_scan: %d APs found (err=%d)",
 		   (int_t)num, (int_t)err);
 	for (i = 0; i < num; i++) {
