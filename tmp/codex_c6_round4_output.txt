@@ -1,0 +1,185 @@
+Reading additional input from stdin...
+OpenAI Codex v0.142.5
+--------
+workdir: /home/honda/TOPPERS/ASP3CORE/asp3_esp_idf
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: none
+reasoning summaries: none
+session id: 019f48fb-548b-7942-862a-3de3f641a038
+--------
+user
+非対話（一回きり）の相談です。コードの編集や実装は不要——分析と仮説の提示だけをお願いします。回答は日本語で、根拠となるESP-IDF/NuttX/ROMの該当箇所があれば`file:line`や関数名で示してください。実機（ESP32-C6を2台，物理的に同時稼働可能）はありますが，次の一手（続行か終結か）を判断する必要があります。
+
+# 背景：前回相談（実施75直後）とその後の進展（実施76〜84）
+
+前回，「値レベルの比較を出し尽くした」という状況を相談し，「(a)一過性PHY操作のOS/blob境界の時間契約検査」「固定チャネルRF刺激＋時刻付き境界トレース＋TX電波確認」を提案いただきました。実施76〜84で以下を全て実行しました（`docs/wifi-shim-c6.md`に全記録）。
+
+# 実施76〜84の結果
+
+- **実施76**：2台目のC6実機（ボードC）導入，reflash不要の恒久2台構成（ボードB=ASP3，ボードC=NuttX常時稼働）確立。phy_init呼出し列を最新ビルドで再検証——0/186 IDミスマッチ。
+- **実施77**：regi2cアナログ較正バスの定量比較——ASP3・NuttXの操作回数・値とも一致（唯一の差はI2C_SAR_ADCのポーリング回数のみで返り値は同一）。
+- **実施78**：`wifi_regsnap`計装でAGC/CCA層が動的に生きていることを確認（agc_spot/agc_sum が連続的に変化）。MAC割込みは約140/sで発火し続けるが`lmacProcessRxSucData`は0のまま——「部分的に反応」，実施58の局在化を独立チャネルで再確認。
+- **実施79→82**：TX電波放射確認（78ラウンドを通じて未検証だった「TXは本当に電波として出ているか」）。promiscuousスニファをボードCへ一時的に書き込む必要があり，権限システムとの間で認可上の問題が発生した（詳細は割愛，事後に訂正・是正済み，最終的にユーザー本人の直接確認を得て実行）。
+- **実施80（RX側の決定的所見）**：`lmacRxDone`——`lmacProcessRxSucData`よりさらに上流のROM常駐RX_DONE指標（固定アドレス`0x40000c50`，firmware非依存）。**ASP3は2×60秒ブートで0ヒット，NuttXは60秒で34ヒット**（同一手法で陽性対照確認済み）——正当な802.11 RX_DONEがASP3のMAC/BBハードウェアから一度も発火しないことが，80ラウンドで最も精密なRX局在化として確定。
+- **実施81（TX側の決定的所見）**：promiscuousスニファで271件の遠方プローブ（RSSI -83〜-97dBm）を検出できる健全な計装の下で，ボードB由来と判定できるプローブは0件——**RSSIの観点からも「至近距離のはずの信号が全く見えていない」**。TXも実際には電波として放射されていない可能性。
+- **実施83（物理的RF信号源投入・決定的）**：ボードC上に既知・確実に強い至近距離ビーコン（SSID固定，signal=94—2位のAPを圧倒）を用意し，ボードBがこれに一切反応しないことを2回の独立起動で確認（`lmacRxDone`/`lmacProcessRxSucData`/`ppRxPkt`/`sta_rx_cb`全て0，MACイベントbit14も0）。**これにより「信号強度が不十分だった可能性」という最後の疑問も解消**——ASP3のRX解析経路は信号強度・距離・環境要因とは無関係に構造的に機能していないと確定。
+- **実施84（Direct Boot A/Bテスト）**：標準ESP-IDFの第2段階ブートローダ経由での起動を試す実験を依頼したところ，**過去のラウンド（実施6/21/22/23/30/34）で既に実質的に検証済み**だったと判明：
+  - 実際のブートローダ経由起動は実施21で実行済み——機構は機能しASP3はWiFi初期化まで到達したが，実施22で**ハードウェアロック済みPMP/PMA**（ソフトウェアからクリア不可能）による新規クラッシュに阻まれた（技術的ブロックであって反証ではない，AGC/RXはこの経路では一度も観測できていない）。
+  - **NuttX自体が`CONFIG_ESPRESSIF_SIMPLE_BOOT=y`でビルドされている**（独立したブートローダバイナリを使わない）——動作する参照実装自体がブートローダを経由していないため，「本物のブートローダが必要か」という問い自体が的外れだった。
+  - 未移植の初期化ステップ移植：WiFi関連候補は全て解決済み（`esp_perip_clk_init()`のクロック選択は実施6で修正済み実バグ；`pmu_init()`の全効果は実施30で1KB全体をバイト単位比較し呼出し有無に関わらず同一と実測済み；`esp_clk_init()`と`bootloader_init()`のregi2c 1行は実施34で反証済み）。
+
+# 現在の到達点：3つの主要な調査軸が全て出尽くした
+
+- **値レベルの比較**（静的・動的，実施1-77）：出尽くした。
+- **タイミング/物理的RF刺激**（実施78-83）：TX・RXとも「MACレベルではデジタル的に生きているが，RF/アナログ境界を実際に越えた証拠がない」という対称的な結論に達し，物理的な既知強信号にも一切反応しないことまで確認済み。
+- **Direct Bootの前提状態**（実施84）：既に検証済み，または技術的に検証不能（PMP/PMAロック）と判明。
+
+残る選択肢：
+(a) レジスタ経由では検証しようがない内部アナログ特性（インピーダンス整合・LNAゲイン・ミキサー位相等）
+(b) 低確度だが真に未検証な残存選択肢：`esp_rtc_init`+`esp_clk_init`の加算的移植（ハングリスク監視付き），またはPMP/PMAロックを持たないカスタムブートローダの構築（実施22の選択肢iii）
+
+# 質問
+
+1. **84ラウンド・2台の実機・値/タイミング/物理的RF刺激/Direct Bootという4つの独立した調査軸を経てなお解決しない場合，これはJTAG＋レジスタ比較という調査手法そのものの限界に達していると判断すべきでしょうか**。それとも，(b)の残存選択肢（特にPMP/PMAロックを回避するカスタムブートローダ）に，まだ追求する価値がありますか。
+2. **TXも実際には電波として放射されていない可能性**（実施81）は，deaf-RXという当初の問題設定自体を再考させる材料でしょうか。「RXが受信できない」ではなく「RF/アナログフロントエンド全体（TX/RX共有部分を含む）が根本的に機能していない」という，より広い問題である可能性はありますか。
+3. もしこれが「JTAG/レジスタ比較の限界」だとしたら，次に投資すべきものの優先順位を教えてください（例：Espressifへの問い合わせ，オシロスコープ/スペクトラムアナライザでのRF信号自体の実測，別のC6ボード個体での検証，blobの逆コンパイル解析，等）。
+4. 84ラウンドにわたる本調査の全体を俯瞰して，何か見落とされている可能性のある，これまで一度も検討されていない仮説はありますか。
+
+繰り返しますが，修正実装は不要です。原因パターンの仮説と，続行するか終結するかを含めた次の一手の優先順位を，根拠付きで提示してください。
+warning: Codex's Linux sandbox uses bubblewrap and needs access to create user namespaces.
+codex
+まず記録と現物の参照点を読みます。編集はせず、`docs/wifi-shim-c6.md`とESP-IDF/NuttX/ROM境界に関係する実装箇所だけを確認して、判断材料を整理します。
+codex
+読み取りコマンドがサンドボックスのネットワーク名前空間初期化で失敗しています。権限昇格は使えない設定なので、同じ読み取りをログインシェルなしで再試行します。
+codex
+この環境では通常のシェル読み取り自体が起動前に落ちています。代替としてMCPリソース経由でワークスペース内容を参照できるか確認します。
+mcp: codex/list_mcp_resources started
+mcp: codex/list_mcp_resources (completed)
+web search: 
+web search: site:github.com/espressif/esp-idf esp32c6 esp_rtc_init esp_clk_init bootloader_init esp_perip_clk_init
+web search: 
+web search: github esp-idf esp_rtc_init esp32c6
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/esp_system/startup.c
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/components/esp_system/startup.c
+web search: 
+web search: 'static void start_cpu0_default' in https://github.com/espressif/esp-idf/blob/master/components/esp_system/startup.c
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/esp_system/system_init_fn.txt
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/esp_system/system_init_fn.txt
+web search: 
+web search: "CONFIG_ESPRESSIF_SIMPLE_BOOT"
+web search: 
+web search: https://github.com/apache/nuttx/blob/master/arch/risc-v/src/esp32c6/Kconfig
+web search: 
+web search: https://raw.githubusercontent.com/apache/nuttx/master/arch/risc-v/src/common/espressif/Kconfig
+web search: 
+web search: https://github.com/apache/nuttx/raw/master/arch/risc-v/src/common/espressif/Kconfig
+web search: 
+web search: "esp_rtc_init" "esp32c6" "esp-idf"
+web search: 
+web search: "esp_rtc_init" "rtc_init.c"
+web search: 
+web search: https://api.github.com/repos/espressif/esp-idf/contents/components/esp_hw_support/port/esp32c6?ref=master
+web search: 
+web search: api.github.com repos espressif esp-idf contents components esp_hw_support port esp32c6
+web search: 
+web search: https://github.com/espressif/esp-idf/tree/master/components/esp_hw_support/port/esp32c6
+web search: 
+web search: github.com/espressif/esp-idf/tree/master/components/esp_hw_support/port/esp32c6
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/esp_hw_support/port/esp32c6/rtc_clk.c
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/components/esp_hw_support/port/esp32c6/rtc_clk.c
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/components/esp_hw_support/port/esp32c6/esp_clk.c
+web search: 
+web search: https://github.com/search?q=repo%3Aespressif%2Fesp-idf+esp_clk_init+path%3Acomponents&type=code
+web search: 
+web search: repo:espressif/esp-idf esp_clk_init path:components
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/esp_rom/esp32c6/ld/esp32c6.rom.api.ld
+web search: 
+web search: "lmacRxDone" "0x40000c50"
+web search: 
+web search: 'esp_err_t bootloader_init' in https://github.com/espressif/esp-idf/blob/master/components/bootloader_support/src/bootloader_init.c
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/bootloader/subproject/main/bootloader_start.c
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/esp_system/port/cpu_start.c
+web search: 
+web search: 'esp_clk_init' in https://github.com/espressif/esp-idf/blob/master/components/esp_system/port/cpu_start.c
+web search: 
+web search: "ESPRESSIF_SIMPLE_BOOT" "apache/nuttx"
+web search: 
+web search: https://github.com/apache/nuttx/blob/master/arch/risc-v/src/esp32c3/esp32c3_start.c
+web search: 
+web search: 'SPDX-FileCopyrightText' in https://github.com/espressif/esp-idf/blob/master/components/esp_system/port/cpu_start.c
+web search: 
+web search: https://r.jina.ai/http://r.jina.ai/http://raw.githubusercontent.com/espressif/esp-idf/master/components/esp_system/port/cpu_start.c
+web search: 
+web search: r.jina.ai raw.githubusercontent.com espressif esp-idf cpu_start.c esp_clk_init
+codex
+結論から言うと、**JTAG + レジスタ比較の線は終結してよい**と思います。続ける価値があるのは、ソフトウェア内のさらなる差分探索ではなく、**RF実測**と**Espressifへの問い合わせ**です。`esp_rtc_init` + `esp_clk_init`の加算移植は「最後の安価な確認」としてはありですが、カスタムブートローダは期待値が低いです。
+
+根拠は、ESP-IDF側でも第2段ブートローダは主に一般的な起動処理です。`components/bootloader/subproject/main/bootloader_start.c::call_start_cpu0()`は`bootloader_init()`後にアプリをロードする流れで、コメント上もROM後のハードウェアは「mostly uninitialized」とされています。WiFi/RF固有の本体初期化はむしろアプリ側の早期初期化にあり、`components/esp_system/port/cpu_start.c::sys_rtc_init()`で`esp_rtc_init()`、同ファイルの早期起動部で`esp_clk_tree_initialize()`、`esp_clk_init()`、`esp_perip_clk_init()`が呼ばれます。初期化関数群は`components/esp_system/startup.c::do_system_init_fn()`と`components/esp_system/system_init_fn.txt`で順序管理されています。NuttX側も`arch/risc-v/src/common/espressif/Kconfig::ESPRESSIF_SIMPLE_BOOT`がデフォルト有効なので、「標準第2段ブートローダを通らないとWiFiが成立しない」という仮説はかなり弱いです。
+
+**1. 続行か終結か**
+(b)のうち、`esp_rtc_init` + `esp_clk_init`加算は低コストなら一回だけ実施してよいです。ただし停止条件を明確にすべきです。強ビーコン環境で`lmacRxDone`が再び0なら、その線は終了。
+
+PMP/PMAロック回避のカスタムブートローダは、現時点では主戦場ではありません。実施84の通り、動作参照のNuttXがsimple bootで成立しているためです。やるなら「ブートローダ仮説の墓標を立てる」実験であって、根本原因へ近づく主経路ではないです。
+
+**2. TX不放射の意味**
+はい、当初の「deaf RX」より広く、**MACは生きているが、MAC-to-air境界が成立していない**問題として再定義すべきです。
+
+ただし「RF/アナログフロントエンド故障」と断定するにはまだ一段あります。WiFiスニファで0件というのは「有効な802.11フレームとして復号できない」という意味で、未変調/異常周波数/短すぎるバースト/PA未起動などのRFエネルギーは見逃します。スペクトラムアナライザか近接プローブで、TX試行時に2.4GHz帯エネルギーが出るかを見る価値があります。
+
+**3. 次に投資すべき優先順位**
+1. **RF実測**: スペアナ、広帯域SDR、近接プローブでTX時のエネルギーを見る。ここで「電波ゼロ」か「電波はあるが802.11になっていない」かが分かれます。
+2. **同一物理ボードでのA/B**: もしボードBを最近NuttX/stock IDFで直接確認していないなら、同一個体でASP3対NuttX/IDFを確認。第三個体購入より優先です。
+3. **Espressif問い合わせ**: `lmacRxDone=0`、regi2c一致、強ビーコン無反応、TX sniff 0、NuttX simple boot陽性をまとめる。この段階なら未公開RF/PHY/ROM契約の質問として十分強いです。
+4. **DMA/cache/PMP/PMA仮説の点検**: 見落とし候補としてはかなり重要です。RX/TX共有で、レジスタ値一致でも壊れ得ます。WiFi DMAバッファの属性、キャッシュ、PMA、PMP、メモリ領域能力がNuttXと一致しているか。
+5. **`esp_rtc_init` + `esp_clk_init`加算**: 低コストの最終確認。
+6. **blob逆解析**: 最後。工数に対する期待値は低いですが、Espressifから情報が得られない場合の研究手段です。
+
+**4. 見落とし候補**
+一番気になる未検討仮説は、アナログではなく**WiFi DMA/メモリ属性/キャッシュ/PMAの問題**です。`lmacRxDone`はRX成功経路の強い指標ですが、純粋な「アンテナで受けたか」だけではなく、RX記述子やDMA可能メモリの問題でも0になり得ます。TX側もDMAが読めなければ空中に出ません。
+
+次点は、`init_pm`/`init_coexist`相当のPM・coexist・RF grant状態です。ESP-IDFの`system_init_fn.txt`には`init_pm`や`init_coexist`が起動順序に入っています。ここが見かけ上のレジスタ比較では一致しても、実行時のgrant/lock契約が崩れるとRFが沈黙する余地があります。
+
+判断としては、**ソフトウェア差分探索は終結、外部観測へ移行**です。続けるなら「RF実測」と「DMA/cache/PMA仮説の一点確認」までで、カスタムブートローダは優先しない、というのが私の見立てです。
+tokens used
+130,957
+結論から言うと、**JTAG + レジスタ比較の線は終結してよい**と思います。続ける価値があるのは、ソフトウェア内のさらなる差分探索ではなく、**RF実測**と**Espressifへの問い合わせ**です。`esp_rtc_init` + `esp_clk_init`の加算移植は「最後の安価な確認」としてはありですが、カスタムブートローダは期待値が低いです。
+
+根拠は、ESP-IDF側でも第2段ブートローダは主に一般的な起動処理です。`components/bootloader/subproject/main/bootloader_start.c::call_start_cpu0()`は`bootloader_init()`後にアプリをロードする流れで、コメント上もROM後のハードウェアは「mostly uninitialized」とされています。WiFi/RF固有の本体初期化はむしろアプリ側の早期初期化にあり、`components/esp_system/port/cpu_start.c::sys_rtc_init()`で`esp_rtc_init()`、同ファイルの早期起動部で`esp_clk_tree_initialize()`、`esp_clk_init()`、`esp_perip_clk_init()`が呼ばれます。初期化関数群は`components/esp_system/startup.c::do_system_init_fn()`と`components/esp_system/system_init_fn.txt`で順序管理されています。NuttX側も`arch/risc-v/src/common/espressif/Kconfig::ESPRESSIF_SIMPLE_BOOT`がデフォルト有効なので、「標準第2段ブートローダを通らないとWiFiが成立しない」という仮説はかなり弱いです。
+
+**1. 続行か終結か**
+(b)のうち、`esp_rtc_init` + `esp_clk_init`加算は低コストなら一回だけ実施してよいです。ただし停止条件を明確にすべきです。強ビーコン環境で`lmacRxDone`が再び0なら、その線は終了。
+
+PMP/PMAロック回避のカスタムブートローダは、現時点では主戦場ではありません。実施84の通り、動作参照のNuttXがsimple bootで成立しているためです。やるなら「ブートローダ仮説の墓標を立てる」実験であって、根本原因へ近づく主経路ではないです。
+
+**2. TX不放射の意味**
+はい、当初の「deaf RX」より広く、**MACは生きているが、MAC-to-air境界が成立していない**問題として再定義すべきです。
+
+ただし「RF/アナログフロントエンド故障」と断定するにはまだ一段あります。WiFiスニファで0件というのは「有効な802.11フレームとして復号できない」という意味で、未変調/異常周波数/短すぎるバースト/PA未起動などのRFエネルギーは見逃します。スペクトラムアナライザか近接プローブで、TX試行時に2.4GHz帯エネルギーが出るかを見る価値があります。
+
+**3. 次に投資すべき優先順位**
+1. **RF実測**: スペアナ、広帯域SDR、近接プローブでTX時のエネルギーを見る。ここで「電波ゼロ」か「電波はあるが802.11になっていない」かが分かれます。
+2. **同一物理ボードでのA/B**: もしボードBを最近NuttX/stock IDFで直接確認していないなら、同一個体でASP3対NuttX/IDFを確認。第三個体購入より優先です。
+3. **Espressif問い合わせ**: `lmacRxDone=0`、regi2c一致、強ビーコン無反応、TX sniff 0、NuttX simple boot陽性をまとめる。この段階なら未公開RF/PHY/ROM契約の質問として十分強いです。
+4. **DMA/cache/PMP/PMA仮説の点検**: 見落とし候補としてはかなり重要です。RX/TX共有で、レジスタ値一致でも壊れ得ます。WiFi DMAバッファの属性、キャッシュ、PMA、PMP、メモリ領域能力がNuttXと一致しているか。
+5. **`esp_rtc_init` + `esp_clk_init`加算**: 低コストの最終確認。
+6. **blob逆解析**: 最後。工数に対する期待値は低いですが、Espressifから情報が得られない場合の研究手段です。
+
+**4. 見落とし候補**
+一番気になる未検討仮説は、アナログではなく**WiFi DMA/メモリ属性/キャッシュ/PMAの問題**です。`lmacRxDone`はRX成功経路の強い指標ですが、純粋な「アンテナで受けたか」だけではなく、RX記述子やDMA可能メモリの問題でも0になり得ます。TX側もDMAが読めなければ空中に出ません。
+
+次点は、`init_pm`/`init_coexist`相当のPM・coexist・RF grant状態です。ESP-IDFの`system_init_fn.txt`には`init_pm`や`init_coexist`が起動順序に入っています。ここが見かけ上のレジスタ比較では一致しても、実行時のgrant/lock契約が崩れるとRFが沈黙する余地があります。
+
+判断としては、**ソフトウェア差分探索は終結、外部観測へ移行**です。続けるなら「RF実測」と「DMA/cache/PMA仮説の一点確認」までで、カスタムブートローダは優先しない、というのが私の見立てです。
