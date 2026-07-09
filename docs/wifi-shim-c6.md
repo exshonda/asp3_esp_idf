@@ -13003,3 +13003,156 @@ reg_add/msb/lsb）が276/276（100%）一致，データ値まで含めても
 - 本ラウンドの検証はドキュメントのクロスリファレンス（実施1-84
   全記録・Codex第4回生ログ・`hal/` submoduleのC5対応状況の実在
   確認）による。
+
+## 実施86：コードレビューによる原因候補の棚卸し（サブエージェント2本・実機実験なし）
+
+### 背景
+
+実施85の凍結決定（C6 deaf-RX調査を一旦凍結し，ESP32-C5移植を次の主軸
+とする）を受け，C5移植へ着手する前に，実機・JTAGを一切使わず
+「レジスタ比較では見えない候補」だけをコードレビューで洗い出す
+ラウンドを実施した。実施1-85で尽くされた値レベル比較（MMIO全域一致・
+regi2c一致・NuttX陽性対照）と矛盾しない範囲で，2本のレンズから
+サブエージェントレビューを行った：
+
+- **レビューA**：shim関数の意味論・契約（`esp_wifi_adapter.c`・
+  `esp_shim.c`・`esp_shim_blobglue.c`のC3版とのdiff，`wifi_os_adapter.h`
+  契約，ESP-IDF参照実装`esp32c6/esp_adapter.c`との突合せ）。
+- **レビューB**：起動シーケンス・メモリ保護・電源クロック・リンカ
+  （`hardware_init_hook()`・`hal/components/bootloader_support/`・
+  APM/TEEレジスタ定義・PMP/PMA・リンカスクリプト）。
+
+いずれも`fork`ではなく`general-purpose`（新規コンテキスト）で起動し，
+実機・JTAG・ビルドは一切行っていない。レポート全文は
+`tmp/c6_review_r1_semantics.md`（レビューA）・
+`tmp/c6_review_r2_memory_init.md`（レビューB）としてリポジトリへ
+取り込んだ（実施85でCodex相談ログをtmp/へ取り込んだのと同じ運用）。
+
+### 最重要の新規発見（レビューB候補1，確度中〜高）：APM/TEEマスタセキュリティモード未初期化
+
+レビューBの最有力候補は，ASP3のDirect Boot経路が実ESP-IDF/NuttXなら
+必ず実行するAPM（Access Permission Management）／TEEマスタセキュリティ
+モードの初期化を一切呼んでいないという発見である。要点をレポートから
+正確に転記する：
+
+- ASP3の`hardware_init_hook()`（`asp3/target/esp32c6_espidf/
+  target_kernel_impl.c`83-182行目）とDirect Boot経路は，
+  `bootloader_init_mem()`（`hal/components/bootloader_support/src/
+  bootloader_mem.c`）を一切呼ばない。`grep -n 'apm\|tee'
+  target_kernel_impl.c`は0件。
+- これに対しNuttXは`CONFIG_ESPRESSIF_SIMPLE_BOOT`により
+  `esp_start.c`から`bootloader_init()`を（別バイナリの2ndステージ
+  ブートローダは経由しないものの）アプリ自身から直接呼ぶため，同じ
+  `bootloader_init_mem()`を必ず実行する。
+- POR（power-on-reset）既定値：`TEE_M4_MODE_CTRL_REG`
+  （`0x60098010`，M4=WiFi/BTモデムDMAマスタ）＝`3`（ree_mode2），
+  `HP_APM_FUNC_CTRL_REG`（`0x600990c4`）＝`0xF`（M0-M3のPMSフィルタ
+  全て有効）。CPU（M0=HPCORE）はPOR既定でTEEモードのため，region
+  フィルタの対象外＝MMIO読出しには一切影響しない。これは本調査の
+  「MMIO全域一致なのにDMAだけ死ぬ」という全観測（`lmacRxDone`=0，
+  RXライトバック皆無，TX無放射，割込みソース非アサート）と整合する。
+- **重要な留保**（`memory/feedback_hardware_investigation_rigor.md`の
+  精神に沿って過大評価しないこと）：`HP_APM_FUNC_CTRL_REG`が名指す
+  マスタはM0-M3（HPCORE/LPCORE/REGDMA/SDIOSLV）の4本のみであり，
+  WiFi/BTモデム（M4）をregionベースのAPMコントローラが直接ゲート
+  している確証は，レジスタ定義とヘッダの突合せだけでは得られていない。
+  したがって「初期化欠落は確定事実（確度：高）」「それが因果である
+  ことは未確認（確度：中）」を明確に区別して記載する。
+- 本セッションで追加確認済みの事実：deaf-RXの観測はすべて通常の
+  Direct Boot下で行われている（実施21-22で使われた本物の標準
+  ブートローダ経由のA/Bテストは，PMP/PMAロックによるcoexクラッシュで
+  観測到達前に終了しており，通常運用のdeaf-RX観測とは別のコード
+  パスである）。またAPM/TEEレジスタ空間（`0x60098000`／`0x60099000`
+  台）は実施1-85のどのレジスタ比較にも一度も含まれていない。したがって
+  本候補は既存の全証拠と矛盾しない，真に未検証の空間である。
+- 実機再開時の決定実験（レポートより転記）：`HP_APM_FUNC_CTRL_REG`
+  （`0x600990c4`）をJTAGで`0`へ直接書き込み，
+  `HP_APM_REGION0_PMS_ATTR_REG`（`0x6009900c`）の該当ビットを全許可
+  （X/W/R=1）にした状態で，`lmacRxDone`（`0x40000c50`）が発火するかを
+  確認する。あわせて`TEE_M4_MODE_CTRL_REG`（`0x60098010`）をASP3・
+  NuttX双方で読み比較し，TEEモード自体の差か，HP_APM側の差だけが
+  効いているかを切り分ける。
+
+| レジスタ | アドレス | ASP3期待値（POR未変更） | NuttX期待値（`bootloader_init_mem`実行後） |
+|---|---|---|---|
+| `HP_APM_FUNC_CTRL_REG` | `0x600990c4` | `0x0000000F` | `0x00000000` |
+| `HP_APM_REGION_FILTER_EN_REG` | `0x60099000` | `0x00000001` | 実装依存 |
+| `HP_APM_REGION0_PMS_ATTR_REG` | `0x6009900c` | `0x00000000` | 実装依存 |
+| `TEE_M0_MODE_CTRL_REG` | `0x60098000` | `0x0` | `0x0`（変更不要） |
+| `TEE_M4_MODE_CTRL_REG` | `0x60098010` | `0x3` | 要確認（`SOC_APM_SUPPORT_TEE_PERI_ACCESS_CTRL`がc6未定義のため`0x3`のままの可能性あり） |
+
+本候補は，実施85の保留オプション2「APM/TEE・PMP/PMA・キャッシュ属性の
+ASP3 vs NuttX比較ラウンド」の具体化であり，実機再開時の保留オプション
+優先順位において，候補1のJTAG決定実験をオプション2の内実として
+最上位に引き上げる。
+
+### レビューAの結果：意味論レベルの新規一次原因候補なし
+
+`esp_wifi_adapter.c`（1083行）・`esp_shim.c`（1023行）・
+`esp_shim_blobglue.c`（446行）全読と，C3版との機械diff（全hunk確認），
+ESP-IDF参照実装（`esp32c6/esp_adapter.c`）・PLICレジスタ定義
+（`plic_reg.h`）との突合せの結果，「これがdeaf-RXの一次原因」と言える
+新規候補は見つからなかった。C3/C6差分（`esp_wifi_adapter.c`309行・
+`esp_shim.c`378行・`esp_shim_blobglue.c`114行）は大半が診断計装の追加と，
+既に「根本原因修正」としてコメント付きで実装済みの内容（割込み型・
+WIFIPWRクロック・regi2cマスタクロック・RNG/eFuseアドレス）であり，
+これらはレジスタ比較で既に実機検証済み。`wifi_osi_funcs_t`は指示付き
+初期化子で埋められており，フィールド抜けによる関数取り違えは構造的に
+起きない。
+
+唯一の未開拓点は，原因候補ではなく**診断情報源**としての価値：
+`esp_shim_blobglue.c:411-415`の`putchar()`が常にno-opスタブ
+（`return(c)`のみ）になっており，blobの一部デバッグ経路が直接呼ぶ
+可能性のある低レベルの一次診断出力を握りつぶしている。通常のblobログ
+出力はESP_LOG経由でsyslogへ既に転送済みだが，`putchar`を直接呼ぶ経路
+（ROM系の生出力やPHY/regi2c較正失敗時の簡易ダンプ等）は84ラウンドを
+通じて一度も特定・検証されていない。`putchar`の中身を1行
+（`syslog(LOG_NOTICE, "%c", c)`等）に置き換えて再ビルド・再実機実行
+するだけの最小コストで，新規の文字が出るか否かを確認できる。実機
+再開時の「ついでに1行」として推奨する。
+
+### その他の候補（確度低，反証済みまたはRX無関係）
+
+- `phy_get_max_pwr()`固定値スタブ（`esp_shim_blobglue.c:442-446`，
+  20dBm固定）：TXパワー制御専用でRXパスに関与せず，deaf-RX全体
+  （RXも0）の統一的説明にはならない（確度：低〜中，実施18で較正
+  戻り値自体は既に反証済み）。
+- `wifi_clock_enable_wrapper()`の`MODEM_LPCON_CLK_CONF`無条件強制書込み
+  （`esp_wifi_adapter.c:631-688`）：初回起動一発目のscanという条件下
+  では説明力が乏しい（確度：低）。
+- coex実リンク（Codex第4回指摘の候補）：実施9で`_coex_*`をNuttXの
+  no-op構成に合わせて無効化しても症状不変と実機検証済み，実施21-22で
+  `coex_schm_env_ptr`が両プラットフォームとも常時NULLであることも
+  確認済みのため反証済み。
+- PMP/PMA（asp3_core側）：`grep -rn 'pmp\|PMP\|pma\|PMA'`で該当0件
+  （ASP3は一切設定しない）。実施22の実測（通常Direct Boot下でPMP系
+  レジスタは終始全ゼロ＝無効）と整合し，通常運用では無関係と再確認
+  （確度：低）。
+- 他の未移植初期化（`esp_rtc_init`/`esp_clk_init`/PMU等）・リンカ配置：
+  実施30/34/84で個別に反証済み，または観測事実（TX無放射なのに
+  scan/start自体は正常完走）と不整合のため候補から除外（確度：低）。
+
+### まとめ・申し送り
+
+- 本ラウンドの実質的な貢献は，レビューBのAPM/TEE未初期化候補
+  （実施85保留オプション2の具体化，実機再開時の最優先JTAG検証項目）
+  と，レビューAのputchar診断フック（原因候補ではなく安価な情報源）
+  の2点。それ以外はいずれも既存ラウンドで反証済みか，RXの統一的
+  説明力を持たない低確度候補であることを再確認した。
+- 実機・JTAG・ビルドは本ラウンドでは実施していない。実機再開時には
+  候補1（APM/TEE）のJTAG決定実験を最優先で行うことを推奨する。
+
+### 変更ファイル
+
+- `docs/wifi-shim-c6.md`：本実施86の追記のみ（ソースコード変更なし）。
+- `tmp/c6_review_r1_semantics.md`・`tmp/c6_review_r2_memory_init.md`：
+  サブエージェント2本のレビューレポート全文をセッション一時領域から
+  リポジトリへ新規取り込み（実施85でCodex相談ログをtmp/へ取り込んだ
+  のと同じ運用）。
+
+### 検証
+
+- 実機・JTAG・ビルドは本ラウンドでは不実施（ドキュメントのみ）。
+  ただし本ラウンドとは独立に，C6 wifi_scanのベースラインビルドが
+  この環境で成功していることを付記する：`FLASH: 541840 B / 4 MB
+  (12.92%)`・`RAM: 377096 B / 412 KB (89.38%)`。
