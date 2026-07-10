@@ -640,3 +640,33 @@ esp_wifi_init → phy_rf_init(flash/libphy) → phy_band_i2c_set(ROM 0x40001654)
 
 ### 変更ファイル
 - `asp3/target/esp32c5_espidf/esp_wifi.cmake`・`wifi/esp_shim_blobglue.c`＋本doc（実施08）．
+
+---
+
+## 実施09：PHY RX較正ハングの根本＝libphy blob世代とeco2シリコンの不整合（＝実施08と同一根）．C5シリコン自体はdeaf-RXでないと確定
+
+### 診断（実機・厳密）
+実施08の修正後にハングするPHY RX較正ループを解析：
+- ループ本体＝`phy_iq_est_enable_new`（blob-flash `0x420280c2`）．退出条件は**`0x600a047c` bit16（IQ推定«完了»フラグ）**のみ．ASP3では0のまま立たず（`phy_get_pkdet_data`/`phy_abs_temp`を巡回して無限ループ），stockでは0x00010000に立つ．
+- **決定的差分実験**：stock IDF v6.1をC5#2で同一較正点（`phy_iq_est_enable_new`入口）にbreakpointし，RXアナログ有効化レジスタをASP3(ハング)とバイト比較→**全て一致**：
+  PMU_RF_PWC `0x600b0158`=0xff800000／MODEM_SYSCON `0x600a9c14`=0x003be7ff・`0x600a9c18`=0x10003802／
+  MODEM_LPCON `0x600af018`=0x7（wifipwr+coex+i2c_mst）・`0x600af010`=0．pkdet `0x600a0c50`=0（stockの動作時も0＝red herring）．
+- ＝**「RXアナログのクロック/電源/regi2c/WIFIPWR初期化欠落」仮説クラスは棄却**（C6由来のregi2c/WIFIPWR修正は正しく効いている）．eco3.ld類の誤解決も棄却（RX較正関数は全てblob-flashに解決）．PHY init dataも正しい（c5版）．
+
+### 真因（最有力・確定的）
+残る差＝**libphy.aの版そのもの**．ASP3＝hal `esp32c5/libphy.a`（md5 `51166fb6…`），stock＝IDF v6.1（`4ccdbdbe…`）．逆アセンブルで両者の`phy_iq_est_enable_new`が**別コード/別アルゴリズム**（ASP3=`li s2,50`+単純`bge`／stock=`li s2,1;s4,80;s5,150`＋追加status `0x600a08d0`読取り＋多条件）と実証．
+＝**hal(v8世代)のlibphyの`register_chipv7_phy` RX IQ推定シーケンスがeco2シリコンで収束しない．IDF v6.1(v9)のlibphyは収束する**．
+**実施08(store fault)と同一根＝hal blob世代とeco2シリコンの不整合が，1較正ステップ後に再顕在化**したもの．
+
+### ミッション上の確定事項
+- **C5シリコン自体はdeaf-RXでない**：stock IDF v6.1（v9 blob）が同一eco2チップ（C5#2）で同室AP多数（5GHz ch52含む）を受信．
+  → 「新世代モデムは本質的にdeaf」説はシリコンレベルで**棄却**＝**C6のdeaf-RXはC6固有**（新モデム普遍の性質ではない）．
+- 「ASP3統合下でC5がdeafか」は**blob世代を揃えるまで測定不能**（現blobではWi-Fi initが完走しない）．
+
+### 恒久修正＝blob世代整合（ユーザー決断待ち・本ラウンドは未実装）
+C5 Wi-Fi統合をIDF v6.1(v9) blob世代へ移行する必要．os_adapter/wifi_initのCグルーをv9 ABIへ再移植
+（`wifi_osi_funcs_t`に+4フィールド，drop/rename API `esp_wifi_skip_supp_pmkcaching`，coexist `printf`等）＝
+実質C5 Phase Bのやり直し規模（実施08でhal v8↔IDF v9のABI非互換を確認済＝部分swap不可）．
+
+### 検証・変更
+- 実機JTAG読取りのみ（C5#1ハング機・C5#2 stock参照）．ソース変更・コミット無し（本doc実施09の追記のみ）．ボードlatch無し・電源断不要．
