@@ -708,3 +708,42 @@ C5 Wi-Fi統合をIDF v6.1(v9) blob世代へ移行する必要．os_adapter/wifi_
 ### 変更ファイル（エディタブル層のみ・WIPコミット）
 - `esp_wifi.cmake`（移行本体）・`wifi/esp_wifi_adapter.c`（v9構造体）・`wifi/esp_shim_blobglue.c`
   （pmkcaching/printfスタブ）・`wifi/freertos_stub/freertos/{FreeRTOS,task,queue,portmacro}.h`（新設）＋本doc．
+
+---
+
+## 別PC再開メモ（2026-07-10 区切り時点）
+
+**再開点＝commit `45f7532`（本branch `claude/c6-wifi-c5-dev-5vc6x9`，push済み）**。次にやること＝
+実施10「申し送り」＝`esp_wifi_init_internal`が返すエラー **0x3001** の切り分け（どのosi呼出しをblobが
+拒否するか）→修正→`esp_wifi_init`完走→scan→AP＝deaf-RX本丸判定．
+
+### 別PCで揃える前提
+- **ESP-IDF v6.1 を `~/tools/esp-idf-v6.1` に配置**（移行必須）。`esp_wifi.cmake:85` が
+  `set(IDF /home/honda/tools/esp-idf-v6.1)` と**ローカルパス直書き**．別パスなら同行を書換えるか
+  `-DIDF=<path>` 化する（TODO：将来環境変数/キャッシュ変数へ）。IDF v6.1 の
+  esp_wifi/esp_phy/esp_coex/lib/esp32c5 blob（v9・os_adapter 0x09）が必要．
+- ツールチェーン：xpack `riscv-none-elf-gcc` 15.2（`~/opt/tools/xpack-riscv-none-elf-gcc-15.2.0-1/bin`），
+  CMakeは `-DRISCV64_TOOLCHAIN_PREFIX=riscv-none-elf-`（memory `env-esp32c3-toolchain`）．
+- submodule：`asp3/asp3_core` は **ef1f1c8**（`origin/feat/esp32c6` にpush済＝fetch可．CLIC例外修正
+  実施07含む）．`hal`（esp-hal-3rdparty b90b183）は公開repo．`git submodule update --init --recursive`．
+- 実機：C5 #1（DUT）=JTAG MAC `d0:cf:13:f0:a7:44`・UART `b04e3bcf…`／C5 #2（stock v9参照）=
+  `d0:cf:13:f0:c8:94`・`3e7bd19f…`．**番号でなくMACで照合**（`~/usb_status.md`）．触れない機＝
+  S3-A `f4:12:fa:5b:40:2c`／P4-A `30:ed:a0:ea:98:0e`．esptool＝idf6.1 venv v5.3.1，OpenOCDは
+  `-c "adapter serial <MAC>" -f board/esp32c5-builtin.cfg`．
+
+### 未コミットのローカル診断（別PCには転送されない＝必要なら再作成）
+- `apps/wifi_scan/wifi_scan.{c,cfg,h}` のDEF_EXC fault捕捉ハンドラ（RTC-RAM `0x50000000`，magic
+  `0xFA017C05`．実施06/08で実装．CPU例外を1発捕捉して凍結）．今回の0x3001は«ソフト失敗»で
+  CPU例外ではないため本ハンドラは発火しない＝次段はosiラッパ計装/UART可読化で追う．
+- submodule `asp3_core` の `kernel/time_event.c`（C6由来の"no time event"抑制．C5に無関係・非コミット）．
+
+### ビルド確認コマンド（wifi_scan＋v9移行）
+```
+export PATH="$HOME/opt/tools/xpack-riscv-none-elf-gcc-15.2.0-1/bin:$PATH"
+cmake -S asp3/asp3_core -B build/c5_idf61 -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-riscv64.cmake -DRISCV64_TOOLCHAIN_PREFIX=riscv-none-elf- \
+  -DASP3_TARGET=esp32c5_espidf -DASP3_TARGET_DIR=$PWD/asp3/target/esp32c5_espidf \
+  -DESP32C5_WIFI=ON -DESP32C5_CONSOLE=usbjtag \
+  -DASP3_APPLDIR=$PWD/apps/wifi_scan -DASP3_APPLNAME=wifi_scan
+cmake --build build/c5_idf61
+```
