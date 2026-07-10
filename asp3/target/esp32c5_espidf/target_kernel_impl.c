@@ -154,7 +154,18 @@ target_initialize(void)
 	 */
 	esp32c5_intmtx_route(ESP32C5_INTSRC_SYSTIMER_TARGET0, 16U);
 	esp32c5_intmtx_route(ESP32C5_INTSRC_FROM_CPU_0, 16U);
+	/*
+	 *  コンソール（INTNO_SIO＝線17）はビルド時選択に応じて
+	 *  USB Serial/JTAG または UART0 のソースを割り当てる
+	 *  （C6の target/esp32c6_gcc/target_kernel_impl.c と同じ条件分岐．
+	 *  usbjtagコンソールでUART0を割り当てるとTX完了割込みがCPUへ届かず
+	 *  割込み駆動出力＝ログタスク経由のタスク出力が停止する）
+	 */
+#ifdef TOPPERS_ESP32C5_CONSOLE_USBJTAG
+	esp32c5_intmtx_route(ESP32C5_INTSRC_USB_SERIAL_JTAG, 17U);
+#else /* TOPPERS_ESP32C5_CONSOLE_USBJTAG */
 	esp32c5_intmtx_route(ESP32C5_INTSRC_UART0, 17U);
+#endif /* TOPPERS_ESP32C5_CONSOLE_USBJTAG */
 	esp32c5_intmtx_route(ESP32C5_INTSRC_FROM_CPU_1, 18U);
 }
 

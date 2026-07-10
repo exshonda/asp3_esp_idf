@@ -39,15 +39,23 @@ uint8_t intmtx_from_cpu[32];
 /*
  *  ペリフェラル割込みソースのCPU割込み線への割り当て
  *
- *  INTMTXへの書込み値はASP3のINTNO（1〜31）そのまま（CLIC内部番号への
- *  +16オフセット変換はCLIC側（clic_kernel_impl.hのCLIC_LINEマクロ）
- *  だけで行い，INTMTX（ソースルーティング）は関知しない．C6・C3と同じ
- *  ロジック・同じアドレス方式のため変更なし）
+ *  【C5実機で確定・C6/C3とは異なる】INTMTXのMAPレジスタへ書込む値は
+ *  «CLIC内部番号»（＝INTNO+16＝CLIC_LINE(intno)）である．C5のINTMTXは
+ *  MAP値をそのままCLIC内部の割込み線番号として用いるため，INTNOを
+ *  そのまま書くとCLIC内部16〜46（＝カーネルが許可・ハンドラ登録して
+ *  いない線）へ配送されてしまい，ペリフェラル割込みが一切CPUへ届かない
+ *  （実機JTAG検証：src54(USB_SERIAL_JTAG)をMAP=17で配線するとCLIC内部17が
+ *  pending＝IE=0で未配送．MAP=33へ変更するとCLIC内部33がpending＝IE=1で
+ *  配送されコンソール割込み出力が復活．docs/c5-bringup.md実施02）．
+ *  なおCLIC内部番号への+16変換はclic_kernel_impl.hのCLIC_LINEマクロが
+ *  許可・優先度設定側でも行っており，INTMTX側と一致させる必要がある．
+ *  intmtx_srcmask/intmtx_from_cpuの添字はINTNO（1〜31）のまま．
  */
 void
 esp32c5_intmtx_route(uint_t intsrc, INTNO intno)
 {
-	sil_wrw_mem((void *)(INTMTX_BASE + intsrc * 4U), (uint32_t)intno);
+	sil_wrw_mem((void *)(INTMTX_BASE + intsrc * 4U),
+				(uint32_t)CLIC_LINE(intno));
 	intmtx_srcmask[intno][intsrc / 32U] |= 1U << (intsrc % 32U);
 	if (ESP32C5_INTSRC_FROM_CPU_0 <= intsrc
 			&& intsrc <= ESP32C5_INTSRC_FROM_CPU_3) {

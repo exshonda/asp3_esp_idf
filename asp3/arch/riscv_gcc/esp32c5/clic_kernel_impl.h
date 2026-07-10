@@ -93,12 +93,15 @@
 #include "esp32c5.h"
 
 /*
- *  割込みマトリクス（ソースルーティング．C6・C3と同一方式・同一アドレス）
+ *  割込みマトリクス（ソースルーティング．アドレス方式はC6・C3と同一だが
+ *  MAP値の意味がC5では異なる＝下記）
  *
- *  ソースnのMAPレジスタ：INTMTX_BASE + 4n（値＝CPU割込み線番号＝ASP3
- *  のINTNO．CLIC内部番号への変換はCLIC側でのみ行い，INTMTXへの書込み
- *  値そのものはINTNO＝1〜31のままでよい．esp32c6_intmtx_route相当の
- *  esp32c5_intmtx_route（chip_kernel_impl.c）参照）
+ *  ソースnのMAPレジスタ：INTMTX_BASE + 4n．【C5実機で確定】このMAP値は
+ *  «CLIC内部番号»として直接使われる（C6/C3のようにCLIC側で+16変換は
+ *  されない）ため，MAPにはCLIC_LINE(intno)＝INTNO+16（外部割込みは17〜47）
+ *  を書く必要がある．INTNOそのままを書くとCLIC内部の未許可線へ配送され
+ *  割込みがCPUへ届かない（esp32c5_intmtx_route（chip_kernel_impl.c）と
+ *  docs/c5-bringup.md実施02参照）．
  *
  *  生ステータスレジスタのオフセットはC6（0x134/0x138/0x13c）と異なる
  *  （hal: soc/esp32c5/register/soc/interrupt_matrix_reg.hで
