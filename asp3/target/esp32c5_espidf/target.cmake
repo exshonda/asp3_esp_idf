@@ -1,0 +1,194 @@
+#
+#		ターゲット依存部のCMake定義（ESP32-C5 esp-hal統合用）
+#
+#  esp32c6版（asp3_target/esp32c6_espidf/target.cmake相当）をコピー
+#  起点に，docs/c5-port-design.md §5.1・§5.2に従いrename・値差替えした
+#  もの（B-0/B-1スコープ．フェーズ2a）。
+#    - 自分自身（target_*）は CMAKE_CURRENT_LIST_DIR 相対
+#    - チップ依存部はsubmodule外（asp3/arch/riscv_gcc/esp32c5/．
+#      CLAUDE.mdの禁則によりasp3_core submoduleを直接編集しないため．
+#      docs/c5-port-design.md §2.2で配置の妥当性を検証済み）
+#    - 共通arch・カーネル本体は submodule（ASP3_ROOT_DIR）側
+#
+#  QEMU対応は【実機確認待ち】（docs/c5-port-design.md §8.1 14番．
+#  Espressif版QEMU forkにesp32c5マシンが追加されているかC6のときの
+#  ように「非対応」と決め打ちしていない）。本ファイルは実機書込みの
+#  みを既定とする。
+#
+#  Wi-Fi統合（wifi/・esp_wifi.cmake）は今回（フェーズ2a・B-0/B-1）は
+#  含めない（フェーズ2bで別途）。ESP32C5_WIFIオプションブロックは
+#  残すが，esp_wifi.cmakeが存在しないため，OFF既定の間はincludeしない
+#  よう本体もif(ESP32C5_WIFI)ガード内に置く。
+#
+
+set(TARGETDIR ${CMAKE_CURRENT_LIST_DIR})
+
+#
+#  esp-hal-3rdparty（submodule）のパスとインクルードディレクトリ
+#
+#  B-0/B-1で使用するのはRTOS非依存の下層のみ：
+#    hal（LL層＝static inlineのレジスタ薄層）・soc（レジスタ定義・
+#    構造体・peripherals.ld）・esp_common（esp_attr.h）．
+#  sdkconfig.hはKconfig生成物を使わず，本リポジトリ側で用意した
+#  スタブ（sdkconfig_stub/．下記参照）を使う（hal submoduleは
+#  ESP32-C5向けのNuttX統合ファイル一式を同梱していないため）。
+#
+get_filename_component(ESP_HAL_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../hal ABSOLUTE)
+
+#
+#  hal_stub（libc互換ヘッダ．ツールチェーンにnewlib実体が無い環境向け）
+#  はESP32-C3用のものをそのまま再利用する（チップ非依存＝トゥール
+#  チェーンのギャップを埋めるだけの内容）。
+#
+get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf ABSOLUTE)
+
+list(APPEND ASP3_INCLUDE_DIRS
+    ${C3_TARGETDIR}/hal_stub/include
+    ${TARGETDIR}/sdkconfig_stub
+    ${ESP_HAL_DIR}/components/hal/esp32c5/include
+    ${ESP_HAL_DIR}/components/hal/include
+    ${ESP_HAL_DIR}/components/hal/platform_port/include
+    ${ESP_HAL_DIR}/components/esp_hal_usb/esp32c5/include
+    ${ESP_HAL_DIR}/components/esp_hal_usb/include
+    ${ESP_HAL_DIR}/components/soc/esp32c5/include
+    ${ESP_HAL_DIR}/components/soc/esp32c5/register
+    ${ESP_HAL_DIR}/components/soc/include
+    ${ESP_HAL_DIR}/components/esp_common/include
+    #  esp_rom_sys.h（esp_rom_set_cpu_ticks_per_us宣言．
+    #  target_kernel_impl.cが使用）。C6版のtarget.cmakeはこれを
+    #  Wi-Fi限定（esp_wifi.cmake内）でしか積んでおらず，Wi-Fi無し
+    #  ビルドでは本来ここが欠落する潜在バグだった（本ポートで気付いた
+    #  ため無条件で積む．C5固有の問題ではなくC6にも共通する既存の
+    #  ギャップ）。
+    ${ESP_HAL_DIR}/components/esp_rom/include
+    ${ESP_HAL_DIR}/components/esp_rom/esp32c5/include
+)
+
+#
+#  コンフィギュレーション関連
+#
+list(APPEND ASP3_CFG_FILES
+    ${TARGETDIR}/target_kernel.cfg
+)
+
+list(APPEND ASP3_KERNEL_CFG_TRB_FILES
+    ${TARGETDIR}/target_kernel.py
+)
+
+list(APPEND ASP3_CHECK_TRB_FILES
+    ${TARGETDIR}/target_check.py
+)
+
+#
+#  インクルードディレクトリ
+#
+list(APPEND ASP3_INCLUDE_DIRS
+    ${TARGETDIR}
+)
+
+#
+#  コンソールの選択（chip.cmake参照）．ボード固有のピン配線が未確定
+#  （docs/c5-port-design.mdはボード実装非依存の設計）のため，既定は
+#  chip.cmakeと同じuart0とする（C6のようなUSB Serial/JTAG固定ボードが
+#  判明したら-DESP32C5_CONSOLE=usbjtagで切替え．usbjtag選択時は
+#  arch層の生レジスタ版esp32c5_usbjtag.cが使われる＝esp-hal LL層版
+#  （C6のesp32c6_usbjtag_hal.c相当）は本フェーズでは未移植）。
+#
+set(ESP32C5_CONSOLE uart0
+    CACHE STRING "Console device: uart0 or usbjtag")
+
+#
+#  コンパイル定義
+#
+#  USE_TIM_AS_HRT：高分解能タイマにSYSTIMERを使用（Machine Timer不使用）
+#  TOPPERS_SUPPORT_TLS：タスク実行開始時(start_r)のTLS初期化(tp設定)を
+#    有効化．picolibcのrand()等TLS依存libc関数を使うとtp未初期化(=0)で
+#    Load access faultになるため常時有効。
+#
+list(APPEND ASP3_COMPILE_DEFS
+    USE_TIM_AS_HRT
+    TOPPERS_SUPPORT_TLS
+)
+
+#
+#  リンクオプション
+#
+list(APPEND ASP3_LINK_OPTIONS
+    -Wl,--print-memory-usage
+    -Wl,--gc-sections
+    -Wl,--build-id=none
+    -L${ESP_HAL_DIR}/components/soc/esp32c5/ld
+)
+
+set(ASP3_LDSCRIPT ${TARGETDIR}/esp32c5.ld)
+
+#
+#  ターゲット依存部のソース
+#
+list(APPEND ASP3_TARGET_C_FILES
+    ${TARGETDIR}/target_kernel_impl.c
+    ${TARGETDIR}/target_timer.c
+    ${TARGETDIR}/flash_header.S
+)
+
+#
+#  チップ依存部のインクルード（submodule外．docs/c5-port-design.md §2.2）
+#
+include(${CMAKE_CURRENT_LIST_DIR}/../../arch/riscv_gcc/esp32c5/chip.cmake)
+
+#
+#  実機への書込み（cmake --build <dir> --target run）
+#
+#  【実機確認待ち】docs/c5-port-design.md §8.1 13番。esptoolの
+#  pinnedバージョンが`--chip esp32c5`をサポートしているか要確認。
+#
+set(ESP32C5_ESPTOOL esptool
+    CACHE STRING "Path to esptool")
+set(ESP32C5_PORT /dev/ttyACM1
+    CACHE STRING "Serial port of the ESP32-C5 board")
+set(ASP3_RUN_COMMAND
+    ${ESP32C5_ESPTOOL} --chip esp32c5 --port ${ESP32C5_PORT}
+    write-flash 0x0 ${CMAKE_BINARY_DIR}/asp_flash.bin
+)
+
+#
+#  Wi-Fi（esp_wifi blob＋os_adapter shim．フェーズ2b予定）
+#
+#  今回（フェーズ2a・B-0/B-1）はwifi/・esp_wifi.cmakeを含めない
+#  （docs/c5-port-design.md 作業内容B参照）。ESP32C5_WIFIオプション
+#  ブロック自体は将来のフェーズ2bに備えて残すが，esp_wifi.cmakeが
+#  まだ存在しないため，includeそのものをif(ESP32C5_WIFI)ガード内に
+#  置く（OFF既定の間はincludeされずビルドが通る）。
+#
+get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf ABSOLUTE)
+
+option(ESP32C5_WIFI "Enable Wi-Fi (esp_wifi blob + os_adapter shim; NOT YET IMPLEMENTED, phase 2b)" OFF)
+if(ESP32C5_WIFI)
+    if(NOT EXISTS ${TARGETDIR}/esp_wifi.cmake)
+        message(FATAL_ERROR
+            "ESP32C5_WIFI=ON was requested, but ${TARGETDIR}/esp_wifi.cmake "
+            "does not exist yet (Wi-Fi integration is phase 2b, not yet "
+            "implemented for ESP32-C5). See docs/c5-port-design.md.")
+    endif()
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_WIFI)
+    list(APPEND ASP3_INCLUDE_DIRS
+        ${TARGETDIR}/wifi
+        ${C3_TARGETDIR}
+        ${C3_TARGETDIR}/wifi
+    )
+    list(APPEND ASP3_CFG_FILES ${C3_TARGETDIR}/wifi/esp_shim.cfg)
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${TARGETDIR}/wifi/esp_shim.c
+        ${TARGETDIR}/wifi/esp_shim_blobglue.c
+        ${TARGETDIR}/wifi/esp_wifi_adapter.c
+        ${C3_TARGETDIR}/wifi/esp_shim_libc.c
+        ${C3_TARGETDIR}/wifi/esp_event_shim.c
+        ${C3_TARGETDIR}/wifi/esp_coex_adapter.c
+    )
+    include(${TARGETDIR}/esp_wifi.cmake)
+endif()
+
+#
+#  フラッシュイメージ生成等（aspターゲット定義後に取込み）
+#
+set(ASP3_TARGET_RUN_CMAKE ${TARGETDIR}/run.cmake)
