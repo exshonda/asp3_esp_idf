@@ -3054,3 +3054,70 @@ rst:0x12 (RTC_SWDT_SYS),boot:0x18 (SPI_FAST_FLASH_BOOT)
     ——実施13〜19と症状完全一致，復帰完了。
 - C5#2（`D0:CF:13:F0:C8:94`）：本ラウンドも一切接続・操作せず（未接触，
   udevadmでの読み取り専用MAC照合のみ，最終確認含め複数回実施）。
+
+## 別PC再開メモ（第2版，2026-07-11 実施20完了・実施21中断時点）
+
+**再開点＝本branch `claude/c6-wifi-c5-dev-5vc6x9` のHEAD（実施14〜20コミット済み・push済み）**。
+環境構築（IDF v6.1 `~/tools/esp-idf-v6.1`・xpackツールチェーン・submodule・ビルドコマンド）は
+第1版の「別PC再開メモ」（実施10直後のセクション）を参照。以下は差分のみ。
+
+### 現在地（実施14〜20の到達点）
+
+統一像＝**blob内トーン自己ループバック測定（トーン注入→RF鎖→BB内ADCキャプチャ）が
+ASP3でのみ不動作**。生ADCサンプル（`MODEM0+0x81C..0x828`）がASP3だけハードゼロ
+（stockは同一個体・同一blob・同一init_data・同一cal_mode(full)で非ゼロ変動・完走）。
+一方，デジタル可視領域は徹底比較の末**全て一致**：
+- MMIOスナップショット（MODEM_SYSCON/MODEM_LPCON/PMU ICG/I2C_ANA_MST/MODEM0
+  0x000・0x400・0xc00域）＝実質等価，差分は全て因果棄却（実施15/17）
+- regi2c発行列＝最初の測定失敗まで完全一致（実施16/18/19）
+- トーン測定経路の制御レジスタ（PCR_SARADC/MODEM_SYSCON/ICG/RST/PWDET_CONF/
+  APB_SARADC_CTRL）＝ビット同一（実施20）
+- 引数（init_data 256バイト・cal_mode）＝同一（実施19）
+
+### 実施21（中断・未実施扱い）：次にやること
+
+PMU/LPアナログ電源ドメインの全域スイープ比較。**起動→着手直後にユーザ指示で
+中断したため，docs追記・ソース変更・結論は一切ない**。再開時は実施21として
+最初からやり直すこと。計画の要点：
+1. `hal/components/soc/esp32c5/`ヘッダで`PMU`・`LP_ANA`・`LP_AON`・`LPPERI`・
+   `PCR`全域のベース/サイズを確定（読取り副作用レジスタは除外し記録）
+2. 採取点を揃えて（`phy_rfcal_txcap`エントリ＋`register_chipv7_phy`エントリの2点）
+   stock×2・ASP3×2の4-wayスイープ
+3. 差分→`hal/`ヘッダで意味解読（xpd/LDO/バイアス系最優先）→JTAG注入で因果検証
+   （PMU即時反映パルス2本を忘れない，実施13参照）→移植層修正1件
+4. 差分ゼロなら「Direct Boot起因の共通アナログ壁（C6-generic）」への構造比較を
+   整理して停止・ユーザ判断へ
+根拠：stockは`pmu_init()`/`esp_rtc_init()`実行・ASP3 Direct Bootは非実行，かつ
+実施13のICGバグ（PMU域・C6では冗長だがC5では必須）という前例。C6実施30相当の
+全PMU比較はC5では未実施。
+
+### ★ボード状態の注意（中断の副作用）
+
+- **C5#1（`D0:CF:13:F0:A7:44`）のflash内容は不確定**（実施21エージェントを
+  実験途中で停止したため，stock scanイメージ／ASP3計装ビルドのどちらが
+  入っているか未確認）。**再開時は必ずASP3をビルドして書き直してから始める**
+  （`build/c5_idf61`または計装付き`build/c5_idf61_trace`構成，
+  `-DESP32C5_WIFI_REGI2C_TRACE=ON`）。
+- C5#2（`D0:CF:13:F0:C8:94`，stock v9参照機）は実施14〜21を通じて一切未接触。
+
+### 失われる資産（スクラッチ＝セッション限り，別PCには無い）
+
+- stockビルド一式（`stock_scan/`）→ 実施15の手順で再ビルド
+  （`~/tools/esp-idf-v6.1`の`examples/wifi/scan`をコピーして
+  `idf.py set-target esp32c5 && idf.py build`。flashオフセットは
+  `flasher_args.json`準拠＝0x2000/0x8000/0x10000，実施20の事故記録参照）。
+  regi2cトレース計装（`--wrap`）はASP3側`wifi_trace.c`と同型をstockコピーに
+  再適用（実施16/18参照）
+- JTAGスクリプト群（`rts_reset.py`・再接続競争・キャプチャ・シンボル解決）
+  → docs実施15/17/19の記述から再作成
+
+### 実機手順の罠 早見表（詳細は各実施）
+
+| 罠 | 対処 | 出典 |
+|---|---|---|
+| JTAG `reset halt`/native USB-JTAGリセットはMODEM/PMUドメインを消さない | クリーンブート＝UARTブリッジ(ttyUSB1) RTSリセットのみ | 実施14 |
+| UARTブリッジRTSリセットはJTAG接続を切断 | 再接続競争（USB再列挙~0.3s+OpenOCD再attach） | 実施15 |
+| 再接続で`sil_dly_nse`内に着地するとbpが発火しない | bad-landing検出→リトライ | 実施17 |
+| hw watchpoint（OpenOCD `wp`）が本環境で不発 | 書込み命令アドレスへのbpで代替 | 実施19 |
+| `esptool write-flash`末尾の自動リセットが初回full-calブートを裏で消費 | erase→write→即捕捉を同一チェインで | 実施19 |
+| stockのflashオフセット誤り（0x0/0x20000）でROMブートループ | `flasher_args.json`の0x2000/0x8000/0x10000に従う | 実施20 |
