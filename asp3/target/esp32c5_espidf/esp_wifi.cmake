@@ -330,6 +330,10 @@ if(ESP32C5_WIFI_REGI2C_TRACE)
         -Wl,--wrap=phy_i2c_writeReg_Mask
         -Wl,--wrap=phy_i2c_readReg
         -Wl,--wrap=phy_i2c_readReg_Mask
+        # 実施18: 4b（block=0x6b,reg=0x02書込み値のASP3/stock恒久分岐）の
+        # 発行元をphy_set_txcap_reg（libphy.a大域リンケージ関数）まで特定
+        # できたため，その引数（channel/freq値，a0一本）も同一手法で記録。
+        -Wl,--wrap=phy_set_txcap_reg
     )
 endif()
 

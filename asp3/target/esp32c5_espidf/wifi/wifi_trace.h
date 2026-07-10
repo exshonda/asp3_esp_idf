@@ -23,6 +23,11 @@
  *  op: 0=write, 1=write_mask, 2=read, 3=read_mask
  *  C6のwifi_regi2c_t（wifi-shim-c6.md 実施39）とバイトレイアウトを
  *  意図的に揃えてある（JTAG mdwデコードスクリプトを流用しやすくするため）。
+ *
+ *  実施18で`ra`（呼出し元PC，`__builtin_return_address(0)`）を末尾に追加
+ *  （12→16バイト＝4ワード／エントリ）。先頭3ワードは実施16/17と同一
+ *  レイアウトのため既存デコードスクリプトは読み進めワード数の変更のみで
+ *  流用できる。
  */
 typedef struct {
 	uint32_t	t_us_low;
@@ -30,6 +35,7 @@ typedef struct {
 	uint8_t		msb, lsb;	/* write/read（非mask）では0xFFを格納 */
 	uint8_t		op;
 	uint8_t		_pad;
+	uint32_t	ra;		/* __wrap_phy_i2c_*の直接の呼出し元PC */
 } wifi_regi2c_t;
 
 extern void wifi_regi2c_reset(void);
@@ -40,5 +46,25 @@ extern void wifi_regi2c_dump_count(void);
  *  syslogへ出力する（実施15/実施23と同じ流儀のアドレス確認用）。
  */
 extern void wifi_regi2c_dump_addr(void);
+
+/*
+ *  実施18: 4b（block=0x6b,reg=0x02書込み値のASP3/stock恒久分岐，`0x87`対
+ *  `0x74`）のraをblock=0x6b書込みの発行元まで辿った結果，発行元関数は
+ *  ASP3/stockとも`phy_set_txcap_reg`（libphy.a大域リンケージ関数，同一
+ *  コード）で一致したが，そのbody（`phy_get_chan_cap`→`phy_freq_to_mbgain`
+ *  →`phy_txcap_setting`）が計算する出力値がplatform間で異なっていた。
+ *  `phy_set_txcap_reg`の唯一の引数（channel/freq，a0一本）を独立した
+ *  小さな別リングバッファへ記録し，「入力（channel/freq）自体が違うのか，
+ *  同じ入力でも出力が違うのか」を切り分ける。regi2cトレースと同じ
+ *  loop-top halt時点で一括ダンプできるよう，別配列・別pos変数にする
+ *  （regi2cのタイミングに干渉しない・エントリサイズを変えない）。
+ */
+typedef struct {
+	uint32_t	t_us_low;
+	uint32_t	arg0;	/* phy_set_txcap_regの引数（channel/freq） */
+} wifi_txcap_call_t;
+
+extern void wifi_txcap_reset(void);
+extern void wifi_txcap_dump_addr(void);
 
 #endif /* WIFI_TRACE_H */

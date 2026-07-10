@@ -54,7 +54,7 @@ wifi_regi2c_dump_addr(void)
 
 static void
 wifi_regi2c_push(uint8_t op, uint8_t block, uint8_t host_id, uint8_t reg_add,
-				  uint8_t msb, uint8_t lsb, uint8_t data)
+				  uint8_t msb, uint8_t lsb, uint8_t data, uint32_t ra)
 {
 	uint32_t		pos = wifi_regi2c_pos++;
 	wifi_regi2c_t	*e = &wifi_regi2c[pos % WIFI_REGI2C_SIZE];
@@ -68,6 +68,7 @@ wifi_regi2c_push(uint8_t op, uint8_t block, uint8_t host_id, uint8_t reg_add,
 	e->lsb = lsb;
 	e->op = op;
 	e->_pad = 0U;
+	e->ra = ra;
 }
 
 /*
@@ -83,8 +84,10 @@ void
 __wrap_phy_i2c_writeReg(uint8_t block, uint8_t host_id, uint8_t reg_add,
 						 uint8_t data)
 {
+	uint32_t	ra = (uint32_t)(uintptr_t)__builtin_return_address(0);
+
 	__real_phy_i2c_writeReg(block, host_id, reg_add, data);
-	wifi_regi2c_push(0U, block, host_id, reg_add, 0xFFU, 0xFFU, data);
+	wifi_regi2c_push(0U, block, host_id, reg_add, 0xFFU, 0xFFU, data, ra);
 }
 
 extern void __real_phy_i2c_writeReg_Mask(uint8_t block, uint8_t host_id,
@@ -94,8 +97,10 @@ void
 __wrap_phy_i2c_writeReg_Mask(uint8_t block, uint8_t host_id, uint8_t reg_add,
 							  uint8_t msb, uint8_t lsb, uint8_t data)
 {
+	uint32_t	ra = (uint32_t)(uintptr_t)__builtin_return_address(0);
+
 	__real_phy_i2c_writeReg_Mask(block, host_id, reg_add, msb, lsb, data);
-	wifi_regi2c_push(1U, block, host_id, reg_add, msb, lsb, data);
+	wifi_regi2c_push(1U, block, host_id, reg_add, msb, lsb, data, ra);
 }
 
 extern uint8_t __real_phy_i2c_readReg(uint8_t block, uint8_t host_id,
@@ -103,8 +108,9 @@ extern uint8_t __real_phy_i2c_readReg(uint8_t block, uint8_t host_id,
 uint8_t
 __wrap_phy_i2c_readReg(uint8_t block, uint8_t host_id, uint8_t reg_add)
 {
+	uint32_t	ra = (uint32_t)(uintptr_t)__builtin_return_address(0);
 	uint8_t	ret = __real_phy_i2c_readReg(block, host_id, reg_add);
-	wifi_regi2c_push(2U, block, host_id, reg_add, 0xFFU, 0xFFU, ret);
+	wifi_regi2c_push(2U, block, host_id, reg_add, 0xFFU, 0xFFU, ret, ra);
 	return(ret);
 }
 
@@ -115,7 +121,46 @@ uint8_t
 __wrap_phy_i2c_readReg_Mask(uint8_t block, uint8_t host_id, uint8_t reg_add,
 							 uint8_t msb, uint8_t lsb)
 {
+	uint32_t	ra = (uint32_t)(uintptr_t)__builtin_return_address(0);
 	uint8_t	ret = __real_phy_i2c_readReg_Mask(block, host_id, reg_add, msb, lsb);
-	wifi_regi2c_push(3U, block, host_id, reg_add, msb, lsb, ret);
+	wifi_regi2c_push(3U, block, host_id, reg_add, msb, lsb, ret, ra);
 	return(ret);
+}
+
+/*
+ *  実施18: phy_set_txcap_reg(channel/freq)の引数トレース。wifi_trace.hの
+ *  コメント参照。regi2cリングバッファとは別の小さな専用バッファ
+ *  （32エントリで十分——実測でこの関数の呼出しは1ブートあたり10回未満）。
+ */
+#define WIFI_TXCAP_SIZE 32
+
+wifi_txcap_call_t	wifi_txcap_calls[WIFI_TXCAP_SIZE];
+volatile uint32_t	wifi_txcap_pos;
+
+void
+wifi_txcap_reset(void)
+{
+	wifi_txcap_pos = 0U;
+	memset(wifi_txcap_calls, 0, sizeof(wifi_txcap_calls));
+}
+
+void
+wifi_txcap_dump_addr(void)
+{
+	syslog(LOG_NOTICE, "wifi_txcap_addr: arr=%08x pos=%08x entsz=%d cap=%d",
+		   (unsigned int)(uintptr_t)wifi_txcap_calls,
+		   (unsigned int)(uintptr_t)&wifi_txcap_pos,
+		   (int_t)sizeof(wifi_txcap_call_t), (int_t)WIFI_TXCAP_SIZE);
+}
+
+extern void __real_phy_set_txcap_reg(uint32_t arg0);
+void
+__wrap_phy_set_txcap_reg(uint32_t arg0)
+{
+	uint32_t			pos = wifi_txcap_pos++;
+	wifi_txcap_call_t	*e = &wifi_txcap_calls[pos % WIFI_TXCAP_SIZE];
+
+	e->t_us_low = (uint32_t)esp_shim_time_us();
+	e->arg0 = arg0;
+	__real_phy_set_txcap_reg(arg0);
 }

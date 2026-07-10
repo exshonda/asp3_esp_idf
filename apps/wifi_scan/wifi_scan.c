@@ -171,6 +171,10 @@ main_task(EXINF exinf)
 	 *  アドレスを一度だけ出力する（JTAGでの生メモリ直読み用）。 */
 	wifi_regi2c_reset();
 	wifi_regi2c_dump_addr();
+	/*  実施18：phy_set_txcap_reg引数トレース用の第2リングバッファも
+	 *  同じタイミングでリセット・アドレス出力する。 */
+	wifi_txcap_reset();
+	wifi_txcap_dump_addr();
 #endif /* TOPPERS_ESP32C5_WIFI_REGI2C_TRACE */
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_init");
 	err = esp_wifi_init(&cfg);

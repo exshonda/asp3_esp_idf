@@ -2161,3 +2161,281 @@ blob内部専用のアドレスと判断する。
     復帰完了。
 - C5#2（`D0:CF:13:F0:C8:94`）：本ラウンドも一切接続・操作せず（未接触，MACで
   都度照合）。
+
+---
+
+## 実施18：regi2cトレースに呼出し元PC(`ra`)を追加し，4b/4cの発行元関数を確定——両方とも**ASP3/stock間で同一コード**（4b=`phy_set_txcap_reg`，4c=`phy_tsens_temp_read_local`）と判明。4bは`phy_param[176..183]`という静的キャリブレーションテーブルの**内容**の分岐（コードではなくデータの分岐）で，チャンネル非依存の`0x87`固定を数値レベルで説明できた。4cは`phy_param[35]`という制御フラグがASP3=0／stock=1で分岐しており，これが4cの直接原因とJTAG A/B読みで確定。tsens計算が読むeFuse入力(`EFUSE_RD_MAC_SYS5_REG`)はplatform間で同一値と確認（tsens関連の当該eFuse仮説は棄却）。修正は未実装（真の分岐源=`phy_param[35]`/`phy_param[176..183]`を書き込む上流コードは未特定のため）
+
+コーディネータ指示＝実施16/17の申し送り「4b（`block=0x6b,reg=0x02`書込み値の恒久分岐`0x87`対`0x74`）と4c（ASP3限定の追加read`block=0x69,host=0,reg=0x06`）の発行元をregi2cトレースへの呼出し元PC追加で直接特定する」に着手。
+
+### 1. 計装拡張：`wifi_regi2c_t`に`ra`欄を追加（12→16バイト／エントリ）
+
+`asp3/target/esp32c5_espidf/wifi/wifi_trace.h`・`.c`（ASP3側）とスクラッチ
+`stock_scan/main/wifi_trace.{c,h}`（stock側）の両方で，各`__wrap_phy_i2c_*`に
+`__builtin_return_address(0)`を追加記録した（構造体末尾に`uint32_t ra`を追加，
+先頭3ワードは実施16/17と同一レイアウトのため`decode_regi2c.py`は読み進め
+ワード数の変更のみで流用できた）。2段目（呼出し元の呼出し元）の記録は
+**見送った**——GCCの`__builtin_return_address(1)`はフレームポインタ連鎖に
+依存し，`-O2`最適化済みblobコード（フレームポインタ省略が一般的）に対して
+使うと未定義動作／クラッシュのリスクが高いと判断（実施の鉄則「未検証の
+判別指標に乗らない」に基づく事前判断）。ASP3側RAM使用率は82.5%→84.55%
+（+8KB，2048エントリ×4バイト増）で予算内。両ビルドとも成功を確認。
+
+### 2. 実機採取（C5#1のみ，各1ブート）
+
+実施16/17の「再接続競争」手法をそのまま流用し，ASP3×1・stock×1ブートで
+loop-top初回ヒット時にリングバッファをJTAGダンプした。4bの分岐位置
+（idx≈235）・4cの初出位置（idx≈364）は実施16で既知のため，本ラウンドは
+raの同定が目的であり各1ブートで開始する計画どおり実施——**ra値はブート間
+で揺れず結論を左右しなかったため，2ブート目は追加しなかった**（後述の
+txcap引数トレース追加後の再採取でも同一のraが再現し，間接的にこの判断を
+補強）。
+
+- ASP3：pos=1244エントリ（実施16と同数），loop-top再ヒット・doneビット`0`
+  でハング継続を確認（症状不変）。
+- stock：pos=1242エントリ（実施16と同数），ret到達（doneビット`1`）で
+  陽性対照を確認。
+
+### 3. 発行元関数の同定：4b＝`phy_set_txcap_reg`，4c＝`phy_tsens_temp_read_local`——両方ともASP3/stock間で**同一コード**
+
+`nm`/`objdump -dr`でraをシンボル解決した（`resolve_syms.py`を新規作成，
+`nm -n`のソート済みシンボル表に対する二分探索）。
+
+**4b**（`block=0x6b,host=1,reg=02`のplain write，idx=101/145/189=`0x74`
+〔両platform一致〕，idx=235以降=ASP3`0x87`固定 vs stock`0x74`近辺で変動）：
+
+| idx群 | 値 | ra（ASP3） | ra（stock） | 解決先 |
+|---|---|---|---|---|
+| 101/145/189 | 74（両platform） | `phy_tx_cap_init+140` | `phy_tx_cap_init+144` | 同一関数（オフセット差は命令列長のわずかな差） |
+| 235/260/285/336/362/1143 | ASP3=87固定 | `phy_set_txcap_reg+26` | （同位置）`phy_set_txcap_reg+30`(RAM/`.iram0.text`) | **同一コード**，配置のみ相違（ASP3=flash実行，stock=IRAM実行） |
+| 361 | ASP3=87 | `phy_rx_loop_cap_set+100` | `phy_rx_loop_cap_set+112` | 同一関数（別系統の書込み経路） |
+
+`phy_set_txcap_reg`をobjdumpで完全比較した結果，**命令列は完全に同一**
+（`phy_get_chan_cap`→`phy_freq_to_mbgain`→`phy_txcap_setting`を呼ぶだけ，
+差異はstockが`.iram0.text`（RAM実行）に配置されているためlibphy.aの遠隔
+関数呼出しが`jal`ではなく`auipc+jalr`になっている点のみ——リンク配置の
+違いであって計算ロジックの違いではない）。よって**4bは「発行元コードが
+違う」のではなく「同一コードが計算する値そのものが違う」**——実施16の
+時点で想定していた「別コードパス」仮説はここで反証された。
+
+**4c**（ASP3限定の追加read`block=0x69,host=0,reg=06`→`0x2f`，idx=364/1118）：
+
+raは両出現とも`phy_tsens_temp_read_local+20`——`phy_i2c_readReg(block=0x69
+=105,host=0,reg=6)`を直接呼んでいる箇所（tsens/SAR_ADCの生DACコード読出し）。
+関数名からもコード内容からも，これは**温度センサ読出し**そのもの
+（task事前仮説の「tsens/SAR_ADC経路説」が的中）。
+
+### 4. `phy_set_txcap_reg`の入力トレースを追加し，4bの原因を「同一コードだが入力(チャンネル)ではなくテーブル内容が違う」まで特定
+
+`phy_set_txcap_reg`もlibphy.aの大域リンケージ関数（`nm`で`T`型）と確認できた
+ため，`--wrap`で第2の小さなリングバッファ（`wifi_txcap_call_t{t_us_low,arg0}`，
+32エントリ）へその唯一の引数（channel/freq，MHz単位の整数）を記録する計装を
+追加した（`esp_wifi.cmake`に`-Wl,--wrap=phy_set_txcap_reg`を追加，ASP3/stock
+双方同型）。
+
+同一ブート内でregi2cトレースとtxcap引数トレースを`t_us_low`（同じクロック
+源）で突き合わせた結果，ASP3の6回の`0x87`書込みは実際には**6つの異なる
+チャンネル**（ch1=2412MHz／ch6=2437MHz／ch11=2462MHz／ch5=2432MHz／ch5再測定
+／ch6最終確認）に対応していた（`phy_set_txcap_reg`呼出しのタイムスタンプと
+regi2c書込みのタイムスタンプが数〜数十µs差で1対1対応）。stockも**全く同じ
+チャンネル列**（同一の校正シーケンス，同一関数）を辿っており，値は
+ch1=74/ch6=74/ch11=53/ch5=74/ch5=74/ch6=74——ch11だけ異なる値になる。
+
+**ASP3は6チャンネル全てで恒久的に同一の`0x87`**（チャンネル非依存）——
+「入力（チャンネル）は動いているが出力が変わらない」という，実施16が
+懸念した「凍結」パターンの確定的な再現である。
+
+### 5. 数値レベルでの根本原因確定：`phy_param[176..183]`テーブルの内容分岐
+
+`phy_set_txcap_reg`→`phy_get_chan_cap`→（3バケットの粗い周波数しきい値判定）
+→`phy_param+176/178/180`（各2バイト，計3組の(cap0,cap1)ペア）を読み，
+`phy_txcap_setting`が`(cap1<<4)|cap0`を計算してレジスタへ書く，という
+処理列をobjdumpで完全に追った（`phy_get_chan_cap`もASP3/stock間で命令列
+完全一致，配置のみ相違——4bと同型）。
+
+同一ブート・同一loop-top halt時点（全チャンネル校正完了後）でこの6バイト
+テーブルをJTAGで直接読み，A/B比較した：
+
+| オフセット | ASP3 | stock |
+|---|---|---|
+| phy_param+176/177 | `07 08` | `04 07` |
+| phy_param+178/179 | `07 08` | `04 07` |
+| phy_param+180/181 | `07 08` | `03 05` |
+
+**ASP3は3バケット全てが同一の`(07,08)`**——`(08<<4)|07=0x87`は3バケット
+どこを引いても同じ値になる（チャンネル非依存の理由が数値的に確定）。
+stockは`(07<<4)|04=0x74`（2バケット）と`(05<<4)|03=0x53`（1バケット）の
+2値が混在——`0x53`はch11（実施16表の`0x54`と同値域，起動毎の境界ノイズ）
+に対応し，実施16の4d（低信頼度差分として保留していた`idx=333`近辺の±1
+ノイズ）とは無関係な，正規のバケット分岐であることも判明した。
+
+この6バイトテーブルは`phy_tx_cap_init`（4bの`0x74`側writeの発行元でも
+ある）が2.4GHz帯で3回ループしながら`phy_chip_set_chan_ana`（RF PLLを
+参照チャンネルへ実際にチューニング）→`phy_rfcal_txcap`（実測に基づく
+キャリブレーション，結果をこのテーブルへ書く）という手順で埋めている
+ことをobjdumpで確認した。`phy_rfcal_txcap`自体の内部（実際の測定に何を
+使っているか）までは本ラウンドの深追い上限（2〜3関数）を超えるため
+立ち入っていない——**次段の最有力候補**として申し送る。
+
+### 6. tsens/SAR_ADC比較：eFuse入力は同一と確認（該当仮説は棄却），真の分岐点は`phy_param[35]`フラグ
+
+`phy_tsens_temp_read_local`をobjdumpで解析した結果：
+`phy_i2c_readReg(0x69,0,6)`→4bitマスク→`phy_tsens_dac_to_index`→
+`EFUSE_RD_MAC_SYS5_REG`（`0x6000e058`，eFuse生システムデータワード）の
+下位バイトを追加のテーブル添字として使用→`phy_tsens_attribute`
+（ROM/flash常駐の定数テーブル，`0x4206d4d0`）から符号付きバイトを引き→
+`phy_code_to_temp`→`phy_tsens_dac_cal`という，正規の温度センサ較正
+パイプラインだった。
+
+`EFUSE_RD_MAC_SYS5_REG`（`hal/.../efuse_reg.h`で確認，ESP32-C5のeFuse
+ベース`0x6000e000`+`0x58`）をJTAGでA/B直読みした：
+
+- ASP3：`0x0000c002`
+- stock：`0x0000c002`（**完全一致**）
+
+eFuseは物理的に一度書き込まれた読み出し専用データであり，ソフトウェア
+初期化の有無に関わらずハードウェアが起動時に自動でシャドウレジスタへ
+展開する設計のため，値が一致すること自体は驚きではないが，「ASP3が
+eFuseの初期化ステップを欠いていて生値/デフォルト値を読んでいる」という
+サブ仮説は**本ラウンドで反証**できた（実施13のICG型パターンとは異なる）。
+
+一方，`phy_tsens_temp_read_local`（すなわち4cの追加read自体）が
+**そもそも呼ばれるかどうか**は，`register_chipv7_phy`内の
+`phy_param[35]`（1バイトフラグ）の値で分岐することをobjdumpで確認した
+（`lbu a5,35(s0); bnez a5,skip_phy_get_temp_init`）。同一loop-top halt
+時点でこのバイトをJTAGでA/B直読みした：
+
+- ASP3：`phy_param[35] = 0x00`（→分岐せず`phy_get_temp_init`
+  →`phy_tsens_temp_read`→`phy_tsens_temp_read_local`を実行）
+- stock：`phy_param[35] = 0x01`（→スキップ）
+
+**これが4c（「stockはこの読み出しを一度も行わない」）の直接かつ確定的な
+原因**——コードの欠落ではなく，`phy_param[35]`という状態フラグの値が
+platform間で異なることによる，正規の条件分岐の結果である。
+
+### 7. 因果関係の整理：4bと4cは**独立した症状**（時系列上，直接の因果連鎖ではない）
+
+regi2cトレースのタイムスタンプで確認した限り，4bの分岐（idx=235，
+`phy_tx_cap_init`の2.4GHzループ内，t_us≈0x0020b51e付近）は，4cの初出
+（idx=364，t_us≈0x0022d168）よりも**時間的に前**に発生している。すなわち，
+4bの原因（`phy_param[176..183]`テーブルの内容）が確定した時点では，まだ
+4cのtsens読み出しは一度も実行されていない——**「4cの凍結した温度入力が
+4bの計算に使われている」という直感的な統合仮説は，この時系列だけで
+反証される**（時間的に後の事象が前の事象の原因にはなり得ない）。
+`phy_freq_to_mbgain`が書く`phy_param+0x502`（温度依存ゲイン補正値）も
+`phy_txcap_setting`の`(cap1<<4)|cap0`計算には使われていない（コード上
+無関係な出力先）ことも確認済み。
+
+したがって，現時点の最も正直な結論は：**4bと4cはいずれもASP3固有の
+再現性ある挙動であり，`phy_param[35]`のような「較正モード」を表す
+フラグ群の値がplatform間で違うことに起因する可能性が高い（示唆的だが
+未確定）が，4b自体の直接原因は`phy_param[176..183]`テーブルの内容
+そのものであり，4cのtsens読み出し有無とは別系統の分岐である**——両者を
+1本の因果に単純化しない。
+
+### 8. 因果検証・修正：未実施（真の書込み元が未特定のため）
+
+`phy_param[176..183]`および`phy_param[35]`それぞれの**書込み元**
+（どのコードが，何を入力にこれらの値を計算・格納しているか）は本
+ラウンドでは特定に至っていない。`phy_rfcal_txcap`（4bのテーブル埋め）と，
+`phy_param[35]`をどこかで設定しているはずの初期化コード（PHY init-data
+ロード／NVS較正データ有無判定など，ESP-IDFの一般的な「full cal / partial
+cal」モード切替の文脈が濃厚）のいずれも，本ラウンドの深追い上限
+（2〜3関数）を超えるため立ち入っていない。**入力の差を「特定できた」と
+言えるのは4c（`phy_param[35]`というフラグの値そのもの）までであり，
+その値がなぜASP3で0・stockで1になるのかという，さらに1段上流の原因は
+未特定**。よって，JTAG注入によるハング解消の因果検証や，ASP3移植層の
+修正は本ラウンドでは実施しなかった（task指示「特定に至らなければ修正
+せず記録」に従う）。
+
+### 9. C5#1の最終状態
+
+C5#1はASP3計装ビルド（`build/c5_idf61_trace/asp_flash.bin`，
+`ESP32C5_WIFI_REGI2C_TRACE=ON`，本ラウンドの`ra`/txcap引数トレース拡張
+込み）のまま書き戻し済み。UARTブリッジRTSリセットでの最終確認（コンソール
+ログ）：
+
+```
+ESP-ROM:esp32c5-eco2-20250121
+rst:0x1 (POWERON),boot:0x18 (SPI_FAST_FLASH_BOOT)
+ESP-ROM:esp32c5-eco2-20250121
+rst:0x12 (RTC_SWDT_SYS),boot:0x18 (SPI_FAST_FLASH_BOOT)
+```
+
+約3.5秒周期の`rst:0x12 (RTC_SWDT_SYS)`WDTリブートループを再現——実施13〜17
+と症状完全一致。本ラウンドの計装追加（regi2cの`ra`欄・txcap引数トレース）
+はハングの有無に影響しない（既知のこと，実施16/17でも確認済みの計装
+オーバーヘッド非関与パターンと整合）。
+
+### 申し送り（次段）
+
+1. **最優先**：`phy_param[35]`を書き込んでいる上流コード（`register_chipv7_phy`
+   より前，PHY init-data／NVS較正データロード周辺が濃厚）を特定し，
+   ASP3がなぜ`0`（stockは`1`）になるかを追う。ESP-IDFの一般的な
+   full-calibration/partial-calibration切替の文脈と合致するかを
+   `hal/`（読取専用）側のPHY init APIドキュメント／構造体定義から
+   机上調査すると当たりが付けやすい可能性がある。
+2. `phy_rfcal_txcap`（`phy_param[176..183]`テーブルの実測ベース書込み元）
+   の内部を追い，そこが読む生入力（regi2c／MMIO）を特定する。4bの
+   直接の書込み元はここであり，`phy_param[35]`と共通の上流原因を持つのか，
+   独立した別要因なのかもここで切り分けられる可能性がある。
+3. 4bと4cを1本の因果に単純化しない（本ラウンドで時系列反証済み）。
+   統合仮説を再提案する場合は，まず新しい時系列証拠を示すこと。
+4. `memory/project_c6_agc_investigation.md`・`MEMORY.md`更新は
+   本ラウンド報告を受けたコーディネータ側で行う運用（CLAUDE.md記載の通り）。
+
+### 変更ファイル（実施18）
+
+- `asp3/target/esp32c5_espidf/wifi/wifi_trace.h`・`wifi_trace.c`：
+  `wifi_regi2c_t`に`ra`欄追加（呼出し元PC記録）／`phy_set_txcap_reg`の
+  引数トレース用の第2リングバッファ（`wifi_txcap_call_t`，32エントリ）
+  ・`wifi_txcap_reset()`・`wifi_txcap_dump_addr()`・
+  `__wrap_phy_set_txcap_reg`を新規追加。
+- `asp3/target/esp32c5_espidf/esp_wifi.cmake`：`ESP32C5_WIFI_REGI2C_TRACE`
+  ON時の`--wrap`一覧に`phy_set_txcap_reg`を追加。
+- `apps/wifi_scan/wifi_scan.c`：`esp_wifi_init()`直前で
+  `wifi_txcap_reset()`/`wifi_txcap_dump_addr()`も呼ぶよう追加。
+- 本doc（`docs/c5-bringup.md`）：実施18セクション追記のみ。
+- スクラッチ（`c75ad9fa-5310-4781-9013-97e0c0ec7812/scratchpad/`）：
+  `openocd_capture_regi2c.py`（`ENTRY_WORDS`を3→4に更新，txcapバッファの
+  オプションダンプ機能を追加），`decode_regi2c.py`（4ワード/エントリの
+  パース・`ra`のfmt/semantic対応に更新），`resolve_syms.py`（新規，
+  nmシンボル表への二分探索アドレス解決），`read_phyparam_table.py`
+  （新規，phy_param任意オフセットのA/B読み，bad-landing retry付き），
+  `read_efuse.py`・`read_phyparam35.py`相当（`/tmp/`に作成した使い捨て
+  スクリプトの内容を統合済み，恒久化する場合はスクラッチへ移設要），
+  `txcap_watch.py`（新規作成したが結局不採用——ライブ単一breakpoint方式は
+  RTS再接続競争の待ち時間分散が大きく非効率と判明したため，計装追加
+  方式（4節）に切替えた。再利用時は要改修），`stock_scan/main/
+  wifi_trace.{c,h}`・`stock_scan/main/CMakeLists.txt`：ASP3側と同型の
+  `ra`欄・txcap引数トレース追加，`scan.c`：同トレースのreset/dump呼出し
+  追加。
+
+### 検証（実施18）
+
+- ビルド：ASP3側`build/c5_idf61_trace`（RAM 84.62%，FLASH 11.76%）・
+  stock側`stock_scan/build`とも成功。`nm`で`__wrap_phy_set_txcap_reg`の
+  実リンクを確認。
+- 実機（C5#1，`D0:CF:13:F0:A7:44`）：
+  - `ra`欄追加後の初回A/B比較（各1ブート）：ASP3 pos=1244／stock
+    pos=1242（実施16と同数），期待通りの結果（ハング継続／ret到達）を
+    再確認。
+  - txcap引数トレード追加後のA/B比較（各1ブート，`ra`欄も同時取得）：
+    ASP3 txcap pos=27／stock txcap pos=27（同数，同一チャンネル列）を確認。
+  - `phy_param[176..183]`（6バイトテーブル）A/B直読み：上記5節の通り
+    プラットフォーム決定的な差分を確認。
+  - `EFUSE_RD_MAC_SYS5_REG`（`0x6000e058`）A/B直読み：完全一致を確認
+    （2回試行，各platformとも安定して`0x0000c002`，reset非依存の静的値
+    のため再現性の懸念は元々小さい）。
+  - `phy_param[35]`A/B直読み：ASP3=`0x00`・stock=`0x01`を確認（各1回，
+    静的値のため十分）。
+  - ライブ単一breakpoint方式（`txcap_watch.py`）の試行：`phy_set_txcap_reg`
+    エントリへのbreakpointが12〜25秒の観測窓で一度も発火せず（既知の
+    ROM-vector正常着地でも同様），RTS再接続競争の待ち時間分散
+    （実施16のboot2bタイムアウト事例と同型）が原因と判断し，計装追加
+    方式へ切替えて解決——不採用の経緯として記録。
+  - 最終復帰：ASP3計装ビルドのまま，UARTブリッジRTSリセットで約3.5秒
+    周期の`rst:0x12 (RTC_SWDT_SYS)`WDTリブートループを確認——実施13〜17
+    と症状完全一致，本ラウンドの計装追加もハングの有無に無関係と確認。
+- C5#2（`D0:CF:13:F0:C8:94`）：本ラウンドも一切接続・操作せず（未接触，
+  MACで都度照合）。
