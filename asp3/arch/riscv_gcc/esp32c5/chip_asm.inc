@@ -22,6 +22,19 @@
 #define TOPPERS_CHIP_ASM_INC
 
 /*
+ *  CPU例外番号(exccode)の取得（CLIC版）
+ *  CLICのmcauseは上位にMPP/MPIE/MPIL等を持つため，下位12bit(exccode)のみを
+ *  残す（RV32：slli/srli 20）．共通部core_support.Sがexc_table索引前に呼ぶ．
+ *  未マスクだとexc_table索引が範囲外→不正ジャンプ→多重フォルト→CPU_LOCKUP．
+ *  一時レジスタ不要．FMP3のesp32p4/chip_asm.incと同型．
+ */
+.macro core_get_exccode_asm reg
+    csrr  \reg, mcause
+    slli  \reg, \reg, 20
+    srli  \reg, \reg, 20
+.endm
+
+/*
  *  ディスパッチ時の追加コンテキストの保存
  */
 .macro save_additional_regs_disp
