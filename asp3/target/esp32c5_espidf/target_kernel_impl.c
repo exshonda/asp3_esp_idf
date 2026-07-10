@@ -29,6 +29,12 @@
 #ifdef TOPPERS_OMIT_TECS
 #include "chip_serial.h"
 #endif
+#ifdef TOPPERS_ESP32C5_WIFI
+#include "esp_rom_sys.h"	/* esp_rom_set_cpu_ticks_per_us宣言．
+							   Wi-Fi有効時のみROM ld（esp32c5.rom.api.ld）
+							   がシンボル実体を提供するため呼出しもガードする
+							   （下記hardware_init_hook参照） */
+#endif
 
 /*
  *  エラー時の処理
@@ -96,17 +102,23 @@ hardware_init_hook(void)
 	 *
 	 *  esp_rom_set_cpu_ticks_per_us()（ROMの較正用大域変数
 	 *  s_ticks_per_usへCORE_CLK_MHZを明示的に通知．C6はphy_init較正で
-	 *  これが必要だった）は，B-0/B-1スコープでは呼び出さない：
-	 *  esp_rom_set_cpu_ticks_per_us自体はROMリンカスクリプト
-	 *  （esp32c5.rom.api.ld＝ets_update_cpu_frequencyへのPROVIDEエイリ
-	 *  アス）が提供するシンボルであり，B-0/B-1（Wi-Fi無し）のリンクには
-	 *  ROM ldを一切含めていないため未定義参照になる。B-0/B-1では
-	 *  esp_rom_delay_us()等ROMの較正値に依存する処理を使わないため実害
-	 *  はない。フェーズ2b（Wi-Fi統合．esp_wifi.cmakeがROM ldを追加）で
-	 *  phy_init等のタイミングにROM較正値が必要になった時点で呼出しを
-	 *  追加すること（C6のhardware_init_hook実施48の教訓．
-	 *  docs/wifi-shim-c6.md参照）。
+	 *  これが必要だった＝実機検証済みの根本原因修正．
+	 *  docs/wifi-shim-c6.md実施48参照）は，B-0/B-1スコープ（Wi-Fi無し）
+	 *  では呼び出さない：esp_rom_set_cpu_ticks_per_us自体はROM
+	 *  リンカスクリプト（esp32c5.rom.api.ld＝ets_update_cpu_frequency
+	 *  へのPROVIDEエイリアス）が提供するシンボルであり，B-0/B-1の
+	 *  リンクにはROM ldを一切含めていないため未定義参照になる。
+	 *  B-0/B-1ではesp_rom_delay_us()等ROMの較正値に依存する処理を
+	 *  使わないため実害はない。
+	 *
+	 *  フェーズ2b（TOPPERS_ESP32C5_WIFI＝Wi-Fi統合．esp_wifi.cmakeが
+	 *  ROM ld一式をリンクするためシンボルが解決可能になる）では，
+	 *  phy_init等のタイミングにROM較正値が必要になるため，C6と同じ
+	 *  理由でここで呼び出す。
 	 */
+#ifdef TOPPERS_ESP32C5_WIFI
+	esp_rom_set_cpu_ticks_per_us(CORE_CLK_MHZ);
+#endif /* TOPPERS_ESP32C5_WIFI */
 }
 
 void

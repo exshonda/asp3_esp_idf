@@ -15,10 +15,9 @@
 #  ように「非対応」と決め打ちしていない）。本ファイルは実機書込みの
 #  みを既定とする。
 #
-#  Wi-Fi統合（wifi/・esp_wifi.cmake）は今回（フェーズ2a・B-0/B-1）は
-#  含めない（フェーズ2bで別途）。ESP32C5_WIFIオプションブロックは
-#  残すが，esp_wifi.cmakeが存在しないため，OFF既定の間はincludeしない
-#  よう本体もif(ESP32C5_WIFI)ガード内に置く。
+#  Wi-Fi統合（wifi/・esp_wifi.cmake）はフェーズ2b（B-2a．docs/
+#  c5-port-design.md §5.4・§6）で実装済み。既定はOFF（-DESP32C5_WIFI=ON
+#  で有効化）。ESP32C5_WIFIブロックの中身がesp_wifi.cmakeをincludeする。
 #
 
 set(TARGETDIR ${CMAKE_CURRENT_LIST_DIR})
@@ -152,23 +151,25 @@ set(ASP3_RUN_COMMAND
 )
 
 #
-#  Wi-Fi（esp_wifi blob＋os_adapter shim．フェーズ2b予定）
+#  Wi-Fi（esp_wifi blob＋os_adapter shim．フェーズ2b＝B-2a scan．
+#  docs/c5-port-design.md §5.4・§6）
 #
-#  今回（フェーズ2a・B-0/B-1）はwifi/・esp_wifi.cmakeを含めない
-#  （docs/c5-port-design.md 作業内容B参照）。ESP32C5_WIFIオプション
-#  ブロック自体は将来のフェーズ2bに備えて残すが，esp_wifi.cmakeが
-#  まだ存在しないため，includeそのものをif(ESP32C5_WIFI)ガード内に
-#  置く（OFF既定の間はincludeされずビルドが通る）。
+#  shim基盤（esp_shim.[ch]／esp_shim_libc.c／esp_shim_blobglue.c）は
+#  C3のwifi/を土台に，チップ固有アドレス（割込みルーティング＝
+#  INTMTX+CLIC，HW RNG＝LPPERI_RNG_DATA_SYNC_REG，eFuse MACレジスタ）
+#  のみ差し替えたC5版を${TARGETDIR}/wifi/に置く（C6版と同じ構成）。
+#  chip非依存のesp_shim.h／esp_shim_cfg.h／esp_shim_libc.c／
+#  esp_event_shim.c／esp_coex_adapter.c／esp_shim.cfgはC3側をそのまま
+#  再利用する（中身に変更不要）。
 #
 get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf ABSOLUTE)
 
-option(ESP32C5_WIFI "Enable Wi-Fi (esp_wifi blob + os_adapter shim; NOT YET IMPLEMENTED, phase 2b)" OFF)
+option(ESP32C5_WIFI "Enable Wi-Fi (esp_wifi blob + os_adapter shim, Phase B-2a scan)" OFF)
 if(ESP32C5_WIFI)
     if(NOT EXISTS ${TARGETDIR}/esp_wifi.cmake)
         message(FATAL_ERROR
             "ESP32C5_WIFI=ON was requested, but ${TARGETDIR}/esp_wifi.cmake "
-            "does not exist yet (Wi-Fi integration is phase 2b, not yet "
-            "implemented for ESP32-C5). See docs/c5-port-design.md.")
+            "was not found. See docs/c5-port-design.md.")
     endif()
     list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_WIFI)
     list(APPEND ASP3_INCLUDE_DIRS
