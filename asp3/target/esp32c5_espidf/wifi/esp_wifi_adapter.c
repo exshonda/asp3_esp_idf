@@ -1100,6 +1100,23 @@ static int32_t wifi_mac_sleep_retention_detach_wrapper(void)
 {
 	return 0;
 }
+/*
+ *  【実施12】_wifi_pm_sleep_lock_acquire/_wifi_pm_sleep_lock_release：
+ *  v9のwifi_os_adapter.hでは，v8で削除した_wifi_apb80m_request/releaseと
+ *  同じ構造体スロット（_dport_access_stall_other_cpu_end_wrapの直後，
+ *  _phy_disableの直前）に位置する別フィールドとして存在する（削除では
+ *  なく置換）。実施10のv9移行時，apb80m側の削除は正しく行ったが，この
+ *  置換後継フィールドの追加が漏れていたためNULL関数ポインタのまま
+ *  だった。本リポジトリはESP-IDFのPM（動的クロック/スリープ）サブ
+ *  システムを実装しないため，他のPM/sleep-retention系フィールドと
+ *  同じ方針でno-opスタブとする。
+ */
+static void wifi_pm_sleep_lock_acquire_wrapper(void)
+{
+}
+static void wifi_pm_sleep_lock_release_wrapper(void)
+{
+}
 #if CONFIG_SOC_WIFI_HE_SUPPORT
 static bool wifi_disable_ac_ax_wrapper(void)
 {
@@ -1171,7 +1188,11 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 	 *  存在しない）．v9移行（実施10）時の見落としと判明．wrapper関数
 	 *  自体（wifi_apb80m_request/release_wrapper）は削除せず残置
 	 *  （将来的な参照用．未使用関数警告のみで実害無し）。
+	 *  同じ構造体スロットの後継フィールド（_wifi_pm_sleep_lock_acquire/
+	 *  _wifi_pm_sleep_lock_release）は実施12で追加（下記）。
 	 */
+	._wifi_pm_sleep_lock_acquire = wifi_pm_sleep_lock_acquire_wrapper,
+	._wifi_pm_sleep_lock_release = wifi_pm_sleep_lock_release_wrapper,
 	._phy_disable = phy_disable_wrapper,
 	._phy_enable = phy_enable_wrapper,
 	._phy_update_country_info = esp_phy_update_country_info,
