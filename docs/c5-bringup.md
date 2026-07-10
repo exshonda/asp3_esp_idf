@@ -1635,3 +1635,278 @@ pre-trigger確認を推奨）。
     確認——復帰完了。
 - C5#2（`D0:CF:13:F0:C8:94`）：本ラウンドも一切接続・操作せず（未接触，
   MACで都度照合）。
+
+---
+
+## 実施16：regi2cトランザクション列トレース（stock/ASP3，4-way比較）——実施13の打ち切り基準「(c)/(d)＝C6-generic」は**不成立**。局所化された再現性のある差分2件（書込み値の恒久的分岐＋ASP3限定の追加read）を発見，具体的な原因候補（`phy_get_pkdet_data`のMMIO読出し値）まで絞り込んだ。C6-generic判定は見送り，continue推奨
+
+コーディネータ指示＝実施13/14/15の残課題(b)（regi2cトランザクション列の実測比較）に着手。
+`docs/wifi-shim-c6.md`実施23・実施39〜42の手法をC5へ移植する。
+
+### 1. 机上調査：C5では`--wrap`が直接効く（C6のROM関数ポインタテーブルパッチは不要）
+
+IDF v6.1のC5用`libphy.a`を`nm`・`objdump -dr`で調査した結果，C6と決定的に異なる
+構造であることが判明した：
+
+- C6は`rom_i2c_writeReg`等がROM常駐かつ`g_phyFuns`という実行時関数ポインタ
+  テーブル経由の間接呼出しでしか到達できず，`--wrap`が原理的に無力だった
+  （テーブル自体を直接パッチする必要があった）。
+- **C5は`phy_i2c_writeReg`/`phy_i2c_writeReg_Mask`/`phy_i2c_readReg`/
+  `phy_i2c_readReg_Mask`が`libphy.a`内の`phy_i2c.o`が提供する通常の大域
+  リンケージ関数**であり，`phy_rx_cal.o`・`phy_analog_cal.o`・`phy_rfpll.o`
+  等，他の多数の`.o`から`U`（未解決参照）として呼ばれている（`objdump -dr`の
+  `R_RISCV_CALL`relocationで実引数パターンも確認：
+  `writeReg(block,host_id,reg_add,data)`＝a0-a3，
+  `writeReg_Mask(block,host_id,reg_add,msb,lsb,data)`＝a0-a5，
+  `readReg(block,host_id,reg_add)`＝a0-a2，
+  `readReg_Mask(block,host_id,reg_add,msb,lsb)`＝a0-a4，C6と同じ規約）。
+- よって`-Wl,--wrap=phy_i2c_writeReg`等の標準的な`--wrap`が**そのまま直接
+  効く**——C6のようなROM常駐テーブルパッチ手法は不要と判定した。
+
+### 2. 計装実装（ASP3・stock同一フォーマット）
+
+- リングバッファ構造体`wifi_regi2c_t`（`t_us_low`,`block`,`host_id`,
+  `reg_add`,`data`,`msb`,`lsb`,`op`〔0=write/1=write_mask/2=read/
+  3=read_mask〕，12バイト/エントリ，C6の`wifi_regi2c_t`とバイトレイアウト
+  完全一致）を2048エントリ確保。
+- **ASP3側**：`asp3/target/esp32c5_espidf/wifi/wifi_trace.c`・`.h`を新規
+  追加（診断コード，`#if`ガード相当のCMakeオプション
+  `ESP32C5_WIFI_REGI2C_TRACE`〔既定OFF〕で有効化）。`target.cmake`に
+  オプション追加・`esp_wifi.cmake`に`--wrap`4個追加。`apps/wifi_scan/
+  wifi_scan.c`に`TOPPERS_ESP32C5_WIFI_REGI2C_TRACE`ガード付きで
+  `esp_wifi_init()`直前の`wifi_regi2c_reset()`/`wifi_regi2c_dump_addr()`
+  呼出しを追加。ビルドは`build/c5_idf61_trace`（既存の`build/c5_idf61`
+  ＝実施13の非計装版とは別ディレクトリ，RAM使用率82.5%）。リンク後
+  `nm`／`objdump`で`__wrap_phy_i2c_*`への実際のジャンプ先解決を確認
+  （blob内の呼出し元が`__wrap_*`へ飛ぶ実アドレスをobjdumpで直接確認）。
+- **stock側**：実施15と同じくスクラッチへコピーした`examples/wifi/scan`
+  （`stock_scan/`）に同一構造の`wifi_trace.c`・`.h`を追加し，
+  `main/CMakeLists.txt`で`idf_build_set_property(LINK_OPTIONS ...
+  APPEND)`により最終実行ファイルのリンクへ`--wrap`4個を確実に到達させた
+  （`target_link_options(main ...)`では最終exeへ伝播しない懸念をadvisor
+  指摘により回避）。IDFツリー本体は無改変。同様に`nm`／`objdump`で
+  `__wrap_phy_i2c_*`への実ジャンプを確認。
+- 両ビルドで`phy_iq_est_enable_new`のloop-top/ret命令アドレスを計装追加後に
+  再確認（objdump，実施13と同一の`lw/slli/bgez`パターン）：
+  - ASP3：loop-top`0x42028a72`／ret`0x42028a8e`
+  - stock：loop-top`0x42032a60`／ret`0x42032a7c`
+  - リングバッファ本体アドレス：ASP3`0x40833400`（pos`0x40801d94`）／
+    stock`0x40819e10`（pos`0x40825224`）。
+
+### 3. 実機測定（C5#1のみ，4ブート）
+
+実施15の「再接続競争」手法（`rts_reset.py`＋`openocd_capture_regi2c.py`
+〔`openocd_capture2.py`を土台に，MMIOスナップショットの代わりにregi2c
+リングバッファのpos読取り→エントリ数分だけ`mdw`でダンプする処理に置換〕）
+で，UARTブリッジRTSリセット→loop-top初回ヒットでリングバッファを
+JTAGダンプ→resume→ret用bp監視，を4ブート実施：
+
+| ブート | pos（エントリ数） | done bit（+0.10s読み） | resume後 |
+|---|---|---|---|
+| stock boot1 | 1242 | `1`（`0x00010000`） | ret到達（0.10秒後） |
+| stock boot2 | 1242 | `1` | ret到達（0.10秒後） |
+| ASP3 boot1 | 1244 | `0`（`0x00000000`） | loop-top再ヒット（0.10秒後，ret未到達＝ハング継続を確認） |
+| ASP3 boot2 | 1244 | `0` | loop-top再ヒット（0.10秒後） |
+
+ASP3側は1回目の再取得試行（`boot2b`）でloop-topのヒット待ちが6秒
+タイムアウトした（再接続競争のブレで初期haltが遅く着地した1回。
+OpenOCDログの`Could not read register 'pc'`は「CPUが走行中で読めない」
+という正常な過渡状態で異常ではない——boot1の成功ログにも同数出現して
+いることを確認済み。クラッシュ/JTAG切断ではなく単なる待ち時間不足）。
+再試行（`boot2c`）で成功し，以降はこれをASP3 boot2として採用。
+
+### 4. 解析：4-way比較（difflibによるアラインメント考慮，C6実施41/42の手法を移植）
+
+当初，`t_us_low`（起動後経過時間）を比較対象に含めたまま単純位置比較を
+行い「ほぼ全エントリが違う」という誤った結果を得た（実施41が戒める
+「単発比較の誤判定」と同型のバグ——`t_us_low`は当然ブート毎に異なる
+ため除外要）。修正後，`(op,block,host_id,reg_add,msb,lsb,data)`のみで
+比較し，かつ`difflib.SequenceMatcher`でアラインメント（挿入/削除を
+考慮した最小編集列）を取ることで，位置ズレによる見かけ上の差分の
+連鎖（1件の挿入が下流全てを「差分」に見せかける）を排除した。
+
+4種類の比較（A＝ASP3内2ブート，B＝stock内2ブート，C＝ASP3boot1×stock
+boot1，D＝ASP3boot2×stock boot2）を行い，**CとDの両方に現れ，AにもBにも
+現れない**差分のみを「プラットフォーム決定的」と認定する実施41/42の
+基準を適用した。
+
+#### 4a. 大半（idx 0〜234）は完全一致，以降も大部分は既知のSAR/DCオフセット比較器ノイズ
+
+- idx 0〜234（235エントリ）は4ブート全て完全一致。
+- `block=0x63,host=1,reg=0x0b`（逐次比較型のSAR/DC-offset比較器読出しと
+  推定，C6実施41が同種のノイズを確認済みの現象）は，A（ASP3内2ブート）に
+  14件，B（stock内2ブート）に9件の**±1カウント程度**の差分を生む——
+  典型的な起動毎アナログノイズであり，プラットフォーム差ではない。
+  C・D双方にも同位置で現れるが，A・Bにも現れるため4-way基準で除外される。
+
+#### 4b. ★新規・再現性あり・プラットフォーム決定的な差分（1）：`block=0x6b,host=1,reg=0x02`書込み値がidx=235を境に恒久分岐
+
+`block=0x6b,host_id=1,reg_add=0x02`への単純write（`msb=lsb=0xFF`，
+フルバイト書込み）は同一トレース内に複数回出現する。idx=101,145,189では
+**4ブート全てが`0x74`で完全一致**。ところが**idx=235以降，ASP3は
+`0x87`に切り替わり，それ以降トレース終端（idx=1143含む，捕捉できた
+全域）まで一度も変化しない**一方，**stockは`0x74`のまま**（1箇所だけ
+`0x54`への逸脱があるが，これはstock自身の2ブートでも起きない外れ値で
+むしろノイズ側の性質——本件の主張には使わない）：
+
+| idx | asp3_1 | asp3_2 | stock_1 | stock_2 |
+|---|---|---|---|---|
+| 101/145/189 | 74 | 74 | 74 | 74 |
+| 235 | **87** | **87** | 74 | 74 |
+| 260 | **87** | **87** | 74 | 74 |
+| 285 | **87** | **87** | 54 | 53 |
+| 336 | **87** | **87** | 74 | 74 |
+| 361 | **87** | **87** | 74 | 74 |
+| 362 | **87** | **87** | 74 | 74 |
+| 1143（asp3側番号，末尾付近） | 87 | 87 | 74（stock側1141） | 74 |
+
+4-way基準（C・Dに現れ，A・Bに現れない）を満たす：ASP3は2ブートとも
+一貫して`0x87`（恒久的に固定），stockは2ブートとも一貫して`0x74`
+近辺——**ノイズでは説明できない，恒久的な書込み値の分岐**である。
+
+#### 4c. ★新規・再現性あり・プラットフォーム決定的な差分（2）：ASP3限定の追加read `block=0x69,host=0,reg=0x06`
+
+idx=364（asp3側番号）で，**ASP3は`block=0x69,host_id=0,reg_add=0x06`への
+read（戻り値`0x2f`）を実行するが，stockは同位置でこの読出しを一切行わ
+ない**（`difflib`のアラインメントで純粋な1エントリ挿入と確定，以降は
+1エントリのシフトで再同期する）。この同一の追加readは**ASP3の捕捉
+できた範囲内でもう一度，idx=1118で再度出現**（値も同じ`0x2f`）——
+単発の偶然ではなく，ASP3側の処理に構造的に組み込まれた追加ステップで
+あることを示す。両出現ともASP3の2ブートで再現し，stockの2ブートには
+一度も現れない。
+
+#### 4d. 参考：idx=333の`block=0x68,host=1,reg=0x03`（read_mask）差分は低信頼度
+
+`asp3=0x1e` vs `stock=0x1f`（±1）——4-way基準は満たすが，差分の絶対値が
+4aのノイズ級（±1）と同程度であり，n=2ブートでは偶然A/Bノイズが該当
+位置を踏まなかっただけの可能性を排除できない。4bと違い**恒久的な分岐
+ではなく単発**のため，本ラウンドでは参考情報に留め主張の柱には使わない。
+
+### 5. 原因候補の絞り込み（読み取り専用のIDFソース調査，レジスタ総当りには入らない）
+
+4bの分岐点（idx=235）に近い`phy_iq_est_enable_new`自身のループ本体
+（実施13が特定済み，loop-top`0x42028a72`直後）をobjdumpで再確認した：
+
+```
+42028a90: jal phy_get_pkdet_data
+42028a94: jal phy_abs_temp
+```
+
+- `phy_get_pkdet_data`（ROM常駐でない，blob内`0x42027082`）を逆アセンブル
+  すると，**MMIO `0x600a0c50`を読み，符号拡張した値をそのまま返すだけ**
+  （regi2c非経由）。
+- `phy_abs_temp`（`0x42026b12`）は引数の`abs()`を返すだけの汎用ユーティリ
+  ティ（名前に反し温度センサ読出し自体は行わない）。
+
+この2関数が`phy_iq_est_enable_new`のループ本体から**毎回**呼ばれている
+ことと，4bの分岐が**一度起きたら最後まで固定値`0x87`に張り付く**という
+挙動（典型的な「入力が凍結した」パターン）を重ね合わせると，**MMIO
+`0x600a0c50`（パワーディテクタ/ADCラッチ値と推定される公開名の無い
+`MODEM0`内部アドレス）がASP3側で凍結値を返している可能性**が，本ラウンド
+で追跡可能な範囲での最有力仮説として浮上した。ただしこれは**本ラウンドの
+regi2cトレースだけでは検証できない**（MMIO直読みの生きている/凍結して
+いるかのA/B比較が必要で，実施13が確立した`0x600a7xxx`域のAGC生存確認
+手法と同種の，別の新しいJTAG実験になる）。よって本ラウンドではこの
+仮説の提示に留め，実験は次段へ申し送る（レジスタ総当りには入らない）。
+
+### 6. 判定：実施13の打ち切り基準「(c)/(d)＝C6-generic」は不成立——continue推奨
+
+★advisorレビューを経て，当初案（「regi2cが正気な値を返している＝(c)/(d)，
+C6-genericと結論して停止」）を**撤回**した。理由：
+
+- 実施13の打ち切り基準(b)は「regi2c/RF較正が**正常に動いている**と
+  分かった上でIQ推定が完了しないなら」C6-genericと結論する，という
+  条件だった。本ラウンドが確認したのは「regi2cは動いている（正気な値を
+  返す）」ことだけでなく，**stockという既知良品の対照と比較して
+  再現性のある形で異なる**（4b・4c）ことである。「正気な値を返す」は
+  「stockと一致する」より弱い基準であり，後者が満たされない以上，
+  (c)/(d)（regi2c可視範囲は同一に振る舞っている）は成立しない。
+- 4bは特に「入力へ依存して変動するはずの値が，ある時点から先ASP3だけ
+  固定される」という，較正が**機能していない**ことを示唆する具体的な
+  シグネチャであり，「アナログ壁だから仕方ない」と片付けるにはstockが
+  同じチップ・同じblobで安定して変動＝収束できているという反証が強すぎる。
+- 一方で，どちらの分岐（4b／4c）についても**まだ「規i2c逆アセンブルの
+  総当り」に入らずに追える具体的な次の一手（5節のMMIO `0x600a0c50`
+  A/B比較）がある**——実施13の打ち切り基準が要求する「打ち切る前に
+  安価な反証実験が尽きていること」を満たしていない。
+
+**したがって本ラウンドでは「C6-genericである」と結論しない**。
+判定はコーディネータへ申し送り，継続（5節の候補を追う）を推奨する。
+
+### 7. 終了処理
+
+- C5#1をASP3計装ビルド（`build/c5_idf61_trace/asp_flash.bin`，
+  `ESP32C5_WIFI_REGI2C_TRACE=ON`）のまま書き戻し済み（実験の最後の
+  ブートがこのビルド）。UARTブリッジRTSリセットで最終確認した結果，
+  約3.5秒周期の`rst:0x12 (RTC_SWDT_SYS)`リブートループを再現——
+  既知のハング症状は計装ビルドでも完全に不変であることを確認した
+  （計装オーバーヘッドがハングの原因/解消に無関係であることの追加
+  傍証でもある）。
+- ASP3側の計装コード（`wifi_trace.c`・`.h`，`target.cmake`・
+  `esp_wifi.cmake`・`wifi_scan.c`の変更）はツリーに残す（CMakeオプション
+  `ESP32C5_WIFI_REGI2C_TRACE`既定OFFのため，通常の`ESP32C5_WIFI=ON`
+  ビルドには一切影響しない）。
+
+### 申し送り（次段）
+
+1. **最優先**：5節の仮説（`phy_get_pkdet_data`が読むMMIO`0x600a0c50`が
+   ASP3側で凍結している可能性）をJTAG A/B比較で検証する。手法は実施13の
+   `0x600a7xxx`AGC領域生存確認と同型（stock/ASP3双方でloop-top付近の
+   複数時点で当該アドレスを読み，値が変動するかを見る）。凍結が確認
+   できれば，その上流（PMU/ICG/クロック等，実施13と同じ種類の移植漏れ）
+   を追う具体的な次のステップができる。
+2. 4bの`block=0x6b,reg=0x02`と5節のMMIO仮説の**因果関係は未検証**
+   （時間的近接と分岐タイミングの一致は状況証拠に過ぎない）。MMIO仮説が
+   反証された場合は，4b・4cの由来を別の角度（例えば`host_id`が0/1で
+   何を区別するか＝C5はデュアルバンドのため2.4GHz/5GHz双方のRFチェーンを
+   意味する可能性——4cの追加readが2回出現している事実と符合する）から
+   再検討する必要がある。
+3. `memory/project_c6_agc_investigation.md`・`MEMORY.md`更新は
+   本ラウンド報告を受けたコーディネータ側で行う運用（CLAUDE.md記載の通り）。
+
+### 変更ファイル（実施16）
+
+- `asp3/target/esp32c5_espidf/wifi/wifi_trace.c`・`wifi_trace.h`：新規
+  追加（regi2c read/write/read_mask/write_maskトレース，`--wrap`ベース，
+  診断専用）。
+- `asp3/target/esp32c5_espidf/target.cmake`：`ESP32C5_WIFI_REGI2C_TRACE`
+  オプション追加（既定OFF），ONの場合のみ`wifi_trace.c`をソースへ追加。
+- `asp3/target/esp32c5_espidf/esp_wifi.cmake`：同オプションON時のみ
+  `phy_i2c_{read,write}Reg[_Mask]`への`-Wl,--wrap`4個を追加。
+- `apps/wifi_scan/wifi_scan.c`：`TOPPERS_ESP32C5_WIFI_REGI2C_TRACE`
+  ガード付きで`wifi_trace.h`インクルードと`esp_wifi_init()`直前の
+  リセット/アドレス出力呼出しを追加。
+- 本doc（`docs/c5-bringup.md`）：実施16セクション追記のみ。
+- スクラッチ（`c75ad9fa-5310-4781-9013-97e0c0ec7812/scratchpad/`）：
+  `openocd_capture_regi2c.py`（実施15の`openocd_capture2.py`を土台に
+  regi2cダンプ処理へ置換，再利用可能），`decode_regi2c.py`（4-way
+  アラインメント比較スクリプト，デコード時のNUL先頭バイト除去・
+  タイムスタンプ除外など2件のバグを本ラウンド内で発見・修正済み），
+  `stock_scan/`（stock側計装込みビルド一式，`main/wifi_trace.{c,h}`
+  ・`main/CMakeLists.txt`のidf_build_set_property追加を含む），
+  生データ`r16_asp3_boot1.*`・`r16_asp3_boot2.*`（タイムアウト）・
+  `r16_asp3_boot2c.*`（成功，boot2として採用）・`r16_stock_boot1.*`・
+  `r16_stock_boot2.*`・`r16_asp3_final_restore_console.log`。
+
+### 検証（実施16）
+
+- ビルド：ASP3側`build/c5_idf61_trace`（`ESP32C5_WIFI_REGI2C_TRACE=ON`）
+  ・stock側`stock_scan/build`（`idf.py build`）とも成功。両ビルドとも
+  `nm`／`objdump`で`--wrap`の実リンク（`__wrap_phy_i2c_*`への実ジャンプ）
+  を確認。
+- 実機（C5#1，`D0:CF:13:F0:A7:44`）：
+  - stock：UARTブリッジRTSクリーンブート**2回**，loop-top捕捉・
+    regi2cリングバッファダンプ（各1242エントリ，ラップアラウンド無し）・
+    ret到達（陽性対照，各0.10秒後）を確認。
+  - ASP3：同条件で**2回**（1回はタイムアウトで再試行，成功分を採用），
+    loop-top捕捉・regi2cリングバッファダンプ（各1244エントリ，
+    ラップアラウンド無し）・resume後はloop-top再ヒット（ret未到達＝
+    ハング継続）を確認。
+  - 4-way比較：`difflib.SequenceMatcher`によるアラインメント考慮比較で
+    実施41/42の基準（C・Dに現れ，A・Bに現れない）を適用し，2件の
+    プラットフォーム決定的差分（4b・4c）と1件の低信頼度差分（4d）を
+    検出。ノイズ（block=0x63,reg=0x0b系，A14件・B9件）は正しく除外。
+  - 最終復帰：ASP3計装ビルドのまま，UARTブリッジRTSリセットで約3.5秒
+    周期のWDTリブートループ（既知のハング症状）を確認——復帰完了。
+- C5#2（`D0:CF:13:F0:C8:94`）：本ラウンドも一切接続・操作せず（未接触，
+  MACで都度照合）。

@@ -315,6 +315,24 @@ list(APPEND ASP3_LINK_OPTIONS
     -L${IDF}/components/esp_coex/lib/${WIFI_CHIP_SERIES}
 )
 
+#
+#  DIAGNOSTIC (temporary，実施16)：ESP32C5_WIFI_REGI2C_TRACE=ON時のみ，
+#  `phy_i2c_{read,write}Reg[_Mask]`（libphy.a内の通常の大域リンケージ
+#  関数．C6のROM常駐関数ポインタテーブルとは異なり`nm`で他.oからU参照
+#  される実体があるため`--wrap`が直接効くことを実施16机上調査で確認
+#  済み）を`-Wl,--wrap`でフックする。実体は${TARGETDIR}/wifi/wifi_trace.c
+#  （target.cmakeでESP32C5_WIFI_REGI2C_TRACE=ON時のみソースへ追加）。
+#  既定OFF＝通常のC5ビルドのリンクには一切影響しない。
+#
+if(ESP32C5_WIFI_REGI2C_TRACE)
+    list(APPEND ASP3_LINK_OPTIONS
+        -Wl,--wrap=phy_i2c_writeReg
+        -Wl,--wrap=phy_i2c_writeReg_Mask
+        -Wl,--wrap=phy_i2c_readReg
+        -Wl,--wrap=phy_i2c_readReg_Mask
+    )
+endif()
+
 list(APPEND ASP3_LINK_LIBS
     phy
     coexist

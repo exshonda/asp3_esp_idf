@@ -15,6 +15,9 @@
 #ifdef TOPPERS_ESP32C6_WIFI
 #include "wifi_trace.h"	/* C6 AGC調査専用の診断計装（wifi_trace.c／esp32c6_espidfのみ） */
 #endif /* TOPPERS_ESP32C6_WIFI */
+#ifdef TOPPERS_ESP32C5_WIFI_REGI2C_TRACE
+#include "wifi_trace.h"	/* 実施16：C5 regi2cトレース（wifi_trace.c／esp32c5_espidfのみ） */
+#endif /* TOPPERS_ESP32C5_WIFI_REGI2C_TRACE */
 
 /*
  *  スキャン完了通知（esp_event_shim経由）
@@ -163,6 +166,12 @@ main_task(EXINF exinf)
 	syslog(LOG_NOTICE, "wifi_scan: HANDOFF_SKIP_WIFI_INIT (esp_wifi_init/start をスキップ)");
 	(void) cfg;
 #else /* HANDOFF_SKIP_WIFI_INIT */
+#ifdef TOPPERS_ESP32C5_WIFI_REGI2C_TRACE
+	/*  実施16：esp_wifi_init()直前でリングバッファをリセットし，
+	 *  アドレスを一度だけ出力する（JTAGでの生メモリ直読み用）。 */
+	wifi_regi2c_reset();
+	wifi_regi2c_dump_addr();
+#endif /* TOPPERS_ESP32C5_WIFI_REGI2C_TRACE */
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_init");
 	err = esp_wifi_init(&cfg);
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_init -> %d", (int_t)err);

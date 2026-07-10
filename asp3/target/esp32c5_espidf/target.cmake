@@ -186,6 +186,24 @@ if(ESP32C5_WIFI)
         ${C3_TARGETDIR}/wifi/esp_event_shim.c
         ${C3_TARGETDIR}/wifi/esp_coex_adapter.c
     )
+
+    #
+    #  DIAGNOSTIC (temporary，実施16)：regi2c（`phy_i2c_{read,write}Reg
+    #  [_Mask]`）トランザクション列トレース．PHY校正ループ入口までの
+    #  read/write系列をstock ESP-IDF v6.1 examples/wifi/scanと比較する
+    #  調査専用の計装．既定OFF＝通常のC5ビルドには一切影響しない．
+    #  `-DESP32C5_WIFI_REGI2C_TRACE=ON`で有効化（--wrapフラグの追加は
+    #  esp_wifi.cmake側）。docs/c5-bringup.md 実施16参照。
+    #
+    option(ESP32C5_WIFI_REGI2C_TRACE
+        "DIAGNOSTIC (temporary, 実施16): trace regi2c read/write transactions via --wrap" OFF)
+    if(ESP32C5_WIFI_REGI2C_TRACE)
+        list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_WIFI_REGI2C_TRACE)
+        list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+            ${TARGETDIR}/wifi/wifi_trace.c
+        )
+    endif()
+
     include(${TARGETDIR}/esp_wifi.cmake)
 endif()
 
