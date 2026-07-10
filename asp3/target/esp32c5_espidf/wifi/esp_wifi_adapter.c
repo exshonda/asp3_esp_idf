@@ -176,7 +176,15 @@ set_intr_wrapper(int32_t cpu_no, uint32_t intr_source, uint32_t intr_num,
 	 *  のままだと，レベルで張り続ける信号を取りこぼす（最初の一度も
 	 *  含めて）おそれがある。
 	 */
-	sil_wrw_mem((void *)(INTMTX_BASE_ADDR + intr_source * 4U), intr_num);
+	/*
+	 *  【C5実機で確定・実施02/実施04】INTMTXのMAP値は«CLIC内部線番号»
+	 *  そのもの（＝CLIC_LINE(intr_num)＝intr_num+16）を書く．C6/C3のように
+	 *  生のintr_numを書くと，CLIC側（下のCTL/ATTR）とカーネルのハンドラ登録は
+	 *  line=CLIC_LINE(intr_num)で待っているのに，割込みは未許可の線intr_numへ
+	 *  配送され一切届かない（WiFi MAC割込みが来ずesp_wifi_initがpp_create_task
+	 *  のポーリング待ちでハングする実バグの原因．docs/c5-bringup.md実施04-05）．
+	 */
+	sil_wrw_mem((void *)(INTMTX_BASE_ADDR + intr_source * 4U), line);
 	sil_wrb_mem((void *)CLIC_CTL_OFF(line), (uint8_t)CLIC_PRIO_TO_CTL(2U));
 	sil_wrb_mem((void *)CLIC_ATTR_OFF(line), (uint8_t)CLIC_ATTR_LEVEL_MACHINE);
 	(void) cpu_no;
