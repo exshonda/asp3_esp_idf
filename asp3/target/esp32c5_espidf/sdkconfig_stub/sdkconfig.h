@@ -80,6 +80,44 @@
 #define CONFIG_ESP_WIFI_ENABLE_SAE_H2E                0
 #define CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT            0
 #define CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA           0
+
+/*
+ *  CONFIG_SOC_*：esp_wifi/esp_phy/esp_coexのv9ヘッダ（wifi_os_adapter.h・
+ *  esp_wifi_types_generic.h・esp_wifi_he_types.h・esp_coexist.h等）が
+ *  チップ機能フラグとして`#if`/`#ifdef`で参照する。本物のIDFビルドでは
+ *  Kconfigがhal/components/soc/esp32c5/include/soc/soc_caps.hのSOC_*
+ *  マクロをそのままCONFIG_SOC_*へ自動ミラーするが，本スタブにはその
+ *  ミラー機構が無いため，soc_caps.h実値どおり手動でミラーする（1件だけ
+ *  足すと同種の欠落が別のCONFIG_SOC_*で再発するため，esp_wifi/esp_phy/
+ *  esp_coexが参照する全件をここでまとめて定義する。値の出典は各行の
+ *  コメント参照）。
+ *
+ *  【実施11・根本原因】CONFIG_SOC_WIFI_HE_SUPPORTがこの節に無いまま
+ *  ビルドすると，wifi_os_adapter.hのwifi_osi_funcs_t構造体で
+ *  `_wifi_disable_ac_ax`フィールドが`#if CONFIG_SOC_WIFI_HE_SUPPORT`
+ *  によりガードアウトされ，構造体がガード無し版より4バイト短くなる
+ *  （実測：nm -S g_wifi_osi_funcs＝0x1f8→CONFIG_SOC_WIFI_HE_SUPPORT=1
+ *  付き再ビルドで0x1fcバイトへ増加，差分4バイトを確認）。末尾の
+ *  `_magic`（wifi_osi_funcs_tの最終フィールド）が誤ったオフセットで
+ *  初期化され，v9 blobのesp_wifi_init_internalが整合性チェックで
+ *  エラー0x3001（ESP_ERR_WIFI_NOT_INIT）を返し失敗する
+ *  （docs/c5-wifi-v9-0x3001-plan.md 候補1，確認手順1・2で実証済み）。
+ */
+#define CONFIG_SOC_WIFI_SUPPORTED          1  /* soc_caps.h SOC_WIFI_SUPPORTED */
+/*
+ *  CONFIG_SOC_WIFI_ENABLEDに対応するSOC_*能力フラグはsoc_caps.hに
+ *  存在しない（本物のIDFではKconfig側でSOC_WIFI_SUPPORTED等から自動
+ *  導出される選択肢と推定，Kconfig定義の実体は本リポジトリでは未特定）。
+ *  Wi-Fiを実際に有効化するビルドのため1として扱う
+ *  （esp_wifi_types_generic.h:41の`!CONFIG_SOC_WIFI_ENABLED`分岐参照）。
+ */
+#define CONFIG_SOC_WIFI_ENABLED             1
+#define CONFIG_SOC_WIFI_HE_SUPPORT          1  /* soc_caps.h SOC_WIFI_HE_SUPPORT */
+#define CONFIG_SOC_WIFI_SUPPORT_5G          1  /* soc_caps.h SOC_WIFI_SUPPORT_5G */
+#define CONFIG_SOC_WIFI_MAC_VERSION_NUM     3  /* soc_caps.h SOC_WIFI_MAC_VERSION_NUM */
+#define CONFIG_SOC_WIFI_NAN_SUPPORT         1  /* soc_caps.h SOC_WIFI_NAN_SUPPORT */
+#define CONFIG_SOC_IEEE802154_SUPPORTED     1  /* soc_caps.h SOC_IEEE802154_SUPPORTED */
+
 #define CONFIG_NEWLIB_NANO_FORMAT                     0
 
 /*

@@ -1163,8 +1163,15 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 		dport_access_stall_other_cpu_start_wrapper,
 	._dport_access_stall_other_cpu_end_wrap =
 		dport_access_stall_other_cpu_end_wrapper,
-	._wifi_apb80m_request = wifi_apb80m_request_wrapper,
-	._wifi_apb80m_release = wifi_apb80m_release_wrapper,
+	/*
+	 *  _wifi_apb80m_request/_wifi_apb80m_release：IDF v6.1のwifi_os_adapter.h
+	 *  はversion 0x08（v6.1-dev）とversion 0x09（v6.1-beta1，本ビルドが
+	 *  実際に使うblob世代）でフィールド構成が異なり，このAPB80M要求/解放
+	 *  ペアはv8由来でv9では削除されている（wifi_osi_funcs_tにメンバが
+	 *  存在しない）．v9移行（実施10）時の見落としと判明．wrapper関数
+	 *  自体（wifi_apb80m_request/release_wrapper）は削除せず残置
+	 *  （将来的な参照用．未使用関数警告のみで実害無し）。
+	 */
 	._phy_disable = phy_disable_wrapper,
 	._phy_enable = phy_enable_wrapper,
 	._phy_update_country_info = esp_phy_update_country_info,

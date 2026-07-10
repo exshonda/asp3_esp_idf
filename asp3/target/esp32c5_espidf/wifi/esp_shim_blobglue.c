@@ -525,6 +525,13 @@ esp_wifi_skip_supp_pmkcaching(void)
 int __attribute__((weak))
 printf(const char *format, ...)
 {
-	(void)format;
-	return(0);	/* coex ログは破棄（C6 wifi_trace.c と同じ扱い） */
+	char	buf[128];
+	va_list	args;
+	int		ret;
+
+	va_start(args, format);
+	ret = vsnprintf(buf, sizeof(buf), format, args);
+	va_end(args);
+	syslog(LOG_NOTICE, "%s", buf);
+	return(ret);
 }

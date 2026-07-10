@@ -747,3 +747,148 @@ cmake -S asp3/asp3_core -B build/c5_idf61 -G Ninja \
   -DASP3_APPLDIR=$PWD/apps/wifi_scan -DASP3_APPLNAME=wifi_scan
 cmake --build build/c5_idf61
 ```
+
+## 実施11：`docs/c5-wifi-v9-0x3001-plan.md`候補1を実機で確認・修正——0x3001は解消，しかしesp_wifi_init_internal完了前に新規ハングを発見（未解決）
+
+### 背景
+
+実施10の申し送り＝`esp_wifi_init_internal`が返すエラー0x3001（`ESP_ERR_WIFI_NOT_INIT`）の
+切り分け。別セッションの静的レビューによる解決計画（`docs/c5-wifi-v9-0x3001-plan.md`）に従い，
+副次修正（printf weakスタブ）→候補1の確認手順（機構の成立を反証先行で確認）→恒久修正→実機
+検証，の順で実施した。
+
+### 環境準備（別PCとの差分）
+
+本セッションのマシンには計画書が前提とする環境（IDF v6.1本体・xpack riscv-none-elf-gcc）が
+無かったため，以下を新規に整えた：
+- **IDF v6.1**：`git@github.com:espressif/esp-idf.git`のタグ`v6.1-beta1`を
+  `~/tools/esp-idf-v6.1`へshallow clone（`esp_wifi.cmake:85`のハードコードパスと完全一致）。
+  blob submodule（`components/{esp_wifi,esp_phy,esp_coex}/lib`）を個別に`git submodule update
+  --init --depth 1`で取得（本体cloneには含まれない）。
+- **ツールチェーン**：xpack `riscv-none-elf-gcc`は用意できなかったため，既存の
+  `riscv32-esp-elf-gcc`(14.2.0，Espressif版)で代替——`-DRISCV64_TOOLCHAIN_PREFIX=riscv32-esp-elf-`。
+  問題なくビルド・リンクできた（ツールチェーンの選択自体は候補1/2の判定に影響しない）。
+- **esptool**：`idf6.1 venv v5.3.1`は本マシンに無かったため，既存のIDF v5.5用venv
+  （`/home/honda/tools/python_env/idf5.5_py3.12_env`）のesptool（v4.12.dev3）で代替。
+  引数形式がハイフンでなくアンダースコア区切り（`--before usb_reset`・`write_flash`）である点に
+  注意（バージョン差）。
+- **実機**：接続時に**C5#1（DUT）ではなくC5#2（stock参照）が挿さっていた**ことを検出
+  （MACアドレス`D0:CF:13:F0:C8:94`で判別）。C5#1（`D0:CF:13:F0:A7:44`）が追加接続されるまで
+  DUTへの操作は待機した。
+
+### 副次修正：printf weakスタブの実装バグ
+
+`asp3/target/esp32c5_espidf/wifi/esp_shim_blobglue.c`の`printf()`weakスタブが，コメント
+（「diagnostic可視化のためsyslogへ折り返す」）に反して**`format`引数を無視し`return 0`する
+だけのno-op**だった。`vsnprintf`＋`syslog(LOG_NOTICE, "%s", buf)`（C3/C6の
+`log_writev_wrapper`と同じ確立済みパターン）へ実装し直した。
+
+### 候補1の確認（修正より先に，反証先行）
+
+1. **機構確認（grep）**：IDF v6.1の`components/esp_wifi/include/`を`grep -rn 'CONFIG_SOC_'`
+   した結果，`esp_wifi/esp_phy/esp_coex`が参照する`CONFIG_SOC_*`は
+   `WIFI_HE_SUPPORT`・`WIFI_SUPPORT_5G`・`WIFI_MAC_VERSION_NUM`・`WIFI_SUPPORTED`・
+   `WIFI_ENABLED`・`WIFI_NAN_SUPPORT`・`IEEE802154_SUPPORTED`の7件。
+   `components/esp_wifi/include/esp_private/wifi_os_adapter.h:162`で
+   `_wifi_disable_ac_ax`フィールドが実際に`#if CONFIG_SOC_WIFI_HE_SUPPORT`でガードされている
+   ことを確認——**計画書の前提「v9ヘッダの構造体定義自体がガードされている」は成立**。
+2. **サイズの直接確認**：`CONFIG_SOC_WIFI_HE_SUPPORT`未定義（現行sdkconfig.h，0件）でビルドした
+   `g_wifi_osi_funcs`は`nm -S`で**0x1f8（504バイト）**。`-DCONFIG_SOC_WIFI_HE_SUPPORT=1`を
+   追加した再ビルドでは**0x1fc（508バイト）**——**4バイト増加を実測**し，計画書の判定基準
+   （4バイト以上差＝機構成立）を満たした。**候補1は実機・実測で確定**。
+
+### 副産物：既存コードのバージョン不整合を発見・修正（v8/v9混在）
+
+候補1修正のビルド過程で，`asp3/target/esp32c5_espidf/wifi/esp_wifi_adapter.c`が
+`_wifi_apb80m_request`/`_wifi_apb80m_release`という**wifi_osi_funcs_tに存在しないフィールド**
+（コンパイルエラー）を初期化子に持っていることが判明。IDF v6.1の別タグ`v6.1-dev`
+（`ESP_WIFI_OS_ADAPTER_VERSION=0x08`）にはこの2フィールドが存在するが，`v6.1-beta1`
+（`=0x09`，実機で使うblob世代）では削除されていることを確認——**実施10のv9移行時，v8由来の
+フィールドが誤って残存していた見落とし**と判明。該当2行を削除（wrapper関数自体は残置，
+未使用関数警告のみで実害なし）。既存のv9固有フィールド（`_wifi_bb/mac_sleep_retention_*`・
+`_wifi_disable_ac_ax`）は既に正しく設定されていることも確認した。
+
+### 修正の実装
+
+`sdkconfig_stub/sdkconfig.h`に，esp_wifi/esp_phy/esp_coexが参照する`CONFIG_SOC_*`全7件を
+`hal/components/soc/esp32c5/include/soc/soc_caps.h`の実値どおりミラー追加した（計画書の
+指示「1件だけ足して終わりにしない」に従い恒久対策として一括追加）：
+`WIFI_SUPPORTED=1`・`WIFI_ENABLED=1`（対応するSOC_*capsが無く,Wi-Fi有効ビルドのため1と判断）・
+`WIFI_HE_SUPPORT=1`・`WIFI_SUPPORT_5G=1`・`WIFI_MAC_VERSION_NUM=3`・`WIFI_NAN_SUPPORT=1`・
+`IEEE802154_SUPPORTED=1`。本番ビルドで`g_wifi_osi_funcs`が期待通り0x1fcバイトになることを
+再確認した。
+
+### 実機検証（C5#1，DUT）
+
+修正済みイメージを書込み・起動。**候補1修正の効果を確認**：修正前に即座に返っていた
+0x3001失敗パターンは再現せず，`esp_wifi_init`が実際に呼ばれてPHY/blob初期化が進行した
+（printf修正のおかげで`I (36) pp: pp rom version: ...`・`net80211 rom version: ...`が
+syslog経由で出力されることを確認——修正前は完全に無音だった診断出力が可読化された）。
+
+**しかし新たな症状＝esp_wifi_init_internal完了前の永久ハングを発見**：
+- コンソール出力はrom versionメッセージの後で完全に停止し，計画書が記載する
+  「0x3001失敗→rollback→RTC_SWDTリセット」というリブートループは**発生しない**
+  （45秒間の継続監視でリセットもリブートも起きず，同じ状態のまま静止）。
+- JTAGでPC確認：`resume`を挟んで複数回サンプルした結果，PCは`dispatcher_1`
+  （カーネルの正常アイドルループ，`0x4202134c`/`0x42021350`の2命令間）に完全に収束——
+  クラッシュではなく**「実行可能なタスクが1つも無い」正常アイドル状態**と判明
+  （`_kernel_p_schedtsk`/`_kernel_p_runtsk`とも0）。
+- タスク状態を直接確認：TCBテーブルの動的生成タスク2件（両方とも`esp_shim_task_entry`
+  トランポリン経由，`nm`で確認）のうち，1件は`tstat=0x20`＝**TS_WAITING_RDTQ（データキュー
+  受信待ち）**，もう1件は`tstat=0x00`＝**TS_DORMANT（休止状態）**。実行可能状態
+  （TS_RUNNABLE）のタスクは存在しない。
+- **副次的に確立した手法**：計画書が提案していた「syslog_buffer[]をJTAGで直読みしログ原文を
+  復元する」手法を実装・検証した。`SYSLOG`構造体（`t_syslog.h`，32バイト＝logtype 4B +
+  logtim 4B + logpar[6] 4B×6）のレイアウトに基づき，`mdb`で取得した生バイナリを
+  Pythonでパースし，`logpar[0]`（フォーマット文字列ポインタ，`vasyslog.c`の
+  `LOG_TYPE_COMMENT`規約）をELFから逆引きしてメッセージを人間可読化することに成功
+  （"System logging task is started on port %d."等，8件のリングバッファエントリを復元）。
+  ただし`%s`引数（`printf`スタブが積むローカルバッファのアドレス）は後続の呼出しで
+  上書きされ得るため，タイミングによっては内容が失われる（今回はentry[5]/[6]の
+  "net80211 rom version: 78a72e9d5"は復元できたが，entry[2]/[3]は既に上書き後で読めなかった）。
+
+### 判定：候補1は確認・修正済み（0x3001は解消）。ただし0x3001の解消により露見した，別の新規ハングが未解決で残る
+
+**候補1（`CONFIG_SOC_WIFI_HE_SUPPORT`等の欠落によるwifi_osi_funcs_tサイズ/オフセットずれ）は
+実機・実測で機構を確認し，修正により実際に0x3001即時失敗は解消した——候補1は確定・解決とする。**
+
+しかし0x3001が解消されたことで露見した，**新しい種類の詰まり**（`esp_wifi_init_internal`完了
+前の，リブートを伴わない永久ハング。1つのタスクがデータキュー受信待ち，もう1つが休止状態）は
+未解決のまま残る。これは計画書の候補2（coexアダプタのv9追随漏れ）・候補3
+（sleep-retentionスタブ戻り値）とは異なる新しい症状であり，別途の切り分けが必要。
+
+### 申し送り（次段）
+
+1. **タスクIDの正確な同定**：TCBテーブルの2件（tinib@`0x4206cefc`,exinf=0／
+   tinib@`0x4206cf14`,exinf=1）が具体的にどのタスク（wifiドライバタスク／
+   ログタスク／その他）に対応するか，`esp_shim_task_create`の呼出し履歴
+   （syslogの"esp_shim: task '%s' -> tskid %d"ログ，tskid=1が記録済み）と
+   突合せて特定する。
+2. **データキュー受信待ちタスクが待っている相手の特定**：`TS_WAITING_RDTQ`状態のタスクが
+   どのデータキューID（`p_winfo`経由）を待っているか，そのデータキューへ本来送信するはずの
+   タスク（休止状態のタスク？）が何故送信せず休止したのかを追う。
+3. **JTAGブレークポイントでの前進的な追跡**：`esp_wifi_init_internal`内部の呼出し列
+   （coex_pre_init／esp_supplicant_init／esp_phy_load_cal_and_init等）に順次ブレークポイントを
+   置き，rom versionメッセージの後，具体的にどの関数呼出しの後でタスクがブロックされたのかを
+   特定する。
+4. 候補2（coexアダプタのv9追随）・候補3（sleep-retentionスタブ戻り値）は，新しいハングの
+   原因究明の過程で該当しそうであれば併せて確認する。
+
+### 変更ファイル
+
+- `asp3/target/esp32c5_espidf/wifi/esp_shim_blobglue.c`：printf weakスタブの実装
+  （vsnprintf+syslog折り返し）。
+- `asp3/target/esp32c5_espidf/wifi/esp_wifi_adapter.c`：v8由来の
+  `_wifi_apb80m_request`/`_wifi_apb80m_release`初期化子を削除（コメント化，wrapper関数は残置）。
+- `asp3/target/esp32c5_espidf/sdkconfig_stub/sdkconfig.h`：`CONFIG_SOC_*`全7件を
+  soc_caps.h実値どおり追加。
+- 本doc。
+
+### 検証
+
+- ビルド：`cmake --build build/c5_idf61`エラーなし成功（警告のみ，既知の暗黙宣言警告等で
+  候補1/2判定とは無関係）。
+- サイズ実測：`nm -S`で`g_wifi_osi_funcs`が修正前0x1f8→修正後0x1fc（+4バイト，期待通り）。
+- 実機（C5#1，`D0:CF:13:F0:A7:44`）：書込み・起動・JTAG確認。0x3001即時失敗は再現せず。
+  新規ハングをJTAG（PC・TCB tstat直読み）で確認。
+- C5#2（stock参照，`D0:CF:13:F0:C8:94`）：本ラウンドは一切接続・操作せず（未接触を確認）。
