@@ -670,3 +670,41 @@ C5 Wi-Fi統合をIDF v6.1(v9) blob世代へ移行する必要．os_adapter/wifi_
 
 ### 検証・変更
 - 実機JTAG読取りのみ（C5#1ハング機・C5#2 stock参照）．ソース変更・コミット無し（本doc実施09の追記のみ）．ボードlatch無し・電源断不要．
+
+---
+
+## 実施10：C5 Wi-Fi統合をIDF v6.1(v9)へ移行——PHY非互換を根本解消．残るは esp_wifi_init_internal のソフト失敗
+
+### 移行（ユーザー決定：IDF v6.1 v9）
+実施08/09で確定した「hal v8 blobがeco2 C5非対応」の恒久修正として，C5 Wi-Fi/PHYを
+**ESP-IDF v6.1（v9・os_adapter 0x09．`/home/honda/tools/esp-idf-v6.1`）へ移行**．
+- **minimal-IDF方式**：IDFはblob直結の`esp_wifi`/`esp_phy`/`esp_coex`（headers＋Cソース＋blob＋
+  ROM ld＋phy_init_data＋v9 os_adapter）のみ．register/support層（`esp_hw_support`/`soc`/`hal`/
+  `esp_rom`/`mbedtls`/`wpa_supplicant`）はhalのまま（同一eco2 C5でABI互換）．IDF全体をhal基盤へ
+  被せるとmbedtls 4.0→4.1再編・`esp_attr.h`・ROM/soc header衝突が連鎖するため，この分割が最適．
+- 参考：`~/TOPPERS/esp32_s3`のblobは実はv8（hal同一）でv9テンプレートではなかったが，
+  「hal Cグルー＋整合blob」の切り分けは確認できた．
+- **v9 ABI差分の解消**：`wifi_osi_funcs_t`にC5の5フィールド追加（`_wifi_bb/mac_sleep_retention_
+  attach/detach`＋HEゲートの`_wifi_disable_ac_ax`）＋旧C5ゲートの`_regdma_link_set_write_wait_
+  content`/`_sleep_retention_find_link_by_id`をno-opスタブ．drop API `esp_wifi_skip_supp_pmkcaching`＝
+  weakスタブ(0)．libcoexistの裸`printf`＝weakスタブ．IDFの`esp_event.h`/`phy_init.c`が要求する
+  `freertos/*.h`＝コンパイル専用スタブ新設（`portmacro`はcritical sectionを`esp_shim_int_disable/
+  restore`へ）．
+
+### 実機検証（C5 #1）＝«PHYの壁»突破を確定
+- **ビルド・リンク・起動・v9 blob実行まで到達**．`g_wifi_osi_funcs._version=0x09`，blobはIDF v6.1由来．
+- **実施08のstore fault・実施09のRX較正ハングとも消滅**＝**eco2シリコンのPHY非互換（hal v8 blob）が根本解消**．
+- **新たな壁（ソフト・シリコンではない）**：`esp_wifi_init_internal`（v9 blob内部）が**エラー0x3001を返し
+  失敗→rollback（wifi_deinit_internal）→RTC_SWDTリセット**．到達点は「pp/net80211 rom versionの後，
+  `esp_supplicant_init`/`esp_phy_enable`より前」＝**os_adapter/リソース系のどれかをblobが拒否**．
+  エラーテキストはASP3 syslogのFIFO詰まりで文字化け中（JTAG bp/UART捕捉で挙動確定）．
+
+### 申し送り（次段）
+- `esp_wifi_init_internal`失敗の切り分け：UART経由でエラーテキストを可読化，またはosiラッパ
+  （task/queue/semaphore/timer生成・v9 sleep-retention hook）を既知良v9と対比してどの呼出しが
+  失敗か特定．＝«v9シムの詰め»（扱いやすいソフト段階）．
+- deaf-RX本丸判定は`esp_wifi_init`完走後（scan到達後）＝この失敗を越えれば到達．
+
+### 変更ファイル（エディタブル層のみ・WIPコミット）
+- `esp_wifi.cmake`（移行本体）・`wifi/esp_wifi_adapter.c`（v9構造体）・`wifi/esp_shim_blobglue.c`
+  （pmkcaching/printfスタブ）・`wifi/freertos_stub/freertos/{FreeRTOS,task,queue,portmacro}.h`（新設）＋本doc．

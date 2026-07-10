@@ -498,3 +498,33 @@ phy_get_max_pwr(void)
 {
 	return(20);	/* 20dBm相当のプレースホルダ．要再検討 */
 }
+
+/*
+ *  【実施10】ESP-IDF v6.1（v9）blob が要求する2シンボル（C6の
+ *  wifi_trace.c 同名スタブと同趣旨）：
+ *
+ *  (1) esp_wifi_skip_supp_pmkcaching：旧 libnet80211(v8) が提供していたが
+ *      v9 では無い。hal(v8) の wpa_supplicant(wpa.c) が参照するため weak で
+ *      供給する（false＝PMKキャッシュ使用＝既定挙動）。旧 blob 使用時は
+ *      本物が優先され多重定義にならない。
+ *  (2) printf：IDF v6.1 の libcoexist.a が（hal の coexist_printf ではなく）
+ *      素の printf を直接参照する（coex_pre_init/coex_rom_osi_funcs_init/
+ *      esp_coex_adapter_register）。診断可視化のため syslog へ折り返す。
+ *      weak にして将来 libc 実体が来ても衝突しないようにする。
+ */
+#include <stdarg.h>
+
+extern int vsnprintf(char *buf, size_t size, const char *format, va_list ap);
+
+int __attribute__((weak))
+esp_wifi_skip_supp_pmkcaching(void)
+{
+	return(0);	/* false: PMKキャッシュを使用（既定挙動） */
+}
+
+int __attribute__((weak))
+printf(const char *format, ...)
+{
+	(void)format;
+	return(0);	/* coex ログは破棄（C6 wifi_trace.c と同じ扱い） */
+}

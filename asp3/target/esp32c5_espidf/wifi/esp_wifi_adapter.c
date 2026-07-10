@@ -599,11 +599,15 @@ get_free_heap_size_wrapper(void)
 
 /*
  *		イベント（esp_event_shim.cの最小実装へ）
+ *
+ *  【実施10】esp_event_post の宣言は IDF v6.1 の esp_event.h
+ *  （esp_wifi.h 経由で本TUに取り込まれる）が供給する
+ *  （esp_err_t esp_event_post(esp_event_base_t, int32_t, const void *,
+ *   size_t, TickType_t)）。以前の hal では esp_event.h がこの宣言を
+ *  持たず本ファイルでローカル extern していたが，IDF では宣言が衝突
+ *  （const void * 対 void *）するため削除し，esp_event.h の宣言を使う。
+ *  実体は esp_event_shim.c（C3・独立TU）が提供する。
  */
-extern int esp_event_post(const char *event_base, int32_t event_id,
-						  void *event_data, size_t event_data_size,
-						  uint32_t ticks_to_wait);
-
 static int32_t
 event_post_wrapper(const char *event_base, int32_t event_id,
 				   void *event_data, size_t event_data_size,
@@ -1064,6 +1068,46 @@ extern uint8_t coex_schm_flexible_period_get(void);
 extern void *coex_schm_get_phase_by_idx(int idx);
 
 /*
+ *  【実施10】ESP-IDF v6.1（os_adapter 0x09）で wifi_osi_funcs_t に
+ *  追加された sleep-retention / HE(AX) 系フィールドの no-op スタブ。
+ *  scan 経路（PM/sleep 無効）では呼ばれない想定のため，まず無害な
+ *  スタブ（0返し／何もしない）で ABI を満たす。scan が要求した場合の
+ *  実装は後続（docs/c5-bringup.md）。v8 では未設定＝NULL のままだった
+ *  C6/C5-gated の regdma/sleep_retention_find もここで安全側に埋める。
+ */
+static void regdma_link_set_write_wait_content_wrapper(void *link, uint32_t value, uint32_t mask)
+{
+	(void)link; (void)value; (void)mask;
+}
+static void *sleep_retention_find_link_by_id_wrapper(int id)
+{
+	(void)id;
+	return NULL;
+}
+static int32_t wifi_bb_sleep_retention_attach_wrapper(void)
+{
+	return 0;
+}
+static int32_t wifi_bb_sleep_retention_detach_wrapper(void)
+{
+	return 0;
+}
+static int32_t wifi_mac_sleep_retention_attach_wrapper(void)
+{
+	return 0;
+}
+static int32_t wifi_mac_sleep_retention_detach_wrapper(void)
+{
+	return 0;
+}
+#if CONFIG_SOC_WIFI_HE_SUPPORT
+static bool wifi_disable_ac_ax_wrapper(void)
+{
+	return false;
+}
+#endif
+
+/*
  *		osiテーブル本体
  */
 wifi_osi_funcs_t g_wifi_osi_funcs = {
@@ -1188,5 +1232,19 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 	._coex_schm_flexible_period_set = coex_schm_flexible_period_set,
 	._coex_schm_flexible_period_get = coex_schm_flexible_period_get,
 	._coex_schm_get_phase_by_idx = coex_schm_get_phase_by_idx,
+#if CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C61 || CONFIG_IDF_TARGET_ESP32S31
+	/*  v8 でも定義済みだが未設定(NULL)だった C5/C6-gated 2フィールド  */
+	._regdma_link_set_write_wait_content = regdma_link_set_write_wait_content_wrapper,
+	._sleep_retention_find_link_by_id = sleep_retention_find_link_by_id_wrapper,
+	/*  【実施10】v9 で追加された sleep-retention 4フィールド  */
+	._wifi_bb_sleep_retention_attach = wifi_bb_sleep_retention_attach_wrapper,
+	._wifi_bb_sleep_retention_detach = wifi_bb_sleep_retention_detach_wrapper,
+	._wifi_mac_sleep_retention_attach = wifi_mac_sleep_retention_attach_wrapper,
+	._wifi_mac_sleep_retention_detach = wifi_mac_sleep_retention_detach_wrapper,
+#endif
+#if CONFIG_SOC_WIFI_HE_SUPPORT
+	/*  【実施10】v9 で追加された HE(AX) 無効化フィールド  */
+	._wifi_disable_ac_ax = wifi_disable_ac_ax_wrapper,
+#endif
 	._magic = ESP_WIFI_OS_ADAPTER_MAGIC,
 };

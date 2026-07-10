@@ -70,6 +70,21 @@ if(ESP32C5_WIFI)
 set(WIFI_CHIP_SERIES esp32c5)
 
 #
+#  【実施10】esp-hal-3rdparty(v8/os_adapter 0x08) blob は eco2 C5 の
+#  PHY/RX較正に非対応（docs/c5-bringup.md 実施08/09）。ESP-IDF v6.1
+#  （os_adapter 0x09＝eco2 C5をサポートする世代．stock IDF v6.1 は同一
+#  チップでscan成功）の «matched set»（blob＋Cソース＋ヘッダ＋ROM ld＋
+#  phy_init_data）へ載せ替える。以降 esp_wifi.cmake 内の Wi-Fi/PHY/coex/
+#  wpa_supplicant/mbedtls 関連パスは ESP_HAL_DIR ではなく IDF を基点に
+#  する（IDF と hal はコンポーネント配置がほぼ 1:1）。os_adapter shim
+#  （wifi/esp_*.c）は ASP3 カーネル橋渡しのため維持し，v9 ABI へ適合
+#  させる（下記 g_wifi_osi_funcs の sleep-retention / disable_ac_ax 追加）。
+#  base の target.cmake（soc/hal/esp_rom 等のチップレジスタ定義）は
+#  hal のまま＝同一 eco2 C5 なので ABI 互換。
+#
+set(IDF /home/honda/tools/esp-idf-v6.1)
+
+#
 #  ------------------------------------------------------------------
 #  0. ツールチェーン厳格化への対応（GCC 14+）
 #  ------------------------------------------------------------------
@@ -102,8 +117,11 @@ list(APPEND ASP3_COMPILE_OPTIONS
 #  ------------------------------------------------------------------
 #
 list(APPEND ASP3_INCLUDE_DIRS
-    ${ESP_HAL_DIR}/components/esp_coex/include
-    ${ESP_HAL_DIR}/components/esp_wifi/wifi_apps/roaming_app/include
+    ${IDF}/components/esp_coex/include
+    ${IDF}/components/esp_wifi/wifi_apps/roaming_app/include
+    #  【実施10】IDF v6.1 の esp_event.h（esp_wifi.h 経由）は freertos/*.h を
+    #  要求する。FreeRTOS 非使用のため型のみのスタブを先頭側に通す。
+    ${CMAKE_CURRENT_LIST_DIR}/wifi/freertos_stub
 )
 
 #
@@ -126,7 +144,7 @@ list(APPEND ASP3_INCLUDE_DIRS
     #  esp_hw_log.h（rtc_clk.c経由．C6固有のrtc_clk.c採用に伴う追加）
     ${ESP_HAL_DIR}/components/esp_hw_support/port/include
     #  esp_private/esp_wifi_private.h・esp_wifi_types_generic.h等
-    ${ESP_HAL_DIR}/components/esp_wifi/include
+    ${IDF}/components/esp_wifi/include
     #  esp_heap_caps.h（mbedtls/port/esp_mem.c等）
     ${ESP_HAL_DIR}/components/heap/include
     #  esp_efuse.h（mbedtls/port/psa_driver/esp_mac/*.c）
@@ -149,10 +167,20 @@ list(APPEND ASP3_INCLUDE_DIRS
     ${ESP_HAL_DIR}/components/esp_hal_gpio/esp32c5/include
     #  esp32c5/rom/ets_sys.h（wpa_supplicant/port/eloop.c）
     ${ESP_HAL_DIR}/components/esp_rom/esp32c5/include/esp32c5
+    #  【実施10】modem/modem_clock_impl.h（IDF v6.1 で modem_clock.c は
+    #  esp_hw_support/modem/ 配下・専用 include を持つ）
+    #  【実施10】IDF v6.1 の esp_hal_clock/clk_tree_ll.h が要求する
+    #  modem/i2c_ana_mst_reg.h は IDF の soc レイアウト
+    #  （soc/esp32c5/include/modem/）にのみ在る（hal は register/soc/ 配下で
+    #  include prefix が異なる）。hal soc（target.cmake で先に登録済み）より
+    #  «後» に置くので kernel/hal ソースは従来通り hal soc を先に引き，
+    #  IDF clock ソースだけが未解決の modem/ ヘッダをここで解決する。
+    #  【実施10】hal/regi2c_impl.h（IDF v6.1 で regi2c は esp_hal_regi2c
+    #  コンポーネントに分離。regi2c_ctrl.h 経由で参照）
     #  esp_pm.h（esp_wifi/src/wifi_init.c）
     ${ESP_HAL_DIR}/components/esp_pm/include
     #  esp_phy_init.h（esp_wifi/src/wifi_init.c）
-    ${ESP_HAL_DIR}/components/esp_phy/include
+    ${IDF}/components/esp_phy/include
     #  hal/clk_gate_ll.h（esp_hw_support/periph_ctrl.c．§6参照）
     ${ESP_HAL_DIR}/components/esp_hal_clock/esp32c5/include
     ${ESP_HAL_DIR}/components/esp_hal_clock/include
@@ -259,13 +287,13 @@ list(APPEND ASP3_COMPILE_DEFS
 list(APPEND ASP3_INCLUDE_DIRS
     #  phy_init_data.h／phy_init_deps.h（esp32c5向けデフォルトPHY
     #  初期化データ配列＋PHY_INIT_MODEM_CLOCK_REQUIRED_BITS）
-    ${ESP_HAL_DIR}/components/esp_phy/esp32c5/include
+    ${IDF}/components/esp_phy/esp32c5/include
 )
 
 list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-    ${ESP_HAL_DIR}/components/esp_phy/src/phy_init.c
-    ${ESP_HAL_DIR}/components/esp_phy/src/phy_common.c
-    ${ESP_HAL_DIR}/components/esp_phy/esp32c5/phy_init_data.c
+    ${IDF}/components/esp_phy/src/phy_init.c
+    ${IDF}/components/esp_phy/src/phy_common.c
+    ${IDF}/components/esp_phy/esp32c5/phy_init_data.c
 )
 
 #
@@ -282,9 +310,9 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
 #  常にesp-hal-3rdparty（asp3/hal submodule）のprebuilt blobをリンクする。
 #
 list(APPEND ASP3_LINK_OPTIONS
-    -L${ESP_HAL_DIR}/components/esp_wifi/lib/${WIFI_CHIP_SERIES}
-    -L${ESP_HAL_DIR}/components/esp_phy/lib/${WIFI_CHIP_SERIES}
-    -L${ESP_HAL_DIR}/components/esp_coex/lib/${WIFI_CHIP_SERIES}
+    -L${IDF}/components/esp_wifi/lib/${WIFI_CHIP_SERIES}
+    -L${IDF}/components/esp_phy/lib/${WIFI_CHIP_SERIES}
+    -L${IDF}/components/esp_coex/lib/${WIFI_CHIP_SERIES}
 )
 
 list(APPEND ASP3_LINK_LIBS
@@ -304,7 +332,7 @@ list(APPEND ASP3_LINK_LIBS
 #  WiFi/PHY/coexistが要求するセット．-Wl,-Tで個別に追加する
 #  （ASP3_LDSCRIPTは単一メインリンカスクリプト用のためここでは使わない）．
 #
-set(ESP_ROM_LD_DIR ${ESP_HAL_DIR}/components/esp_rom/${WIFI_CHIP_SERIES}/ld)
+set(ESP_ROM_LD_DIR ${IDF}/components/esp_rom/${WIFI_CHIP_SERIES}/ld)
 set(ESP_WIFI_ROM_LD_FILES
     ${ESP_ROM_LD_DIR}/${WIFI_CHIP_SERIES}.rom.ld
     ${ESP_ROM_LD_DIR}/${WIFI_CHIP_SERIES}.rom.api.ld
@@ -317,7 +345,7 @@ set(ESP_WIFI_ROM_LD_FILES
     #  最適版は別途newlib実体が必要だが本用途はリンク解決が目的）
     ${ESP_ROM_LD_DIR}/${WIFI_CHIP_SERIES}.rom.libc-suboptimal_for_misaligned_mem.ld
     ${ESP_ROM_LD_DIR}/${WIFI_CHIP_SERIES}.rom.version.ld
-    ${ESP_HAL_DIR}/components/riscv/ld/rom.api.ld
+    ${IDF}/components/riscv/ld/rom.api.ld
     #  net80211/pp/phy/systimer/coexistのROM常駐部分のシンボル解決に
     #  必要．C6の実機リンクで未定義参照として発覚したファイル群
     #  （C3のWi-Fi ROM ld一覧には無い＝C6以降のROMはこれらの関数
@@ -328,7 +356,9 @@ set(ESP_WIFI_ROM_LD_FILES
     ${ESP_ROM_LD_DIR}/${WIFI_CHIP_SERIES}.rom.net80211.ld
     ${ESP_ROM_LD_DIR}/${WIFI_CHIP_SERIES}.rom.pp.ld
     ${ESP_ROM_LD_DIR}/${WIFI_CHIP_SERIES}.rom.phy.ld
-    ${ESP_ROM_LD_DIR}/${WIFI_CHIP_SERIES}.rom.systimer.ld
+    #  【実施10】IDF v6.1 の esp32c5 ld セットには systimer.ld が無い
+    #  （hal v8 には在るがIDF v6.1では未提供＝systimer ROMシンボルは
+    #  rom.ld へ統合済みかROM非常駐化）。matched set に合わせ除外。
     ${ESP_ROM_LD_DIR}/${WIFI_CHIP_SERIES}.rom.coexist.ld
     #  【実機で確定・eco3.ldは意図的に«リンクしない»】esp32c5.rom.eco3.ldは
     #  phy_get_max_pwrの他に383個のROMシンボル（phy_band_i2c_set等，blobが
@@ -347,8 +377,26 @@ endforeach()
 
 #
 #  ------------------------------------------------------------------
-#  3. ESP-IDFのmbedTLS（Wireless.mk 96-185行目）
+#  3. mbedTLS（Wireless.mk 96-185行目）
 #  ------------------------------------------------------------------
+#
+#  【実施10・重要な方針判断】mbedtls と wpa_supplicant は «hal(v8/4.0.0)»
+#  のまま据え置く（IDF へ載せ替えない）。理由：
+#   (a) mbedtls/wpa_supplicant は Wi-Fi «blob» と os_adapter ABI を共有
+#       しない（scan は association 前段でこれらを実行経路に通さない）。
+#       ゆえに blob を IDF v9 にしても crypto/supplicant を hal に据えて
+#       ランタイム不整合は起きない（リンク解決だけ満たせばよい）。
+#   (b) IDF v6.1 の mbedtls は 4.1.0 で，hal(4.0.0) から
+#       pk/asn1/oid/pem 等の再配置・ecdh.c 廃止・psa_crypto driver-wrapper
+#       生成ヘッダ・ESP_SYSTEM_INIT_FN(startup framework＋新 esp_attr.h の
+#       _SECTION_ATTR_IMPL_GENERIC) 依存など，ASP3 の Direct Boot／hal
+#       base ヘッダと相性の悪い差分が多い。scan に不要なこれらを IDF 化
+#       する利得はなく，churn とリスクだけ増える。
+#   (c) 別プロジェクトの «稼働実績» ある TOPPERS+ESP-IDF v6.1 統合
+#       （~/TOPPERS/esp32_s3）も mbedtls/wpa_supplicant/mbedtls port は
+#       すべて hal 由来（build_wpa_libs.sh/build_mbedtls_tls.sh の
+#       MB=$HAL/... 参照）で，blob と混在させて成立している。
+#  したがって本節と §4（wpa_supplicant）は ESP_HAL_DIR を基点に戻す。
 #
 set(MBEDTLS_DIR ${ESP_HAL_DIR}/components/mbedtls/mbedtls)
 
@@ -374,6 +422,7 @@ list(APPEND ASP3_COMPILE_DEFS
 )
 
 # mbedtls builtin（tf-psa-crypto/drivers/builtin/src．Wireless.mk 114-157行目）
+#  【実施10】hal(4.0.0) レイアウトのまま（IDF 4.1.0 の再配置は不採用．上記方針）。
 set(MBEDTLS_BUILTIN_DIR ${MBEDTLS_DIR}/tf-psa-crypto/drivers/builtin/src)
 list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     ${MBEDTLS_BUILTIN_DIR}/aes.c
@@ -602,14 +651,14 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
 #   コンパイル済みlibcoexist.aへ完全に閉じている）
 #
 list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-    ${ESP_HAL_DIR}/components/esp_wifi/src/wifi_init.c
-    ${ESP_HAL_DIR}/components/esp_wifi/src/lib_printf.c
-    ${ESP_HAL_DIR}/components/esp_wifi/regulatory/esp_wifi_regulatory.c
+    ${IDF}/components/esp_wifi/src/wifi_init.c
+    ${IDF}/components/esp_wifi/src/lib_printf.c
+    ${IDF}/components/esp_wifi/regulatory/esp_wifi_regulatory.c
     #  esp_phy/src/lib_printf.c（wifi版とは別ファイル．phy_printf/
     #  rtc_printfを提供．libphy.aがphy_printfを直接参照する＝
     #  wait_rfpll_cal_end等）．同名staticのlib_printf()はTU内
     #  linkageのためesp_wifi版と衝突しない．
-    ${ESP_HAL_DIR}/components/esp_phy/src/lib_printf.c
+    ${IDF}/components/esp_phy/src/lib_printf.c
 )
 
 #
@@ -648,6 +697,7 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     #  modem_clock_select_lp_clock_source(PERIPH_WIFI_MODULE, ...)を
     #  明示的に呼ぶ形で行った（esp_perip_clk_init()相当の代替）。
     #  詳細はdocs/wifi-shim-c6.md「実施6」参照。
+    #  【実施10】IDF v6.1 では modem_clock.c は esp_hw_support/modem/ 配下へ移動
     ${ESP_HAL_DIR}/components/esp_hw_support/modem_clock.c
     ${ESP_HAL_DIR}/components/hal/esp32c5/modem_clock_hal.c
     #  rtc_clk_xtal_freq_get()（modem_clock.c経由で参照。--gc-sectionsに
@@ -694,11 +744,11 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
 #  設計次第のため私の判断で決める＝ここではAPPENDしない）
 #  ------------------------------------------------------------------
 #
-#   ${ESP_HAL_DIR}/nuttx/src/esp_event.c
+#   ${IDF}/nuttx/src/esp_event.c
 #       esp_event(イベントループ)のNuttX向け薄glue．内部でNuttXの
 #       work queue/semaphoreを呼ぶため，asp3のイベント機構
 #       （set_flg/wai_flg等）へ差し替えるshimが要る．
-#   ${ESP_HAL_DIR}/components/esp_timer/src/ets_timer_legacy.c
+#   ${IDF}/components/esp_timer/src/ets_timer_legacy.c
 #       レガシーets_timer API．wifi_init.c等が参照．内部はesp_timer.cの
 #       ラッパのため esp_timer.c 本体（esp_timer/src/esp_timer.c，
 #       esp_timer_impl_systimer.c 等）も合わせて必要になる可能性が高い．
