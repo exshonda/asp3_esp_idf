@@ -330,15 +330,16 @@ set(ESP_WIFI_ROM_LD_FILES
     ${ESP_ROM_LD_DIR}/${WIFI_CHIP_SERIES}.rom.phy.ld
     ${ESP_ROM_LD_DIR}/${WIFI_CHIP_SERIES}.rom.systimer.ld
     ${ESP_ROM_LD_DIR}/${WIFI_CHIP_SERIES}.rom.coexist.ld
-    #  C5固有追加：eco3.ld（phy_get_max_pwr等，リビジョン別errata ROM
-    #  関数のROM実体解決用．C6には存在しなかったファイル．
-    #  esp_shim_blobglue.cのphy_get_max_pwr固定値スタブを廃してこちらの
-    #  ROM実体を使う．§差分5・esp_shim_blobglue.c参照）。
-    #  TODO（実機確認待ち．docs/c5-port-design.md §8.1 9番）："eco3"と
-    #  いう命名がシリコンリビジョン固有の意味を持つか＝全rev互換かは
-    #  未確認．異なるrevの実機でphy_get_max_pwrの呼び出しが不正な値を
-    #  返す／リンクこそ通るが実体が違う等の可能性を排除できていない。
-    ${ESP_ROM_LD_DIR}/${WIFI_CHIP_SERIES}.rom.eco3.ld
+    #  【実機で確定・eco3.ldは意図的に«リンクしない»】esp32c5.rom.eco3.ldは
+    #  phy_get_max_pwrの他に383個のROMシンボル（phy_band_i2c_set等，blobが
+    #  自前でRAM版を持つPHY関数を含む）を«生ROMアドレス»で供給し，blobのRAM版を
+    #  上書きしてしまう．実チップはeco2で，eco2 ROMのphy_band_i2c_setはblob(v8)の
+    #  phy_rf_initの呼出し契約と食い違い，esp_wifi_init中にROM 0x40038640への
+    #  store access faultで停止した（stock IDF v6.1はblobのRAM版phy_band_i2c_set
+    #  ＝0x40803704を使うため無事）．よってeco3.ldは外し，blob自前のRAM版PHY関数を
+    #  使わせる．eco3.ldの唯一の本来の目的だったphy_get_max_pwrは
+    #  esp_shim_blobglue.cの固定値スタブで供給する（docs/c5-bringup.md実施08．
+    #  設計§8.1 9番の懸念が的中）。
 )
 foreach(_esp_wifi_rom_ld ${ESP_WIFI_ROM_LD_FILES})
     list(APPEND ASP3_LINK_OPTIONS -Wl,-T,${_esp_wifi_rom_ld})

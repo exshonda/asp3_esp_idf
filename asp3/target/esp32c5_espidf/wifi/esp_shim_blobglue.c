@@ -481,14 +481,20 @@ log10(double x)
 }
 
 /*
- *  phy_get_max_pwr：C6にはeco*.ldが存在せずlibphy.aから未定義参照の
- *  まま残っていたため，C6版はここで固定値20dBmのスタブを暫定実装
- *  していた．**C5は状況が異なる**：esp_rom/esp32c5/ld/esp32c5.rom.eco3.ld
- *  にphy_get_max_pwr（ROM実アドレス0x400010f0）が実在する
- *  （docs/c5-port-design.md §3・§9）．esp_wifi.cmakeでeco3.ldを
- *  -Wl,-Tでリンクすることで，このスタブを置かず実ROM実装を直接
- *  使わせる（C6より有利な状況．シンボルはROM側から供給されるため
- *  本ファイルでの定義自体を削除した．eco3という命名がシリコン
- *  リビジョン固有の意味を持つか＝全rev互換かはesp_wifi.cmake側の
- *  TODOコメント・docs/c5-port-design.md §8.1 9番参照，実機確認待ち）。
+ *  phy_get_max_pwr：libphy.aから未定義参照のまま残る（RF最大送信電力．
+ *  scan（RF較正・チャンネル切替）には影響しない想定）ため固定値スタブを置く．
+ *  【実機で確定・実施08】当初はesp_wifi.cmakeでesp32c5.rom.eco3.ldをリンクし
+ *  ROM実体（0x400010f0）を使わせて本スタブを廃していたが，eco3.ldは
+ *  phy_get_max_pwrだけでなく383個のROMシンボル（phy_band_i2c_set等，blobが
+ *  自前でRAM版を持つ関数を含む）を«生ROMアドレス»で供給し，blobのRAM版を
+ *  上書きしてしまう．実チップはeco2で，eco2 ROMのphy_band_i2c_setはblob(v8)の
+ *  phy_rf_initの呼出し契約と食い違い，esp_wifi_init中にROM 0x40038640への
+ *  store access faultで停止した（stock IDF v6.1はblobのRAM版を使うため無事）．
+ *  よってeco3.ldのリンクを外し（blobのRAM版PHY関数を使わせる），
+ *  phy_get_max_pwrは本スタブで供給する（docs/c5-bringup.md実施08）。
  */
+int8_t
+phy_get_max_pwr(void)
+{
+	return(20);	/* 20dBm相当のプレースホルダ．要再検討 */
+}
