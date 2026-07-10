@@ -68,19 +68,27 @@
  *  可能性も示唆される）。ここではC6と同じ160MHzを暫定値として仮置き
  *  する（起動できない・タイミングが合わない場合はまずこの値を疑うこと）。
  */
-#define CORE_CLK_MHZ            160  /* 【未確認・暫定値】実機PCRダンプで確認要 */
+/*
+ *  【実機確定＝192MHz】実施03のJTAG実測（mcycle CSR vs SYSTIMER 16MHz基準の
+ *  二点法：1s/4s計測で191.9993MHz，各raw点も191.99〜192.02MHzと極めて安定）。
+ *  C6の160MHz（SPLL÷3）と異なり，C5のROMブートローダは起動時点で既に
+ *  CPU=192MHz（=XTAL48MHz×4）に設定済み。レジスタ書換え不要。
+ */
+#define CORE_CLK_MHZ            192  /* 【実機確定】実施03 mcycle実測192.00MHz（48MHz×4） */
 
 /*
  *  微少時間待ちのための定義（nsec単位）
  *
- *  【実機確認待ち】docs/c5-port-design.md §8.1 5番。C6は反復較正の末
- *  TIM1=30・TIM2=12に収束したが，これはC6の160MHz実測に基づく値であり
- *  C5でCORE_CLK_MHZの仮定が外れれば当然この値も合わない。C6の値を
- *  暫定値として仮置きし，実機投入後に同じ手順（sil_dly_nse(1e9)の壁
- *  時計実測）で較正し直すこと。
+ *  【実機確定】docs/c5-bringup.md 実施03。sil_dly_nse(N)の壁時計実測
+ *  （SYSTIMER 16MHz基準・N=400M/800Mの二点法・pc→sil_dly_nse注入）で
+ *  1反復=20.84ns（=4cyc@192MHz＝分岐ペナルティ由来。C6の12から大きく
+ *  外れるのは§8.1.5の警告通り単純外挿が効かない好例）と確定。未達
+ *  （delay<要求）を避けるためTIM2=20へ切下げ（実測でsil_dly_nse(N)≈
+ *  1.04×N＝約4%の安全余裕・アンダーシュート無し）。TIM1はエントリ
+ *  （addi＋分岐成立≒1反復≒20ns）に相当させTIM2と同値の20とする。
  */
-#define SIL_DLY_TIM1    30  /* 【未確認・暫定値】C6実測値の仮置き．実機較正要 */
-#define SIL_DLY_TIM2    12  /* 【未確認・暫定値】同上 */
+#define SIL_DLY_TIM1    20  /* 【実機確定】実施03較正．エントリ(addi+分岐)≒1反復≒20ns */
+#define SIL_DLY_TIM2    20  /* 【実機確定】実施03較正．1反復=20.84ns(=4cyc@192MHz)，未達回避に20へ切下げ */
 
 /*
  *  ペリフェラルのベースアドレス
@@ -131,11 +139,11 @@
  *  SYSTIMERレジスタ（unit0＋target0のみ使用．C3・C6と同一レイアウト＝
  *  ベースアドレスのみ異なる）
  *
- *  【実機確認待ち】docs/c5-port-design.md §8.1 5番。ticks/us=16は
- *  C6の実測較正値（XTAL 40MHz÷2.5＝16MHz）の仮置き。C5はXTAL
- *  40MHz／48MHz両対応（soc_caps.h: SOC_XTAL_SUPPORT_40M・
- *  SOC_XTAL_SUPPORT_48Mが両方定義）でボード実装依存のため，実際の
- *  ticks/usはXTAL実測後に較正し直すこと。
+ *  【実機確定】docs/c5-bringup.md 実施03。JTAGでUNIT0カウンタを2s／4s
+ *  間隔でスナップショット実読（壁時計bracket）した結果，カウント率＝
+ *  16.001MHz（16.004／15.999／16.001の3計測）と確定＝ticks/us=16で正しい。
+ *  C5のSYSTIMERはXTAL48MHz÷3=16MHzで駆動（C6は40MHz÷2.5=16MHzと分周が
+ *  違うが結果の16MHzは一致）。CPUクロック(192MHz)とは独立の固定16MHz。
  */
 #define ESP32C5_SYSTIMER_CONF           (ESP32C5_SYSTIMER_BASE + 0x00)
 #define ESP32C5_SYSTIMER_UNIT0_OP       (ESP32C5_SYSTIMER_BASE + 0x04)
@@ -156,7 +164,7 @@
 #define ESP32C5_SYSTIMER_OP_VALUE_VALID        (1U << 29)
 #define ESP32C5_SYSTIMER_TARGET0_PERIOD_MODE   (1U << 30)
 #define ESP32C5_SYSTIMER_INT_TARGET0           (1U << 0)
-#define ESP32C5_SYSTIMER_TICKS_PER_US   16U  /* 【未確認・暫定値】XTAL実測後に較正要 */
+#define ESP32C5_SYSTIMER_TICKS_PER_US   16U  /* 【実機確定】実施03 JTAG実測16.00MHz（48MHz÷3） */
 
 /*
  *  USB Serial/JTAGレジスタ（C6と同一レイアウト．ベースアドレスのみ
