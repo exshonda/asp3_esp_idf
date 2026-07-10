@@ -71,6 +71,32 @@ set(WIFI_CHIP_SERIES esp32c5)
 
 #
 #  ------------------------------------------------------------------
+#  0. ツールチェーン厳格化への対応（GCC 14+）
+#  ------------------------------------------------------------------
+#
+#  本設計書§10のビルド検証はriscv64-unknown-elf-gcc 13.2で行われたが，
+#  GCC 14以降はC99で非推奨だった以下の診断を既定で「警告」から「エラー」へ
+#  昇格した（GCC 14リリースノート "stricter C"）。esp-hal-3rdparty
+#  （asp3/hal submodule＝編集禁止）のprebuilt Wi-Fi glue（mbedtls/bignum.cの
+#  fgets/setbuf，esp_phy/phy_init.cの_lock_acquire/_lock_release等）は
+#  レガシーCのため，新しいツールチェーンではこれらでコンパイルが停止する。
+#  hal配下は編集できずヘッダ追加もできないため，該当診断の重大度を
+#  gcc 13.2当時（＝本移植が検証された基準）と同じ「警告」へ戻す。
+#  これらはコードが実際に該当パターンを持つ場合のみ発火する診断であり，
+#  ASP3カーネル本体（クリーン）には無影響。適用は本if(ESP32C5_WIFI)
+#  ブロック内に閉じるためB-0/B-1（Wi-Fi無効ビルド）には及ばない。
+#  （利用可能ツールチェーンはxpack 15.2／esp-idf同梱14.2・15.2のみで
+#   gcc 13系が無いための対処。TODO：将来gcc 13系を用意できるなら不要）
+#
+list(APPEND ASP3_COMPILE_OPTIONS
+    -Wno-error=implicit-function-declaration
+    -Wno-error=implicit-int
+    -Wno-error=int-conversion
+    -Wno-error=incompatible-pointer-types
+)
+
+#
+#  ------------------------------------------------------------------
 #  1. インクルードパス（Wireless.mk 23-28行目．BT/BLE系(23,35-46行目)は
 #     差分1により除外．esp_wifi/wifi_apps/roaming_appはWiFi共通のため採用）
 #  ------------------------------------------------------------------
