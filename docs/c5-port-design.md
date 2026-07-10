@@ -490,3 +490,42 @@ cmake --build build/esp32c5 --target run    # esptool --chip esp32c5
    CPU_APM=`0x6009A000`・LP_TEE=`0x600B3400`・LP_APM=`0x600B3800`）が
    存在し，C6のdeaf-RX調査で浮上したAPM/TEE未初期化候補
    （`docs/wifi-shim-c6.md`実施86）はC5でも同様に該当し得る点に留意。
+
+---
+
+## 10. 実装状況（フェーズ2a/2b完了時点の追記）
+
+本設計書§4〜§6は実装済み（ブランチ`claude/c6-wifi-c5-dev-5vc6x9`，
+フェーズ2a＝arch＋B-0/B-1ターゲット，フェーズ2b＝Wi-Fi shim）。
+実装時の主な確定・逸脱事項：
+
+- CLICはnon-vectored方式（§8.2.1の第一候補）で実装。ASP3共通部の
+  未使用分岐`USE_RISCV_DIRECT_TRAP`を本ポートで初めて利用。
+  NLBITS=3（8段階＝ASP3の優先度と無変換で一致）。
+  `intmtx_kernel_impl.h`相当は`clic_kernel_impl.h`として新設。
+- 割込みソース番号はC6から変更あり（UART0=47・USBJTAG=54・
+  SYSTIMER_TARGET0=61・FROM_CPU_0-3=23-26，全84ソース）。
+  INTMTX STATUSレジスタオフセットも0x150/0x154/0x158へ移動。
+- `hal/nuttx/esp32c5/`はhal submoduleに存在しないため，
+  `sdkconfig_stub/sdkconfig.h`（ターゲット内のスタブ）が
+  Wi-Fi/mbedtls系Kconfigマクロの唯一の供給源（C6と異なる点）。
+- C5固有でclk_tree系実ソース5本（`esp_clk_tree.c`・
+  `esp_clk_tree_common.c`・`clk_tree_hal.c`・`rtc_time.c`・
+  `esp_clk.c`）の採用が必要だった（`SOC_CLOCK_TREE_MANAGEMENT_
+  SUPPORTED`等がC5で新設のため）。
+- 追加スタブは`log10`のみ（libpp.aの診断経路用．libm欠如のため）。
+  `phy_get_max_pwr`は`esp32c5.rom.eco3.ld`のROM実体で解決し
+  C6の固定値スタブを廃止。
+- C6の未確認JTAG差分書込み2件（`0x600af008`/`0x600af048`）は，
+  C5では後者が別レジスタ（`MODEM_LPCON_DCMEM_VALID_3_REG`）に
+  当たるため意図的に不移植。
+- ビルド検証（riscv64-unknown-elf-gcc 13.2，実機なし）：
+  sample1（FLASH 0.59%/RAM 3.27%）・test_porting（0.32%/2.73%）・
+  wifi_scan＋`-DESP32C5_WIFI=ON`（10.92%/75.96%）の3構成が
+  エラー0でリンク成功。C6側の回帰（wifi_scan）も通過。
+- 副産物として判明した既存の潜在問題：C6のbare sample1
+  （`ESP32C6_WIFI=OFF`）は`esp_rom_set_cpu_ticks_per_us`が
+  ROM ld不在でリンク不能（C5では当該呼出しをWi-Fiガード付きに
+  変更して回避。C6側は未修正のまま記録のみ）。
+- 実機投入時の最優先確認事項は§8.1のまま（Direct Bootマジック・
+  WDTキー・CPUクロック・CLICのmie/HW_NESTED挙動・SIL_DLY較正）。
