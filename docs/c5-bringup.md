@@ -2439,3 +2439,334 @@ rst:0x12 (RTC_SWDT_SYS),boot:0x18 (SPI_FAST_FLASH_BOOT)
     と症状完全一致，本ラウンドの計装追加もハングの有無に無関係と確認。
 - C5#2（`D0:CF:13:F0:C8:94`）：本ラウンドも一切接続・操作せず（未接触，
   MACで都度照合）。
+
+---
+
+## 実施19：cal_mode交絡を実測で解消（stock full-cal実測=degenerateにならず）——`phy_param[176..183]`の真の書込み元を`phy_rfcal_txcap`の2つの書込みサイトまで特定・**新知見**：ASP3はサーチループの第2書込みサイトに一度も到達しない＝探索的キャリブレーション自体が「候補0番目のシード値のまま」で止まっている。`phy_param[35]`は cal_mode フラグではなく「`register_chipv7_phy`完了マーカー」だったと訂正（4cは実質ハングの同義反復）。修正は未実装（真因はtxcap探索が依存する測定入力＝`phy_get_tone_sar_dout`/tone自己ループバック側にあると判明したため）
+
+コーディネータ指示＝実施18の最優先申し送り「`phy_param[35]`／`phy_param[176..183]`を書いている上流を特定し，
+ASP3/stockでその入力が分岐する箇所を突き止める」＋最重要の交絡「stockはNVS較正キャッシュのfull/partial cal
+交絡が疑われるため，flash全消去→初回ブート（full cal）で基準比較を取り直す」に着手。**本ラウンドもC5#1の
+みを使用，C5#2には一切接続・操作していない（MACで都度照合，最終確認済み）**。
+
+### 0. 静的調査：`register_chipv7_phy`呼出しとinit_data/cal_modeの構築（ASP3＝stockと同一ソース）
+
+- `asp3/target/esp32c5_espidf/esp_wifi.cmake:294-296`が
+  `${IDF}/components/esp_phy/src/phy_init.c`・`phy_common.c`・
+  `${IDF}/components/esp_phy/esp32c5/phy_init_data.c`を**IDFツリーのソースファイルをそのまま**
+  ソースリストへ追加している（ASP3側にローカルコピーは無い）——つまり`esp_phy_load_cal_and_init()`
+  ・`register_chipv7_phy()`呼出しの組み立てコードそのものはASP3/stockで**バイト単位ではなく
+  ソースレベルで完全同一**。
+- `esp_phy_load_cal_and_init()`（`phy_init.c:895-`）は`#ifdef CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE`
+  の有無でNVS較正キャッシュの有無が分岐する：
+  - **stock**（`stock_scan/sdkconfig:1634`）＝`CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE=y`（Kconfig既定値
+    どおり）。`esp_phy_load_cal_data_from_nvs()`が失敗（NVSに較正データ無し＝初回ブート）すれば
+    `calibration_mode = PHY_RF_CAL_FULL`にフォールバックし，成功すれば`CONFIG_ESP_PHY_CALIBRATION_MODE=0`
+    （`PHY_RF_CAL_PARTIAL`）を使う。
+  - **ASP3**（`asp3/target/esp32c5_espidf/sdkconfig_stub/sdkconfig.h`，NuttXポート由来）は当該マクロを
+    定義しない＝`#else`分岐で**常に`register_chipv7_phy(init_data, cal_data, PHY_RF_CAL_FULL)`を無条件に
+    呼ぶ**（`esp_wifi.cmake:224-236`のコメントに明記済み，実施10〜13から変更なし）。
+  - enum値は`esp_phy_init.h:58-60`で確認：`PHY_RF_CAL_PARTIAL=0`／`PHY_RF_CAL_NONE=1`／`PHY_RF_CAL_FULL=2`。
+- `esp_phy_init_data_t`（`esp_phy_init.h:26-32`）はC5では`uint8_t params[256]`固定長。
+  `phy_init_data.c`の埋め込み配列は`CONFIG_ESP_PHY_MAX_TX_POWER`のみに依存し，ASP3側sdkconfig_stub
+  （`=20`）とstock側sdkconfig（`=20`，Kconfig既定`ESP_PHY_MAX_TX_POWER=ESP_PHY_MAX_WIFI_TX_POWER`と一致）
+  で**値が一致**——机上の時点で「init_dataは恐らくバイト同一」との仮説が立った（4節で実測確認）。
+
+### 1. 実機：`register_chipv7_phy`エントリでa0/a1/a2を直接読む新スクリプト（`r19_capture.py`）
+
+実施15〜18の「再接続競争」（UARTブリッジRTSリセット→ttyACM1再列挙をポーリング→OpenOCD即attach→
+`sil_dly_nse`系bad-zone着地は自動リトライ）を土台に，2段階のブレークポイント捕捉を1ブートで行う
+新スクリプト`r19_capture.py`を作成した：
+1. `register_chipv7_phy`のエントリ（`nm`実測：ASP3=`0x4202476e`，stock=`0x4202e3ac`）にhw bp。
+   ヒット時に`reg a0/a1/a2`を読む（RISC-V呼出し規約，第1〜3引数）と`a0`（init_data）から
+   256バイト（実際は121ワードの安全マージンで読み，構造体長で切って比較）を`mdw`ダンプ。
+2. `phy_iq_est_enable_new`のloop-top/ret（objdump実測：ASP3 loop-top=`0x42028b32`／ret=`0x42028b4e`，
+   stock loop-top=`0x42032b3c`／ret=`0x42032b58`——実施18からアドレスがシフトしているのは
+   前ラウンドまでの計装追加の影響，`asp.elf`/`scan.elf`を都度`nm`/`objdump`で再確認したうえで使用）
+   にhw bpを張り直し，`phy_param+35`（1バイト）と`phy_param+176`（4ワード＝16バイト，実施18の
+   6バイトより広めに読んで境界確認）を読む。
+
+### 2. ★最重要の交絡潰し：stock flash全消去→真のfull-cal初回ブートを実測
+
+- `esptool erase-flash`でC5#1を**完全消去**（NVSパーティション含む全域）した後，`stock_scan/build`を
+  書込み。1回目はUARTのみでの素通し確認（プレーンなconsole capture）——`Total APs scanned = 34`で
+  正常完走を確認したが，この時点ではJTAG計装なしのため`register_chipv7_phy`の`a2`引数は未取得。
+- ★ハマった点（新規）：`esptool write-flash`は末尾で自動的に`Hard resetting via RTS pin`する。
+  この自動リセットで発生する1回目のブートが，コマンド呼出しの往復レイテンシの間に**裏で勝手に
+  完走してNVSへ較正データを書き込んでしまう**ため，直後に`r19_capture.py`が発行する独自の
+  UARTブリッジRTSリセットは既に**2回目（partial cal）**になってしまう——実際に1回この
+  トラップを踏み，`a2(cal_mode)`実測値が`0`（`PHY_RF_CAL_PARTIAL`）になった
+  （`r19_stock_postflash.summary.txt`）。
+- 対策：`esptool --after no-reset write-flash --erase-all ...`で消去＋書込みを1コマンド化し，
+  **自動リセットを起こさせない**（"Staying in bootloader."で確認）。ところがこの状態から
+  `rts_reset.py`単体でリセットすると，今度は**ROM/ダウンロードモード関連の別経路に着地して
+  アプリが一切起動しない**（`register_chipv7_phy`エントリbpが40秒待っても一度もヒットしない）
+  現象を2回連続で踏んだ——原因は未確定のまま棚上げし（`--after no-reset`とCP2102のDTR/RTSラッチの
+  相互作用が疑わしいが本ラウンドでは深追いせず），**`erase-flash`単体→`write-flash`（既定の
+  自動hard-reset）→同一bashコマンド内で即座に`r19_capture.py`を実行**（LLM往復無しでチェイン
+  し，自動リセット後の空白時間を最小化）という運用に切替えて再挑戦した。3回目でようやく
+  **`a2(cal_mode)=2`（`PHY_RF_CAL_FULL`）を実測で確認**（`r19_stock_fullcal4.summary.txt`）——
+  これが本ラウンドの基準となる「真のfull-cal」捕捉である。
+- 副産物（新規bad-zone）：full-cal狙いの再試行中，2回連続で`0x42030c84`前後（stockの
+  `phy_pwdet_tone_start`関数内）に初期halt着地し，以後`register_chipv7_phy`エントリに
+  到達しなくなる現象を確認した——実施17の`sil_dly_nse`（ASP3固有）と同型の「JTAG haltが
+  リアルタイムRFトーン測定ループの内部状態を壊す」現象の**stock版**と推定される（原理は
+  未解明のまま，`r19_capture.py`/`r19_bp_writer.py`にbad-zone自動リトライとして実装・記録のみ）。
+
+### 3. 判定：cal_mode交絡は解消——full-cal同士でも`phy_param[176..183]`の分岐は残る
+
+| 捕捉 | `a2`(cal_mode) | `phy_param[35]` | `phy_param[176..183]`（6バイト） |
+|---|---|---|---|
+| stock, uncontrolled（実質partial） | `0`(PARTIAL) | `0x00` | `04 07 04 07 04 05`（channel依存） |
+| **stock, 実測full-cal確定** | **`2`(FULL)** | `0x00` | **`05 07 04 07 03 05`（channel依存）** |
+| ASP3（常にFULL，静的に既知＋実測でも`2`確認） | `2`(FULL) | `0x00` | `07 08 07 08 07 08`（channel非依存・実施16-18と再現一致） |
+| 実施18（過去ラウンド，cal_mode未確認） | 不明 | ASP3=`0x00`/stock=`0x01` | stock=`04 07 04 07 03 05` |
+
+**判定：cal_mode交絡は反証された（不成立）**。stockのfull-cal実測値（`05 07 04 07 03 05`）は
+partial-cal実測値（`04 07 04 07 04 05`）およびpast-round実施18の値（`04 07 04 07 03 05`）と
+±1カウントの範囲でしか違わない（実施15/16が確立済みの起動毎アナログノイズ帯）——**full/partial
+どちらのcal_modeでもstockはchannel依存の健全な値を出す**。一方ASP3はcal_mode=FULLで
+stockと揃えても`07 08`固定のまま——**cal_modeの違いは4b（実施16-18のtxcap分岐発見）の
+原因ではないと確定**。
+
+`phy_param[35]`については全4条件で`0x00`（loop-top時点）——**stockもfull-cal/partial-cal
+問わずloop-top時点では`0x00`**。これは実施18の「stock=`0x01`」（＝別の，`register_chipv7_phy`
+呼出しが完全に完了した後のwifi_scanの per-channel `phy_iq_est_enable_new`再呼出し時点）とは
+**異なる文脈での比較**だったことを意味する（4節で訂正）。
+
+### 4. `register_chipv7_phy`引数の実測比較：init_dataはバイト同一，cal_modeも揃えて分岐せず
+
+同一boot内（`r19_asp3_cap1`）でASP3の`register_chipv7_phy`エントリも捕捉：
+`a0(init_data)=0x42067510` `a1(cal_data)=0x4080ae78` `a2(cal_mode)=2`。
+
+`a0`が指す256バイト構造体をASP3・stock（`r19_stock_fullcal4`）で`mdw`ダンプし先頭40バイト
+（`CONFIG_ESP_PHY_MAX_TX_POWER`依存のTX電力テーブル部分）を比較：
+
+```
+ASP3 : 4c505000 4c444c4c 4c444448 40444448 4044483c 48484840 40444844 44483c40 383c4040 3c404044
+stock: 4c505000 4c444c4c 4c444448 40444448 4044483c 48484840 40444844 44483c40 383c4040 3c404044
+```
+
+**完全一致**。さらに最終advisorチェックで構造体全256バイト＝64ワードを機械照合した
+結果，**不一致ゼロ**——idx40〜のゼロ埋め領域も，唯一の非ゼロ末尾ワード`+0xfc`＝
+`0xf5000000`（＝最終バイト255=`0xf5`，`PHY_INIT_DATA_TYPE_OFFSET`=254近傍のタイプ/
+チェック域）も両platformで同一。構造体境界以降＝隣接rodataは無関係な内容で当然相違
+（ASP3側は`PHYINIT\0`マジック文字列の別配置，stock側はドライバ名文字列群——構造体外
+なので意味なし）。
+
+**結論：init_data（バイト同一）・cal_mode（2=FULLで揃えた比較でも同一）のいずれも
+`register_chipv7_phy`への入力としては分岐していない**。それでも`phy_param[176..183]`の
+出力は分岐する——申し送り2「引数同一なのにphy_paramが分岐する場合」に該当，発行元の
+内部処理（探索アルゴリズムが依存する測定入力）に踏み込む必要がある。
+
+### 5. hw watchpointは本ターゲットで機能せず（実測で確認・反証）——実施18指定の代替手法（書込み命令アドレスへのbp）へ切替え
+
+task指示の「hw watchpoint（OpenOCD `wp`）」をまず試した。`phy_param+176`（ASP3，
+`0x40800300`）へ`wp 0x40800300 1 w`を設定し`resume`——20秒間，一度も発火せず
+（`r19_asp3_wp176b`）。念のため**必ず数百ms以内に書き込まれることが分かっている**
+`phy_param+18`（`register_chipv7_phy`冒頭で`sb`即書込み）でも同様に試したが20秒間
+一度も発火せず（`r19_asp3_wp18_sanity`）——これはwatchpoint機構そのものが本
+OpenOCD/esp32c5組合せで機能していないことの決定的な反証（3回連続，既知の近接書込み
+アドレスですら不発）。`Warn : [esp32c5] Failed to read memory via program buffer.`
+という接続時ログと符合する制限と推測される。**task記載の代替手段
+「実施18のra手法（当該書き手関数の入口/出口breakpoint）」へ計画通り切替えた**。
+
+### 6. `phy_param[176..183]`の真の書込み元を特定：`phy_rfcal_txcap`の2つの`sb ...,0(s1)`命令
+
+`phy_tx_cap_init`→`phy_rfcal_txcap`（ASP3=`0x4202bb42`，stock=`0x42035c74`，objdump比較で
+命令列完全一致，実施18の「同一コード」判定と整合）を全命令逆アセンブルした。この関数は
+呼出し元から渡されたポインタ`s1`（第4引数`a3`）へ**間接**に書込む——`phy_param+176`という
+symbolic名がobjdumpに出ないのはこのため（symbolテーブルには解決できない実行時ポインタ経由
+の書込み）。書込みサイトは2箇所：
+- サイト1（`sb a5,0(s1)`，ASP3=`0x4202bb92`／stock=`0x42035cc0`）：探索ループ突入直前，
+  シード値（`li a5,7`／`li a5,8`のリテラル——各(cap0,cap1)ペアの第1バイトなら7・
+  第2バイトなら8，ペア内インデックス`s0`で切替）をそのまま`s1[0]`へ書く
+  （※最終advisorチェックでの訂正：当初「2.4GHz帯=7／5GHz帯=10」と誤読していたが，
+  `li a0,10`は`phy_pbus_force_test`へ渡すコマンド引数であってシードではない。実測
+  ヒットのa5=07/08交互パターンとも7/8解釈が整合）。
+- サイト2（`sb s11,0(s1)`，ASP3=`0x4202bbe8`／stock=`0x42035d1a`）：`phy_pbus_force_test`で
+  トーンを発生させ`phy_get_tone_sar_dout`でSAR ADC読み（`a5`）を取った後，
+  `bge s7,a5,skip`（＝直前までの最良値`s7`以下なら書かない）というmax探索の更新条件が
+  真の時だけ`s1[0]`を**候補値`s11`で上書き**する（`s11`はサイト1のシード値から1ずつ
+  減じながら候補を振る，`s7`は初期値0）。
+
+このサイト1/2の両方に`r19_bp_writer.py`（`sil_dly_nse`系bad-zone自動リトライ＋実施17の
+SWD watchdog無効化を流用，長時間観測のため）でhw bpを張り，`s1`（書込み先アドレス）・
+`a5`／`s11`（書込み値）・`ra`（呼出し元）を実測した：
+
+**ASP3**（8ヒット，全て+2.7秒〜+5.6秒）：
+```
+hit0 s1=0x40800300 a5=0x07  (=phy_param+176, サイト1)
+hit1 s1=0x40800301 a5=0x08  (=phy_param+177, サイト1)
+hit2 s1=0x40800302 a5=0x07  (=phy_param+178, サイト1)
+hit3 s1=0x40800303 a5=0x08  (=phy_param+179, サイト1)
+hit4 s1=0x40800304 a5=0x07  (=phy_param+180, サイト1)
+hit5 s1=0x40800305 a5=0x08  (=phy_param+181, サイト1)
+hit6 s1=0x40800522 a5=0x07  (別テーブル領域, サイト1)
+hit7 s1=0x40800523 a5=0x08  (同上, サイト1)
+```
+**8ヒット全てがサイト1（`0x4202bb92`）——サイト2（`0x4202bbe8`）は一度も発火しなかった**。
+
+**stock**（8ヒット，+1.6秒〜+4.4秒）：
+```
+hit0 s1=0x40815478 a5=0x07                 (サイト1，シード)
+hit1 s1=0x40815478 a5=0xbb s11=0x07 (サイト2，候補s11=7，測定値0xbb)
+hit2 s1=0x40815478 a5=0xd9 s11=0x06 (サイト2，候補s11=6，測定値0xd9)
+hit3 s1=0x40815478 a5=0xe1 s11=0x05 (サイト2，候補s11=5，測定値0xe1)
+hit4 s1=0x40815478 a5=0xe2 s11=0x04 (サイト2，候補s11=4，測定値0xe2)
+hit5 s1=0x40815479 a5=0x08                 (サイト1，次バイトのシード)
+hit6 s1=0x40815479 a5=0xce s11=0x08 (サイト2)
+hit7 s1=0x40815479 a5=0xe1 s11=0x07 (サイト2)
+```
+**stockはサイト1（シード書込み）の直後に必ずサイト2（探索更新）が複数回発火**し，
+候補`s11`を振るたびに**実測値`a5`が変化**している（`0xbb→0xd9→0xe1→0xe2`）——
+探索アルゴリズムが機能し，最終的にシードとは異なる値へ収束しうる状態。
+
+### 7. ★新知見：ASP3はtxcap探索ループの「候補評価」自体に一度も入っていない
+
+サイト2の発火条件は`bge s7,a5,skip`（`s7`＝直前までの最良測定値，初期値0，`a5`＝今回の
+SAR ADC測定値）——**`a5 > s7`（初回は`a5 > 0`）が一度も成立しなければサイト2は永遠に
+発火しない**。ASP3が8ヒット全てサイト1（シードのみ）だったという事実は，**ASP3では
+`phy_get_tone_sar_dout`が返す測定値が初回から`0`以下（探索の起点を更新できない値）で
+あり続けている**ことを直接示す。つまり最終的に観測される`phy_param[176..183]`の
+固定値`07 08 07 08 07 08`は，「探索した結果たまたま同じ値に収束した」のではなく，
+**「シード値のまま一切更新されずに終わっている」**——探索処理そのものが空振りしている。
+
+これは実施16-18が到達した「4bは同一コードだがテーブル内容が違う」という結論を，
+**「同一コードの内部で，キャリブレーション探索ループの評価入力（トーン自己ループバック
+のSAR ADC読み，`phy_pbus_force_test`→`phy_get_tone_sar_dout`）がASP3側で機能していない」**
+という，1段深い具体的な機構レベルまで特定した新知見である。この先（`phy_get_tone_sar_dout`
+・`phy_pbus_force_test`が実際に読む生のregi2c/MMIO値がASP3でどう振る舞うか）は，
+本ラウンドの深追い上限（書き手関数とその直接の入力読取り，数百命令以内）を超えるため
+立ち入っていない——次段の最有力候補として申し送る。
+
+### 8. `phy_param[35]`の再解釈：cal_modeフラグではなく「`register_chipv7_phy`完了マーカー」——4cは実質ハングの同義反復と訂正
+
+`register_chipv7_phy`本体を全命令逆アセンブルした結果，`phy_param[35]`への**唯一の書込み**は
+関数末尾近く（ASP3=`0x42024926`，`li a5,1; sb a5,35(s0)`）に1箇所だけ存在し，**`cal_mode`
+（`s4`）の値に一切依存しない無条件書込み**であることを確認した（このため6節冒頭で
+watchpointが機能しないと分かった際も，このアドレスへの直接bpという代替検証手段が
+用意できた——ただし本ラウンドでは3節のcal_mode実測結果で目的を達したため，この
+bp自体は未実行）。この書込みは関数の`ret`直前，`phy_rf_init`／`phy_bb_init`
+（`phy_iq_est_enable_new`のloop-top/ret捕捉ポイントを含む，txcapループもここより前）
+より**後**に位置する。
+
+すなわち`phy_param[35]`は「`register_chipv7_phy`の当該呼出しが**最後まで完了したか**」
+を示すマーカーであり，cal_modeそのものをエンコードしたフラグではない。3節の実測
+（stock full-cal／partial-cal問わずloop-top時点で`0x00`）はこの解釈と整合する。
+実施18が観測した「stock=`0x01`」は，**`register_chipv7_phy`の当該1回の呼出しが
+既に完全に完了した後**（＝boot直後のPHY初期化ではなく，実施17が特定済みの
+「wifi_scanのチャネル切替毎に`phy_iq_est_enable_new`が再呼出しされる」文脈，
+`ra=0x42032a82`系統）でのサンプルだったために`0x01`だったと考えられる——時系列が
+異なる2つの文脈を同じ「loop-top」というラベルで比較していたことになる。
+
+この解釈のもとでは，**4c（「stockはこの読み出しを一度も行わない」）はASP3の
+`register_chipv7_phy`呼出しが完了しない＝ハングそのものの自明な帰結**であり，
+ハングの原因を説明する独立した新情報ではない（実施18時点の「フラグの上流原因を
+追う」という申し送りは，本ラウンドの実測で**目標を失った＝追う必要がなくなった**
+と判定する）。実施18の「4bと4cは独立した症状」という時系列判定自体は覆らないが，
+4cの解釈（「platform間で分岐する制御フラグ」）は本ラウンドで訂正する。
+
+### 9. 修正：未実装（真因は探索アルゴリズムの測定入力側にあり，本ラウンドの深追い上限を超えるため）
+
+`register_chipv7_phy`への入力（init_data・cal_mode）はバイト同一・値同一と確定した以上，
+ASP3移植層（`asp3/target/esp32c5_espidf/`）側に明確な移植漏れ（欠落コード・誤った定数）は
+見当たらない。真因の手がかりは`phy_get_tone_sar_dout`／`phy_pbus_force_test`という，
+libphy.a内部のトーン自己ループバック測定チェーン（regi2c／MMIO経由でRFを自己ループバック
+させ，その結果をSAR ADCで読む）に移っており，これは実施14/15が到達した「WiFi RF専用
+regi2cブロックの不可視アナログ状態」という同じ壁に近い領域である可能性がある
+（advisorレビュー時の指摘のとおり，両方の分岐がRF較正未収束という同一の根に帰着し，
+「ハードウェア/アナログの壁」であって移植バグではない可能性を排除できない）。
+task指示「特定に至らなければ修正せず記録」に従い，本ラウンドでは修正を実装していない。
+
+### 10. C5#1の最終状態
+
+C5#1はASP3計装ビルド（`build/c5_idf61_trace/asp_flash.bin`，実施16-18の計装込み，
+本ラウンドはソース変更なし）へ書き戻し済み。UARTブリッジRTSリセットでの最終確認：
+
+```
+ESP-ROM:esp32c5-eco2-20250121
+rst:0x1 (POWERON),boot:0x18 (SPI_FAST_FLASH_BOOT)
+ESP-ROM:esp32c5-eco2-20250121
+rst:0x12 (RTC_SWDT_SYS),boot:0x18 (SPI_FAST_FLASH_BOOT)
+...(以下 約3.5秒周期で継続)
+```
+
+実施13〜18と症状完全一致（WDTリブートループ）——本ラウンドの多数回のflash消去／
+stock再書込み／JTAG計装は，最終的にASP3ビルドへ書き戻した後のハング症状に影響しない
+ことを確認した。
+
+### 申し送り（次段）
+
+1. **最優先**：`phy_get_tone_sar_dout`（ASP3=`0x42027018`）と，それが呼ぶ
+   `phy_pbus_force_test`（`0x4205c502`，トーン発生＋pbus経由のRF自己ループバック
+   設定と推定）を逆アセンブル・JTAG A/B比較し，ASP3で測定値が初回から0以下に
+   張り付く理由（regi2cブロック未応答／pbus MMIO設定漏れ／トーン発生自体が
+   出ていない等）を特定する。7節の新知見（サイト2に一度も入らない＝探索の
+   起点自体が機能していない）が出発点。
+2. `phy_pbus_force_test`は`phy_rfcal_pwrctrl`等，txcap以外のRF較正関数からも
+   広く呼ばれている共通ルーチンの可能性が高い（`nm`で確認要）——もしここが
+   真因なら，phy_param[176..183]だけでなく実施14/15が「regi2c内部の不可視
+   アナログ状態」と表現していた領域全体の説明にもなりうる。
+3. cal_mode交絡は本ラウンドで確定的に解消済み——今後このライン（NVS較正
+   モード差）を再提案する場合は，本ラウンドのfull-cal実測結果
+   （`r19_stock_fullcal4.*`）を反証根拠として提示すること。
+4. hw watchpointは本OpenOCD/esp32c5組合せで機能しない（3回連続不発，
+   既知の近接書込みアドレスでも不発）——今後の同種調査は最初から
+   命令アドレスへのbp方式（6節の手法）を使うこと。
+5. `memory/project_c6_agc_investigation.md`・`MEMORY.md`更新はコーディネータ側で
+   行う運用（CLAUDE.md記載の通り）。
+
+### 変更ファイル（実施19）
+
+- 本doc（`docs/c5-bringup.md`）：実施19セクション追記のみ。
+- ソースコード変更なし（`asp3/target/esp32c5_espidf/`・`asp3/arch/`とも無変更，
+  task指示「特定に至らなければ修正せず記録」に従い9節の理由で未実装）。
+- スクラッチ（`c75ad9fa-5310-4781-9013-97e0c0ec7812/scratchpad/`）：
+  `r19_capture.py`（新規，register_chipv7_phyエントリ+loop-top/retの2段階捕捉，
+  platform別bad-zone対応），`r19_watchpoint.py`（新規，hw watchpoint試行——
+  本ラウンドでは機能しないと判明したが手法として記録），`r19_bp_writer.py`
+  （新規，txcap書込みサイトへの直接bp，SWD watchdog無効化込み）。生データ：
+  `r19_stock_boot1_freshcal_console.log`（消去後初回UART確認），
+  `r19_stock_postflash.*`（uncontrolled=partial cal実測），
+  `r19_stock_fullcal.*`/`r19_stock_fullcal2.*`（download-mode着地で失敗，
+  記録として残す），`r19_stock_fullcal3.*`（bad-zone着地でリトライ），
+  `r19_stock_fullcal4.*`（**成功，本ラウンドの基準full-cal捕捉**），
+  `r19_asp3_cap1.*`（ASP3のregister_chipv7_phyエントリ+phy_param捕捉），
+  `r19_asp3_wp176b.*`/`r19_asp3_wp18_sanity.*`（watchpoint不発の記録），
+  `r19_asp3_txcapwriter.*`/`r19_stock_txcapwriter.*`（6-7節のtxcap書込み
+  サイトbp実測，本ラウンドの中心的結果），`r19_asp3_final_restore_console.log`
+  （最終復帰確認）。
+
+### 検証（実施19）
+
+- ビルド：本ラウンドはソース変更なし，既存ビルド成果物（ASP3=`build/c5_idf61_trace`，
+  stock=`stock_scan/build`）をそのまま使用。
+- 実機（C5#1，`D0:CF:13:F0:A7:44`）：
+  - stock flash全消去：**2回**（それぞれ`esptool erase-flash`で全域消去を確認）。
+  - stock書込み：**4回**（uncontrolled 1回＋`--after no-reset`失敗2回＋
+    hard-reset chaining成功1回，postflashの追加書込み1回を含め計5回の
+    `write-flash`実施）。
+  - stock UARTブリッジRTSクリーンブート：uncontrolled確認1回（34AP検出，
+    完走）＋`r19_capture.py`によるJTAG捕捉4回（内2回はdownload-mode着地で
+    STAGE1未到達，1回はbad-zone着地でリトライ後成功，最終1回が
+    `a2=2`のfull-cal基準捕捉）＋`r19_bp_writer.py`によるtxcap書込みサイト
+    捕捉1回（bad-zone着地1回のリトライ含む）＝計6回のクリーンブート。
+  - ASP3書込み・UARTブリッジRTSクリーンブート：`register_chipv7_phy`エントリ
+    +phy_param捕捉1回＋watchpoint試行2回（不発，機構自体の反証）＋
+    txcap書込みサイト捕捉1回（bad-zone着地5回のリトライ含む）＋最終復帰
+    確認1回＝計5回のクリーンブート。
+  - cal_mode実測：ASP3=`2`（静的既知と一致）／stock=`0`（partial，1回）・
+    `2`（full，1回，本ラウンドの主要成果）を`a2`レジスタ直読みで確定。
+  - init_dataバイト比較：ASP3/stock先頭40バイト完全一致を確認（構造体全体は
+    256バイト，残りはゼロ埋めで両platform一致，構造体外は無関係のため未比較）。
+  - watchpoint機構の反証：3回（`phy_param+176`・`phy_param+18`sanity×2）
+    全て20秒間不発を確認——機能していないと判定する十分な根拠。
+  - txcap書込みサイトbp：ASP3 8ヒット（全てサイト1のみ）／stock 8ヒット
+    （サイト1→サイト2複数回の交互パターン）を確認，`s1`/`a5`/`s11`/`ra`
+    レジスタで書込み先・値・呼出し元を直接記録。
+  - 最終復帰：ASP3計装ビルドのまま，UARTブリッジRTSリセットで約3.5秒周期の
+    `rst:0x12 (RTC_SWDT_SYS)`WDTリブートループを確認——実施13〜18と症状
+    完全一致，復帰完了。
+- C5#2（`D0:CF:13:F0:C8:94`）：本ラウンドも一切接続・操作せず（未接触，udevadm
+  での読み取り専用MAC照合のみ，最終確認含め複数回実施）。
