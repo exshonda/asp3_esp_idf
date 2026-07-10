@@ -731,13 +731,34 @@ wifi_clock_enable_wrapper(void)
 {
 	static bool_t	lpclk_selected = false;
 
-	/*  C6ではesp_shim_modem_icg_init()はJTAG実測で冗長と判明
+	/*  【実施13】C6ではesp_shim_modem_icg_init()はJTAG実測で冗長と判明
 	 *  （clk_conf_power_st=0x66660000は既にnative一致＝modem_clockが
-	 *  設定）．RXブロッカーはICGでもクロックでもなくRF/regi2c較正層
-	 *  だった．C5でも同じ判断を暫定的に踏襲し無効化するが，C5は
-	 *  未検証（【実機確認待ち】）のため，deaf-RX相当の症状が出た場合は
-	 *  真っ先に疑うべき候補としてここに残す． */
-	(void) esp_shim_modem_icg_init;
+	 *  設定）していたため，C5でも暫定的に踏襲して無効化し，
+	 *  「C5は未検証（【実機確認待ち】）」と明記していた．**C5実機の
+	 *  JTAG実測でこの踏襲が誤りと判明したため有効化する**．
+	 *
+	 *  C5実測：PMU hp_sys[HP_ACTIVE].icg_modem.code（0x600B000C
+	 *  bit31:30）がDirect Bootでは0のまま残る．一方，
+	 *  MODEM_SYSCON_CLK_CONF_POWER_ST（0x600A9C0C）のCLK_WIFI_ST_MAP
+	 *  ＝0x6＝BIT(1)|BIT(2)であり，ICGコード0はこのマップに含まれない．
+	 *  そのためCLK_CONF1（0x600A9C14）のCLK_WIFIBB_*_EN群が全て1でも
+	 *  **WIFIBBクロックはICGでゲートされたまま**になり，BBレジスタ
+	 *  ブロック（MODEM0＝0x600A0000）への書込みが一切効かない．
+	 *  結果，PHY較正のphy_iq_est_enable_new()が起動ビット（BB+0x450
+	 *  bit1）を立てられず，完了ビット（BB+0x47C bit16）が永久に
+	 *  立たない＝無限リトライループ（実施12で発見したハング）．
+	 *
+	 *  A/B/A/B反証実験（FORCE_ON=0・ST_MAP不変のまま，icg_modem.code
+	 *  のみ0↔2をトグルし，都度BBレジスタへの書込み成否を確認）で
+	 *  因果を確認済み：code=0→書込み無視，code=2→書込み成立．
+	 *  なお適用にはPMUのimmediate updateパルス2本
+	 *  （PMU_IMM_MODEM_ICG_REG=0x600B00DC bit31＝update_dig_icg_modem_en，
+	 *  PMU_IMM_SLEEP_SYSCLK_REG=0x600B00D0 bit28＝update_dig_icg_switch）
+	 *  の**両方**が必要（codeを書くだけでは反映されない．片方だけ
+	 *  パルスした際は書込みが効かないことも実測で確認）．
+	 *  詳細は docs/c5-bringup.md 実施13．
+	 */
+	esp_shim_modem_icg_init();
 
 	/*
 	 *  esp_perip_clk_init()（esp-hal-3rdpartyのesp_system/port/soc/
