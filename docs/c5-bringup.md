@@ -3121,3 +3121,190 @@ PMU/LPアナログ電源ドメインの全域スイープ比較。**起動→着
 | hw watchpoint（OpenOCD `wp`）が本環境で不発 | 書込み命令アドレスへのbpで代替 | 実施19 |
 | `esptool write-flash`末尾の自動リセットが初回full-calブートを裏で消費 | erase→write→即捕捉を同一チェインで | 実施19 |
 | stockのflashオフセット誤り（0x0/0x20000）でROMブートループ | `flasher_args.json`の0x2000/0x8000/0x10000に従う | 実施20 |
+| WDTリブートループ中はUSB-JTAGが約3.5秒毎に再列挙＝OpenOCD切断 | 接続直後にSWD無効化（`0x600B1C20`/`0x600B1C1C` bit18） | 実施21 |
+| 起動早期（+0.4〜+2.6s）のJTAG haltがブートを確率的に恒久アイドル停滞させる | 遅延attach（+2.6s以降）＋ハングループ内PC確認ゲート＋リトライ | 実施21 |
+| USB-JTAGのCDCポート（ttyACM）を開くと`rst:0x15`コアリセット＝非クリーンブート | ASP3コンソールのドレインは測定中は行わない | 実施21 |
+
+---
+
+## 実施21：計画書`docs/c5-tone-adc-plan.md`の候補A/Bを実機で判別——**候補A（`PCR_FPGA_DEBUG` bit31）＝棄却**（予測不成立：stockもbit31=1のまま完走。真因＝計画の一次情報がhal/サブモジュール（別世代）由来で，実ビルドのIDF v6.1にはerratum対策コード自体が存在しない）／**候補B（PVT自動dbias）＝差分実在・因果棄却**（JTAG注入＋加算移植の両方で「PVT実動作」を読み戻し確認した上で症状不変）。★別PC環境固有のJTAG新罠3件（early-halt起動停滞・CDCオープン0x15リセット・WDTループ毎のUSB再列挙）を発見・回避手法確立
+
+コーディネータ指示＝実施21改訂計画（`docs/c5-tone-adc-plan.md`）の候補A→（棄却時）候補Bの順で実機判別。
+**本ラウンドもC5#1（`D0:CF:13:F0:A7:44`）のみ使用。C5#2（`D0:CF:13:F0:C8:94`）は物理切断済みで
+一切未接触**（全デバイス操作はby-idパスでD0:CF:13:F0:A7:44にピン留め，udevadm照合済み）。
+
+### 0. 環境（新PC，2026-07-12。docs記載値からの差分）
+
+- C5#1 native USB-JTAG＝**ttyACM0**・UARTブリッジ（CP2102N `b04e3bcf…`）＝**ttyUSB0**
+  （旧記録のttyUSB1から変化。スクリプトは全てby-idパス使用）。同居：S3-B（ttyACM2）・
+  CH340（ttyACM1）＝別調査用，未接触。
+- OpenOCD `v0.12.0-esp32-20260703`・esptool v5.3.1（`~/.espressif/python_env/idf6.1_py3.12_env`）・
+  ツールチェーン`riscv32-esp-elf esp-14.2.0_20241119`（`~/tools/espressif/tools/`）。
+- 前セッションのスクラッチ資産は消失（旧パス自体が存在せず）→stockビルド・JTAGスクリプト群を
+  本ラウンドで再作成（新スクラッチ`260d98fa…/scratchpad/`，`r21_*.py`系）。
+- 前提整備：`build/c5_idf61_trace`（`ESP32C5_WIFI_REGI2C_TRACE=ON`）は`ninja: no work to do`＝
+  実施19/20とバイナリ同一（全シンボルアドレス一致をnm/objdumpで確認）。C5#1へ書込み後，
+  UARTブリッジRTSクリーンブートで既知症状（約3.5秒周期`rst:0x12 (RTC_SWDT_SYS)`リブート
+  ループ）の再現を確認してから着手。
+
+### 1. ★方法論的発見（この個体/PC環境でのJTAG新罠3件。以後のラウンド全てに適用）
+
+1. **WDTリブートループ中はUSB-JTAGが約3.5秒毎に再列挙**される（by-id symlinkのctimeが毎サイクル
+   更新されるのを実測）＝ハング中のC5#1にOpenOCDを「つなぎっぱなし」にはできない。SWD無効化
+   （`LP_WDT_SWD_WPROTECT`=`0x600B1C20` key `0x50D83AA1`→`SWD_CONFIG`=`0x600B1C1C` bit18
+   `AUTO_FEED_EN`セット）を接続直後に行えば以後は切断されない。
+2. **起動早期（+0.4〜+2.6秒）のJTAG haltがブートを確率的（体感1/2〜2/3）に恒久停滞させる**：
+   halt→resume後もカーネルが`dispatcher_1`（アイドルループ）から二度と復帰せず，コンソール
+   出力も止まる（PCサンプリングで+2.9s以降20秒超アイドル固定を実測）。halt時間を1行バースト
+   （halt;書込み;resume＝数十ms）に短縮しても発生。着地先はコンソール出力コード
+   （`sio_fput`/`sil_dly_nse`/`esp32c5_usbjtag_snd_chr`）や早期wifi-init。機構は未解明のまま
+   （systimerカウンタ自体は halt間で正常進行を実測済み＝タイマ停止ではない）。
+   **回避策＝遅延attach**：自然ブートは本PCでも正常にPHYハングループへ到達する
+   （JTAG無介入で+2.75sにattach→PC=`phy_get_pkdet_data`内を1発読みで確認）ため，
+   attachを+2.6s以降に遅らせ，+7sの「ハングループ内PC確認」をゲートにし，
+   不成立ならブートごとリトライする方式で全測定を成立させた。
+   ハングループは`phy_get_pkdet_data`を永久に呼び続けるため捕捉の取り逃しが無い
+   （なお恒久ループが呼ぶのはpkdet系のみで，`phy_get_tone_sar_dout`はtxcap探索フェーズ
+   限定と判明——tone系エントリへのbpはハング成立後には発火しない）。
+3. **USB-JTAGのCDCポート（ttyACM0）を開くと`rst:0x15 (USB_UART_HPSYS)`コアリセットが発火**
+   （C3の既知CDCハザードのC5版。DTR/RTS=Falseで開いても発生）。0x15はUSB再列挙を伴わないが
+   MODEM/PMU/RTCドメインを消さない＝**非クリーンブート**になり測定を汚すため，
+   「コンソールをドレインしながら測る」方式は不成立。ASP3のUSBコンソールはホスト未読だと
+   1文字あたり約1.5ms（`sio_fput`のリトライ上限）でブートが伸びるが，実測では
+   PHY到達自体は+2〜3s程度で完了するため実害なし。
+4. 実施17のtelnet CR-NULパースバグを再踏（`0x600b0028:`行の先頭に`\x00`）→スクリプト側で
+   `\x00`一括除去を実装。実施19の「hw watchpoint不発」も本環境で同前提とし最初からbp方式。
+
+### 2. 候補A：`PCR_FPGA_DEBUG_REG`（`0x60096FF4`）bit31——**棄却**（判定基準は測定前に固定済み）
+
+**事前固定の予測**：ASP3＝bit31=1（POR既定`0xFFFFFFFF`のまま）／stock＝bit31=0
+（`esp_perip_clk_init()`がクリア）。**予測が外れたら注入に進まず棄却**（計画書の明文ルール）。
+
+**ASP3実測（独立クリーンブート×2）**：
+- boot1（再接続競争＋早期halt方式，3回目の試行で成立）：`register_chipv7_phy`エントリ
+  （`0x4202476e`，+1.876s）と`phy_get_tone_sar_dout`エントリ（`0x42027018`，+2.905s）の
+  両採取点で`0x60096FF4`=`0xFFFFFFFF`。同時に生ADC（`0x600A081C..828`）全ゼロ・
+  done（`0x600A047C`）=0＝既知症状同時確認。
+- boot2（遅延attach方式，ハング中）：baseline/final両方で`0xFFFFFFFF`。
+- **ASP3側は予測どおりbit31=1**（かつ`asp3/target/esp32c5_espidf/`にこのレジスタへの書込みは
+  grep 0件＝静的にも整合）。
+
+**stock実測（独立クリーンブート×2，同一ブート内で陽性対照確認済み）**：
+- stockビルドは`~/tools/esp-idf-v6.1` `examples/wifi/scan`から実施15と同手順で再作成
+  （WDT無効sdkconfig.defaults付き，`idf.py set-target esp32c5 && build`成功，
+  libphy.a MD5=`4ccdbdbe1faf04a84b4059c882febe0f`＝実施15と同一＝blob同一性Gate通過，
+  flashオフセット0x2000/0x8000/0x10000）。
+- boot1：UARTコンソールで**27AP検出・完走**（本PCでも陽性対照成立，実施15と同数）→
+  同一ブートにattach・halt→`0x60096FF4`=`0xFFFFFFFF`（done bit16=1も確認）。
+- boot2：24AP完走→同読み＝`0xFFFFFFFF`。
+- **stockは予測に反しbit31=1のまま完走**——**予測不成立＝候補A棄却**（ルールどおり注入せず）。
+
+**棄却の真因（ソースレベルで確定）**：計画書の一次情報
+（`hal/components/esp_system/port/soc/esp32c5/clk.c:239`の無条件
+`clk_ll_soc_root_clk_auto_gating_bypass(true)`）は**esp-hal-3rdpartyサブモジュール（別世代）の
+コードであり，stock/ASP3が実際にビルドしているIDF v6.1-beta1には存在しない**
+（`~/tools/esp-idf-v6.1`のclk.cにFPGA_DEBUG/auto_gating/IDF-11064への言及ゼロをgrep確認）。
+v6.1で当該ビットに触れる唯一の経路は`esp_pm`のDFS（`pm_impl.c:691/695`→
+`rtc_clk_root_clk_switch_protect()`，`SOC_CLK_ROOT_CLK_SWITCH_PROTECT`）で，
+PLL 160M↔240M切替の間だけ一時的にbypassし直後に戻す——scanサンプルはCONFIG_PM無効で不使用。
+つまり**このerratum対策は実ビルドでは両プラットフォームとも「無い」＝差分になり得ない**。
+stockがbit31=1のまま較正完走・スキャン成功する実測はこれと完全整合。
+（教訓：hal/サブモジュールとIDF実ツリーは世代が異なる——計画立案時の一次情報は
+**実際にリンクされるツリー**で裏取りすること。）
+
+### 3. 候補B：PVT自動dbias初期化の欠落——**差分実在（各×2再現）・因果棄却**（2独立手法で注入成立を確認済みの上で症状不変）
+
+**前提確認（実測）**：
+- stock `sdkconfig`＝`CONFIG_ESP_ENABLE_PVT=y`（Kconfig既定どおり）。
+- eFuse `RD_MAC_SYS2`（`0x600B484C`）=`0x21500310`→`blk_version`=major(bit12:11)=0×100+
+  minor(bit10:8)=3＝**3≧2で成立**（PVT経路はこのDUTで実際に走る）。
+- v6.1ソース：`pmu_init()`（`pmu_init.c:228-238`）に加え，**PLL 160M/240MへのCPUクロック切替
+  関数自体（`rtc_clk.c` `rtc_clk_cpu_freq_to_pll_240/160_mhz`）が毎回PVT初期化4関数を呼ぶ**＝
+  stockは必ずPHYより前にPVT有効。ASP3はgrep 0件，かつそもそもCPUクロック切替を行わない
+  （ROM設定のまま，`target_kernel_impl.c`コメント参照）＝この経路を通らない。
+- `pmu_pvt.c`の4関数（`pvt_auto_dbias_init`/`charge_pump_init`/`pvt_func_enable`/
+  `charge_pump_enable`）は**全てMMIO書込みのみ（regi2c不使用）**＝JTAGで忠実に再現可能。
+
+**A/B実測（stock×2・ASP3×2，ASP3側1回はハングループ内PC＝`phy_abs_temp`←
+`phy_iq_est_enable_new`を確認した上で採取）**：
+
+| 項目 | stock（2ブート一致） | ASP3（2ブート一致） |
+|---|---|---|
+| `PCR_PVT_MONITOR_CONF`（`0x600960B8`） | `0x1D`（CLK_EN=1） | `0x1C`（**CLK_ENゲート**） |
+| `PCR_PVT_MONITOR_FUNC_CLK_CONF`（`0x600960BC`） | `0x00500001` | （ブロック未クロックで0） |
+| PVTブロック（`0x60019000`〜`0x1EF`，124w） | 設定済み＋既定値＋生きた計測値（設定値は2ブート完全一致，計測フィールドのみ変動） | **全ゼロ** |
+| `PMU_HP_ACTIVE_HP_REGULATOR0`（`0x600B0028`） | `0xC004AFD0`（bit14=0＝dbias制御PVT移譲） | `0xC667F180`（bit14=1＝PMU制御のまま） |
+
+**因果検証1＝JTAG注入（ハング成立ブートの+2.7s，txcap探索窓+2.7〜5.6sとiq_est窓を被覆）**：
+stock実測ダンプ準拠の全レジスタ（PCRリセットパルス→CLK/FUNC_CLK→PVT設定群→チャージポンプ→
+`PMU_REGULATOR0`のDIG_DBIAS_INITダンス→TIMER_EN）を1 haltウィンドウで書込み。
+**注入成立の直接証拠**＝PMUが`0xC667F180`→`0xC667BFF0`（bit14クリア＋dbias実値がPVT駆動値に
+変化）・PVT生カウンタ（`0x60019198`）が全サンプルで変動＝PVT/チャージポンプ実動作。
+**30秒観測：done=0・生ADC全ゼロ・PCはiq_estループ滞留のまま**——症状不変。
+
+**因果検証2＝加算移植（stockと同じ「PHY較正開始前」タイミングでのbuild-level A/B）**：
+`esp_wifi_adapter.c`に`esp_shim_pvt_init()`を新設（`pmu_pvt.c`の実行順を忠実に再現，
+値は同一個体stock実測ダンプ＝eFuse由来のチップ固有gap込み，eFuse blk_versionガード付き），
+`wifi_clock_enable_wrapper()`の一度きりブロック先頭（regi2c有効化・phy_enableより前）から呼出し。
+ビルド成功→書込み→JTAG検証：**移植コードの完全実行を確認**（`PCR_B8=0x1D`・
+`PCR_BC=0x500001`＝stock完全一致・PMU bit14=0・PVT生カウンタ変動）。
+**それでも20秒超の観測でdone=0・生ADC全ゼロ・ハングループ滞留・UART上のWDTループ症状も
+移植前と完全同一**——**候補Bも因果棄却**。
+
+**判定**：PVT初期化の欠落は実在する再現差分だったが，**トーン自己ループバック測定の
+生ADCゼロ問題の原因ではない**（測定窓を被覆する2独立手法＝mid-boot JTAG注入と
+較正前build移植の両方で，PVT実動作を機械確認した上で症状不変）。
+
+### 4. 変更ファイル（実施21）
+
+- `asp3/target/esp32c5_espidf/wifi/esp_wifi_adapter.c`：`esp_shim_pvt_init()`新設＋
+  `wifi_clock_enable_wrapper()`からの呼出し1ヶ所＋`esp_rom_sys.h` include追加。
+  **本変更は「因果確定した修正」ではない**（3節のとおり症状に影響しない）。stockとの実在差分を
+  1件解消し将来のA/B比較から交絡を除く目的で作業ツリーに残置するが，採否（keep/revert）は
+  コーディネータのレビューに委ねる。革命的でない証拠として：**移植前後でUART症状は同一**
+  （同日A/B，3.5秒周期`rst:0x12`ループ）＝この変更を将来の症状変化の原因と誤帰属しないこと
+  （`memory/feedback_hardware_investigation_rigor.md`第6再発事例の予防記録）。
+- 本doc（`docs/c5-bringup.md`）：実施21セクション追記。
+- `docs/c5-tone-adc-plan.md`：冒頭に結果追記（候補A棄却・候補B因果棄却）。
+- スクラッチ（`260d98fa…/scratchpad/`，本セッション限り）：`r21_capture.py`（再接続競争＋
+  telnet NUL除去＋ドレイン対応版），`r21_late.py`／`r21_pvtread_late*.py`（遅延attach方式），
+  `r21_natural.py`（自然ブート1発読み），`r21_pcsample.py`／`r21_stalldiag.py`（起動停滞診断），
+  `r21_pvt_inject2.py`（PVT注入），`r21_pvtport_verify.py`（移植検証），`rts_reset.py`／
+  `uart_capture.py`，stockビルド一式（`stock_scan/`），生ログ`r21_*.log`一式。
+
+### 5. 申し送り（次段＝実施22）
+
+1. **計画書の候補A/Bは両方消えた**。次はスイープ表（`tmp/c5_review_jisshi21_plan.md`）の
+   本体＝PMU HP_ACTIVE群（`DIG_POWER`/`BIAS`/`HP_REGULATOR0/1`/`PD_HPWIFI_CNTL`）と
+   未踏査領域`MODEM1`（`0x600AC000`）・`MODEM_PWR0`（`0x600AD000`）のA/B。ただし
+   「ASP3はPMU電源初期化をゼロ行も実行していない」（レビュー机上確定）ため，差分探しよりも
+   **決定実験C（`pmu_hp_system_init`がHP_ACTIVEに書く4レジスタ群のstock値注入）**を先に
+   実施する方が速い可能性が高い（本ラウンドで確立した遅延attach＋1 haltウィンドウ注入手法が
+   そのまま使える）。
+2. **本PCでのJTAG手順は1節の罠3件を前提に組むこと**。特にSTAGE1型
+   （`register_chipv7_phy`エントリbp＝1ブート1回きり）の捕捉は早期halt必須のため
+   停滞リトライ前提で高コスト——採取点を「ハング成立後」（遅延attach）へ寄せられる測定から
+   優先的に消化するのが効率的。
+3. 候補A棄却の副産物として得た教訓「**hal/サブモジュールとIDF実ツリー（v6.1）は世代が
+   異なる——一次情報は実際にリンクされるツリーで裏取りする**」は，今後の計画立案の
+   チェックリストに含めること（計画書の他の項目にも同種の混入が無いか，スイープ前に
+   v6.1側での再確認を推奨）。
+4. `esp_wifi_adapter.c`のPVT移植のkeep/revert判断（4節）。
+5. `memory/`更新はコーディネータ側で行う運用（CLAUDE.md記載の通り）。
+
+### 6. 検証（実施21）
+
+- ビルド：着手時`ninja: no work to do`（実施19/20とバイナリ同一，nm/objdumpでアドレス一致確認）。
+  PVT移植後のリビルド成功（FLASH 11.77%/RAM 84.62%，リンクOK）。
+- 実機（C5#1，`D0:CF:13:F0:A7:44`，全操作by-idピン留め）：
+  - 症状再現（前提整備）：クリーンブートで`rst:0x12`ループ確認。
+  - 候補A読み：ASP3独立2ブート・stock独立2ブート（stockは同一ブート内で27AP/24AP完走の
+    陽性対照確認済み）。全て`0xFFFFFFFF`。
+  - 候補B A/B読み：stock×2・ASP3×2（うち1回はハングループ内PC確認済み）。
+  - 候補B注入：1回成立（+2.7s，30秒観測）＋対照はハング持続の既存実測
+    （実施14の12-15秒・本ラウンドlate1の8秒・pvt2ブート）。
+  - 候補B移植検証：1回成立（+7sハングループ確認→レジスタ読み→20秒観測）。
+  - 最終状態：C5#1＝PVT移植込みASP3計装ビルド書込み済み，クリーンブートで
+    約3.5秒周期`rst:0x12 (RTC_SWDT_SYS)`ループを最終確認（実施13〜20と症状同一）。
+  - JTAG介入で停滞したブート（1節の罠2）は測定から全て除外（in-loopゲート不成立＝リトライ）。
+- C5#2（`D0:CF:13:F0:C8:94`）：物理切断済み・一切未接触。

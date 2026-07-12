@@ -76,6 +76,7 @@
 #include "hal/modem_lpcon_ll.h"
 #include "hal/modem_syscon_ll.h"
 #include "hal/pmu_ll.h"
+#include "esp_rom_sys.h"	/* esp_rom_delay_us（esp_shim_pvt_init用） */
 
 /*
  *  リンク閉包で解決するesp-hal／blob側の関数（宣言のみ）
@@ -726,6 +727,97 @@ esp_shim_modem_icg_init(void)
 	pmu_ll_imm_update_dig_icg_switch(pmu, true);
 }
 
+/*
+ *  PVT自動dbias調整＋チャージポンプの初期化（【実施21】候補Bの加算移植）
+ *
+ *  stock ESP-IDF v6.1はC5でCONFIG_ESP_ENABLE_PVT=y（Kconfig既定）であり，
+ *  CPUクロックをPLL(160M/240M)へ切り替える度に
+ *  esp_hw_support/port/esp32c5/rtc_clk.c → pmu_pvt.c の
+ *  pvt_auto_dbias_init()＋charge_pump_init()＋pvt_func_enable(true)＋
+ *  charge_pump_enable(true)を実行する（eFuse blk_version>=2が前提．
+ *  DUT実測=3で成立）．ASP3 Direct BootはROM設定のクロックのまま起動する
+ *  ためこの経路を一切通らず，実施21のJTAG A/B実測で
+ *  「stock=PCR_PVT_MONITOR_CONF(0x600960B8) bit0=1・PVTブロック
+ *  (0x60019000)設定済み＋動作中／ASP3=クロックゲート・全ゼロ」という
+ *  再現差分（各2ブート）を確認した．PVTはHP系dbias（コア電圧バイアス）を
+ *  動的補正する機構で，アナログ測定系（トーン自己ループバックのSAR ADC）
+ *  への影響が仮説候補のため加算移植する（docs/c5-bringup.md実施21）．
+ *
+ *  実装はIDF v6.1 pmu_pvt.cの実行順を忠実に再現し，レジスタ値は
+ *  同一個体のstock実測ダンプ（実施21）と照合済み：
+ *    - PVT_DBIAS_CMD0/1/2の上位ビットはeFuse dbias_vol_gap由来の
+ *      チップ固有値を含むが，同一個体のstock実測値(0x13024/0x13005/
+ *      0x13427)を転記するため一致する（rtc.hのPVT_CMD0=0x24等の
+ *      定数成分も照合済み）．
+ *    - DELAY_LIMIT系(154/147/143)・PUMP_BITMAP(1<<22)・
+ *      PUMP_CHANNEL_CODE(1<<27)・PVT_TARGET(0xffff)・CLK_DIV(1)も
+ *      rtc.h定数とstock実測の両方に一致．
+ *
+ *  なお実施21のJTAG注入（+2.6s＝txcap探索窓の冒頭で同内容を書込み，
+ *  PVT実動作を読み戻しで確認）では30秒観測で症状不変（done=0・
+ *  生ADC=0）だった．本移植はstockと同じ「PHY較正開始前に有効」という
+ *  タイミングでの因果検証（負なら候補B棄却の確定側の証拠）を兼ねる．
+ */
+static void
+esp_shim_pvt_init(void)
+{
+	/*  eFuse blk_version（EFUSE_RD_MAC_SYS2_REG 0x600B484C：
+	 *  major=bit[12:11]・minor=bit[10:8]，blk_version=major*100+minor）  */
+	uint32_t	sys2 = *(volatile uint32_t *)0x600B484CU;
+	uint32_t	blk_version = ((sys2 >> 11) & 0x3U) * 100U + ((sys2 >> 8) & 0x7U);
+	volatile uint32_t	*pcr_pvt_conf = (volatile uint32_t *)0x600960B8U;	/* PCR_PVT_MONITOR_CONF */
+	volatile uint32_t	*pcr_pvt_func = (volatile uint32_t *)0x600960BCU;	/* PCR_PVT_MONITOR_FUNC_CLK_CONF */
+	volatile uint32_t	*pmu_hp_reg0 = (volatile uint32_t *)0x600B0028U;	/* PMU_HP_ACTIVE_HP_REGULATOR0 */
+
+	if (blk_version < 2U) {
+		return;		/* stockと同条件：PVT未サポートeFuse */
+	}
+
+	/*  --- pvt_auto_dbias_init() 相当 ---  */
+	*pcr_pvt_conf |= (1U << 1);					/* RST_EN（リセットパルス） */
+	*pcr_pvt_conf &= ~(1U << 1);
+	*pcr_pvt_conf |= (1U << 0);					/* CLK_EN */
+	*pcr_pvt_func |= (1U << 22);				/* FUNC_CLK_EN */
+	*(volatile uint32_t *)0x60019064U = 0x7fff8000U;	/* DBIAS_TIMER：EN=0・TARGET=0xffff */
+	esp_rom_delay_us(1U);
+	*(volatile uint32_t *)0x60019034U = 0x42960400U;	/* DBIAS_CHANNEL_SEL0（monitor cell選択） */
+	*(volatile uint32_t *)0x60019038U = 0x80000000U;	/* DBIAS_CHANNEL_SEL1 */
+	*(volatile uint32_t *)0x6001903CU = 0x00013e80U;	/* CHANNEL0_SEL（フィルタ閾値） */
+	*(volatile uint32_t *)0x60019040U = 0x00013e80U;	/* CHANNEL1_SEL */
+	*(volatile uint32_t *)0x60019044U = 0x00010000U;	/* CHANNEL2_SEL */
+	*(volatile uint32_t *)0x60019050U = 0x00013024U;	/* DBIAS_CMD0（調整特性＋lp/hp gap） */
+	*(volatile uint32_t *)0x60019054U = 0x00013005U;	/* DBIAS_CMD1 */
+	*(volatile uint32_t *)0x60019058U = 0x00013427U;	/* DBIAS_CMD2 */
+	*pcr_pvt_func = (*pcr_pvt_func & ~0xFU) | 0x1U;		/* FUNC_CLK_DIV_NUM=1 */
+	*pcr_pvt_func |= (1U << 20);				/* FUNC_CLK_SEL */
+	*(volatile uint32_t *)0x600190D8U = 154U << 2;	/* SITE2_UNIT0_VT1：電圧高判定閾値 */
+	*(volatile uint32_t *)0x600190DCU = 147U << 2;	/* SITE2_UNIT1_VT1：電圧低判定閾値 */
+	*(volatile uint32_t *)0x600190E0U = 143U << 2;	/* SITE2_UNIT2_VT1：チャージポンプ閾値 */
+
+	/*  --- charge_pump_init() 相当 ---  */
+	*(volatile uint32_t *)0x6001902CU = 0x08000000U;	/* PMUP_CHANNEL_CFG：code0=1 */
+	*(volatile uint32_t *)0x60019014U = 1U << 22;		/* PMUP_BITMAP_LOW0 */
+	/*  PMUP_DRV_CFG：PUMP_DRV0=0（フィールドS=27）＝書込み不要  */
+
+	/*  --- pvt_func_enable(true) 相当 ---  */
+	*pmu_hp_reg0 |= (1U << 3);					/* DIG_DBIAS_INIT（較正開始） */
+	*pcr_pvt_func |= (1U << 22);
+	*pcr_pvt_conf |= (1U << 0);
+	*(volatile uint32_t *)0x60019030U |= (1U << 8);		/* CLK_CFG：MONITOR_CLK_PVT_EN */
+	*(volatile uint32_t *)0x600190D8U |= (1U << 0);		/* SITE2_UNIT0_VT1：MONITOR_EN */
+	esp_rom_delay_us(10U);
+	*pmu_hp_reg0 &= ~(1U << 14);				/* DIG_REGULATOR0_DBIAS_SEL=0（dbias制御をPVTへ移譲） */
+	*pmu_hp_reg0 &= ~(1U << 3);					/* DIG_DBIAS_INIT解除 */
+	*(volatile uint32_t *)0x60019064U |= (1U << 31);	/* DBIAS_TIMER：EN（自動dbias開始） */
+	esp_rom_delay_us(50U);
+
+	/*  --- charge_pump_enable(true) 相当 ---  */
+	*(volatile uint32_t *)0x60019028U |= (1U << 9);		/* PMUP_DRV_CFG：PUMP_EN */
+
+	/*  pmu_init()はPVT有効化後に1msの安定待ちを置く  */
+	esp_rom_delay_us(1000U);
+}
+
 static void
 wifi_clock_enable_wrapper(void)
 {
@@ -781,6 +873,11 @@ wifi_clock_enable_wrapper(void)
 	 *  （【実機確認待ち】）。
 	 */
 	if (!lpclk_selected) {
+		/*  【実施21】候補B加算移植：stockがクロック切替時（＝PHY較正より
+		 *  前）に行うPVT自動dbias＋チャージポンプ有効化を，Wi-Fi初期化の
+		 *  一度きりのこの時点（regi2c有効化・phy_enableより前）で代替する  */
+		esp_shim_pvt_init();
+
 		modem_clock_deselect_all_module_lp_clock_source();
 		modem_clock_select_lp_clock_source(PERIPH_WIFI_MODULE,
 											MODEM_CLOCK_LPCLK_SRC_RC_SLOW, 0U);
