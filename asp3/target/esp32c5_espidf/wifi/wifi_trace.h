@@ -67,4 +67,26 @@ typedef struct {
 extern void wifi_txcap_reset(void);
 extern void wifi_txcap_dump_addr(void);
 
+/*
+ *  実施25: 未公開regi2c block（0x63/0x68/0x6b，実施16で観測された公開名の
+ *  無いblock）へのblob自身のアクセス時に，そのときの`ANA_CONF1`/`ANA_CONF2`
+ *  （ルーティング/RD_MASK設定）を記録する専用リングバッファ。目的＝
+ *  「未公開blockの手動regi2cリプレイに使うべき正しいルーティング設定」を
+ *  ROMパッチ（BBPLL等5ブロックのみ対応）からの推測ではなく，blob自身が
+ *  実際に使った値から直接学習するため（advisorレビュー指摘：ROMパッチの
+ *  regi2c_enable_block()は0x63/0x68/0x6bにcaseが無くi2c_sel=0固定・
+ *  ANA_CONF1不変のまま——host_id引数も全impl `(void)host_id`で無視される
+ *  ため，host_idでI2C0/I2C1を直接選択する案は未検証のプロトコル）。
+ *  読み取り専用（ANA_CONF1/2への書込みは行わない，単なる観測）。
+ */
+typedef struct {
+	uint32_t	t_us_low;
+	uint8_t		block, host_id, reg_add, op;
+	uint32_t	ana_conf1;
+	uint32_t	ana_conf2;
+} wifi_regi2c_cfgsnap_t;
+
+extern void wifi_regi2c_cfgsnap_reset(void);
+extern void wifi_regi2c_cfgsnap_dump_addr(void);
+
 #endif /* WIFI_TRACE_H */

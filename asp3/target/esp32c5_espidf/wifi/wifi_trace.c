@@ -73,6 +73,60 @@ wifi_regi2c_push(uint8_t op, uint8_t block, uint8_t host_id, uint8_t reg_add,
 }
 
 /*
+ *  実施25: 未公開block(0x63/0x68/0x6b)アクセス時のANA_CONF1/ANA_CONF2記録。
+ *  wifi_trace.hのコメント参照。読み取り専用（このバッファ自身は
+ *  ANA_CONF1/2に一切書き込まない，単に読んで記録するだけ）。
+ */
+#define WIFI_REGI2C_CFGSNAP_SIZE 64
+#define ESP_SHIM_I2C_ANA_MST_ANA_CONF1_ADDR	0x600AF81CU
+#define ESP_SHIM_I2C_ANA_MST_ANA_CONF2_ADDR	0x600AF820U
+
+wifi_regi2c_cfgsnap_t	wifi_regi2c_cfgsnap[WIFI_REGI2C_CFGSNAP_SIZE];
+volatile uint32_t		wifi_regi2c_cfgsnap_pos;
+
+void
+wifi_regi2c_cfgsnap_reset(void)
+{
+	wifi_regi2c_cfgsnap_pos = 0U;
+	memset(wifi_regi2c_cfgsnap, 0, sizeof(wifi_regi2c_cfgsnap));
+}
+
+void
+wifi_regi2c_cfgsnap_dump_addr(void)
+{
+	syslog(LOG_NOTICE, "wifi_regi2c_cfgsnap_addr: arr=%08x pos=%08x entsz=%d cap=%d",
+		   (unsigned int)(uintptr_t)wifi_regi2c_cfgsnap,
+		   (unsigned int)(uintptr_t)&wifi_regi2c_cfgsnap_pos,
+		   (int_t)sizeof(wifi_regi2c_cfgsnap_t), (int_t)WIFI_REGI2C_CFGSNAP_SIZE);
+}
+
+static void
+wifi_regi2c_cfgsnap_maybe(uint8_t op, uint8_t block, uint8_t host_id, uint8_t reg_add)
+{
+	/*
+	 *  実施25追記：初回スイープでblock=0x63/0x68が高頻度の周期アクセス
+	 *  （SAR/DC-offset比較器系，実施16 4aの既知ノイズ源）であることが
+	 *  判明し，64エントリのリングが0x6bの情報を上書きしてしまっていた。
+	 *  0x63/0x68のANA_CONF1/2は既に学習済み（0x63→0xffffffef，
+	 *  0x68→0xffffffdf，ANA_CONF2は不変=host_idルーティングは
+	 *  ANA_CONF2非経由と判明）のため，本フィルタでは0x6bのみを追跡する。
+	 */
+	if (block == 0x6bU) {
+		uint32_t				pos = wifi_regi2c_cfgsnap_pos++;
+		wifi_regi2c_cfgsnap_t	*e = &wifi_regi2c_cfgsnap[pos % WIFI_REGI2C_CFGSNAP_SIZE];
+
+		e->t_us_low = (uint32_t)esp_shim_time_us();
+		e->block = block;
+		e->host_id = host_id;
+		e->reg_add = reg_add;
+		e->op = op;
+		/*  読むだけ・書かない＝観測に徹する（perturbation回避）  */
+		e->ana_conf1 = *(volatile uint32_t *)ESP_SHIM_I2C_ANA_MST_ANA_CONF1_ADDR;
+		e->ana_conf2 = *(volatile uint32_t *)ESP_SHIM_I2C_ANA_MST_ANA_CONF2_ADDR;
+	}
+}
+
+/*
  *  素通し＋記録（`--wrap`標準パターン）。`__real_*`はリンカが元シンボルへ
  *  差し替える。捕捉対象がblob内部の較正ループから高頻度に呼ばれるため，
  *  記録は書込み/読出しの実行前後どちらでも良いが，読み出し系は実測値を
@@ -89,6 +143,7 @@ __wrap_phy_i2c_writeReg(uint8_t block, uint8_t host_id, uint8_t reg_add,
 
 	__real_phy_i2c_writeReg(block, host_id, reg_add, data);
 	wifi_regi2c_push(0U, block, host_id, reg_add, 0xFFU, 0xFFU, data, ra);
+	wifi_regi2c_cfgsnap_maybe(0U, block, host_id, reg_add);
 }
 
 extern void __real_phy_i2c_writeReg_Mask(uint8_t block, uint8_t host_id,
@@ -102,6 +157,7 @@ __wrap_phy_i2c_writeReg_Mask(uint8_t block, uint8_t host_id, uint8_t reg_add,
 
 	__real_phy_i2c_writeReg_Mask(block, host_id, reg_add, msb, lsb, data);
 	wifi_regi2c_push(1U, block, host_id, reg_add, msb, lsb, data, ra);
+	wifi_regi2c_cfgsnap_maybe(1U, block, host_id, reg_add);
 }
 
 extern uint8_t __real_phy_i2c_readReg(uint8_t block, uint8_t host_id,
@@ -112,6 +168,7 @@ __wrap_phy_i2c_readReg(uint8_t block, uint8_t host_id, uint8_t reg_add)
 	uint32_t	ra = (uint32_t)(uintptr_t)__builtin_return_address(0);
 	uint8_t	ret = __real_phy_i2c_readReg(block, host_id, reg_add);
 	wifi_regi2c_push(2U, block, host_id, reg_add, 0xFFU, 0xFFU, ret, ra);
+	wifi_regi2c_cfgsnap_maybe(2U, block, host_id, reg_add);
 	return(ret);
 }
 
@@ -125,6 +182,7 @@ __wrap_phy_i2c_readReg_Mask(uint8_t block, uint8_t host_id, uint8_t reg_add,
 	uint32_t	ra = (uint32_t)(uintptr_t)__builtin_return_address(0);
 	uint8_t	ret = __real_phy_i2c_readReg_Mask(block, host_id, reg_add, msb, lsb);
 	wifi_regi2c_push(3U, block, host_id, reg_add, msb, lsb, ret, ra);
+	wifi_regi2c_cfgsnap_maybe(3U, block, host_id, reg_add);
 	return(ret);
 }
 

@@ -4133,3 +4133,212 @@ PD_TOP/HPAON/HPCPU/LPPERI force解除・bandgap ocode強制）。
     （`rst:0x12`ループ約3.5秒周期）を再確認。
 - C5#2：物理切断済み・一切未接触。C6 board C：`chip-id`読取りのみ，機能に
   影響する操作は一切実施せず。
+
+---
+
+## 実施25：未公開regi2c block（0x63/0x68/0x6b）を含む全8blockの0x00〜0x1Fフルスイープを4-way実施——新規プロトコル検証つき，genuinely新規かつ未説明のプラットフォーム決定的差分は**ゼロ**（既知3件の再確認＋2件のCPU周波数差／自作shim起因の確認込み）
+
+計画書`docs/c5-tone-adc-plan.md`総括§6(b)「未公開regi2c blockの逆アセンブル・
+トレース」の実施回。本ラウンドはC5#1のnative USB-JTAG（`D0:CF:13:F0:A7:44`）が
+使用可能な環境だった（実施24とは異なる）。
+
+### 0. advisorレビューで発見された致命的な手法の穴と，その解消
+
+着手前にadvisorへ相談したところ，計画段階の設計（「host_idでI2C0/I2C1を
+直接選択し，未公開blockのANA_CONF1は前回書込みのまま放置する」）には
+重大な欠陥があると指摘された：`hal/components/esp_rom/patches/
+esp_rom_hp_regi2c_esp32c5.c`の`regi2c_enable_block()`は名前付き5block
+（BBPLL/BIAS/DIG_REG/ULP_CAL/SAR_I2C）にしかcaseが無く，**未公開block
+（0x63/0x68/0x6b）に対してはi2c_sel=0固定・ANA_CONF1不変のまま**——
+host_id引数も全実装で`(void)host_id`と無視される。この状態で読んだ値が
+「たまたま2boot一致・cross platform不一致」に見えても，それは正しく
+アドレッシングされたレジスタ内容ではなく単なるバス残留状態（ゴミ）の
+可能性が高く，「regi2c可視範囲は一致」という偽陰性を記録するリスクが
+あった（`memory/feedback_hardware_investigation_rigor.md`の第3反復と
+同型の罠）。advisorの指示に従い，**既知の正解値に対する検証ゲート**を
+実装の前に必ず通すことにした。
+
+### 1. Step A：未公開blockの正しい読取りプロトコルを実測で確立
+
+- **手法**：既存`wifi_trace.c`のregi2c `--wrap`計装に，block=0x63/0x68/0x6b
+  へのアクセス時のみ`ANA_CONF1`/`ANA_CONF2`を記録する専用リングバッファ
+  （`wifi_regi2c_cfgsnap`，64エントリ）を追加（読み取り専用，ANA_CONF1/2
+  へは一切書き込まない）。ASP3計装ビルド（`build/c5_idf61_trace`）にのみ
+  追加——libphy.aブロブはstock/ASP3で同一バイナリのため，プロトコル自体の
+  学習はASP3（既にハングしていて失うものが無い側）だけで完結する。
+- **1回目の観測**：block=0x63/0x68/0x6bを無差別にフィルタしたところ，
+  リング（64エントリ）がblock=0x63（SAR/DC-offset比較器系，実施16 4aの
+  既知ノイズ源）の高頻度アクセスに埋め尽くされ，0x6bの情報が上書きされて
+  消えていた——単純な受動観測では収集バイアスが起きることを確認し，
+  フィルタを0x6b単独に絞って再ビルド・再測定した。
+- **既知答え合わせ（known-answer gate）**：実施16 4bで確定した「ASP3の
+  block=0x6b,host=1,reg=0x02は恒久的に`0x87`に凍結」という事実を正解として
+  使い，loop-top halt中にJTAG手動regi2cリプレイで複数の(ctrl_reg,
+  ANA_CONF1候補)の組合せを試した。結果：**`host=1→I2C1_CTRL`
+  ＋`ANA_CONF1=0x00FFFFF7`（~BIT(3)）の組合せのみ`0x87`を返し，他の全組合せ
+  （誤host・誤mask・無変更）は`0xFF`（無効）を返した**——独立2ブートで再現。
+  これにより「host_idはブロブの`phy_i2c_readReg`内部で本当にI2C0/I2C1を
+  直接選択する」「ANA_CONF1のRD_MASKビットはblock固有で，正しく設定しないと
+  データが読めない」の両方を実測で確定した。
+- **block=0x63（reg 0x0b）・0x68（reg 0x00/0x03/0x07）への同様の検証**：
+  regi2cリングバッファ（2048エントリ，本ラウンドの捕捉時点で未ラップ）が
+  記録しているブロブ自身の最終読み書き値と，JTAG手動リプレイの読み値を
+  直接クロスチェックした。結果は3レジスタとも完全一致（0x63/reg0x0b＝
+  ブロブ最終読み0x49，リプレイ読みも0x49／0x68/reg0x03＝ブロブの
+  masked read 0x1f，リプレイのフルバイト読み0x5fをmaskすると0x1fで一致／
+  0x68/reg0x07＝ブロブ最終書込みのbit[3:2]=2，リプレイ読み0x08の
+  bit[3:2]=2で一致）。**副産物**：block=0x69(SAR_ADC)reg=0x06のブロブ自身の
+  読み（host=0，値0x2f）が実施16 4cの記録と完全一致することも確認——
+  デコードスクリプトの正しさの追加証拠。
+- **結論（検証済みプロトコル）**：ctrl_reg = host_id==1?I2C1_CTRL:I2C0_CTRL
+  （ブロブは名前付きblockも含め全blockでhost_idを直接ルーティングに使う，
+  ROMパッチのANA_CONF2 MST_SELベース選択とは別系統）。RD_MASK
+  （ANA_CONF1のクリアすべきビット）はblock固有：0x63→~BIT(4)，0x68→~BIT(5)，
+  0x6b→~BIT(3)（新規実測）。既知5blockはhal記載のビット（BIAS→~BIT(6)，
+  BBPLL→~BIT(7)，ULP_CAL→~BIT(8)，SAR_I2C→~BIT(9)，DIG_REG→~BIT(10)）を
+  使用。
+
+### 2. Step B：8block×0x00〜0x1F×host(0/1)のフルスイープを2採取点で実施
+
+- **採取点**：(i)`register_chipv7_phy`エントリ（precal，実機アドレスは
+  ASP3=`0x42025136`／stock=`0x4202e12c`）・(ii)`phy_iq_est_enable_new`
+  loop-top（ASP3=`0x420294fa`／stockはリビルドにより実施16から再確認し
+  `0x4203296c`——実施16時点の値から4バイトずれていたため今回objdumpで
+  再確定）。JTAG手動regi2cリプレイをOpenOCD telnet経由で自動化
+  （スクラッチ`r25_sweep.py`，`r21_capture.py`のOOCD/RTSリセット基盤を再利用）。
+- **★ハマった点（新規）**：1blockぶんの64回（host×reg）のread/writeを
+  `;`区切りで1行のOpenOCD telnetコマンドに束ねたところ，**OpenOCDの
+  telnetラインバッファが長い連結コマンドを黙って切り詰め，`mdw`の
+  usageエラーだけが返る**（データは一切返らない）現象を発見した。
+  4件程度の束ねでも症状が残ったため，安全のため**mdw/mww 1回ずつを
+  個別の往復（バッチ化なし）に戻して解消**した（1boot・1採取点あたり
+  512回のレジスタ読出しで約20〜25秒，許容範囲）。
+- **read-only性の確認**：本スイープが発行するのは全て素のread
+  （ctrl_regのbit24=WR_CNTLを立てない）——書込みは発生しない。
+  ANA_CONF1のみ一時的に変更するため，各blockのスイープ前後で元の値を
+  保存・復元した（block単位で1回ずつ）。
+
+### 3. 実機測定
+
+- **ASP3**：クリーンブート（UARTブリッジRTSリセット）×2，各ブートで
+  2採取点×8block×2host×32regの全読出しを実施。ASP3は元々ハング中
+  （失うものが無い）ため，まずASP3側で完走することを確認してから
+  stockへ進んだ（計画の指示どおり）。
+- **stockのperturbation検証**：スイープ挿入前のbaseline確認
+  （独立1ブート，`Total APs scanned = 24`・`Returned from app_main()`到達）
+  を先に取得。その後，**スイープ実行と同一ブートを裏でUARTコンソール
+  キャプチャしながら**実行し，スイープ後に`resume`された同一ブートが
+  `Total APs scanned = 23`・`Returned from app_main()`まで正常完走する
+  ことを確認した——**スイープの介入（2箇所のhalt＋ANA_CONF1の一時変更×
+  合計16block-visitぶん）はstockの完走を一切妨げない**（挿入後も陽性対照が
+  陽性対照のまま，というperturbation検証の要件を満たす）。
+- stockも独立2ブート実施（`register_chipv7_phy`/loop-top）。
+
+### 4. 4-way解析と解釈
+
+`(op,block,host,reg)`キーで「ASP3内2ブート一致・stock内2ブート一致・かつ
+ASP3≠stock」を機械的に抽出した（実施16/41/42と同じ基準）。まず
+host=0/1のどちらが各blockの「生きている」（0xFF固定でない）ルーティングか
+をブロック・採取点ごとに実測確認した上で対応する差分だけを解釈した
+（無効host側は両platformとも0xFFで一致するため自動的に除外される）。
+
+検出された「プラットフォーム決定的」候補と，その解釈：
+
+| block | reg | ASP3 | stock | 解釈 |
+|---|---|---|---|---|
+| BBPLL(0x66) | 0x03,0x05,0x06,0x09 | 12,0,88,2 | 10,17,120,3 | **CPU動作周波数差で説明可能・新規知見ではない**：ASP3の`CORE_CLK_MHZ=192`（実施03実測）に対しstockの`sdkconfig`は`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240`——BBPLLはCPU/AHBクロック生成用の較正PLL（WiFi RFシンセサイザではない，実施14で確認済み）であり，目標周波数が違えば較正値が違うのは当然。WiFi RF較正とは無関係。 |
+| DIG_REG(0x6d) | 0x05,0x07,0x0d | 24,24,78 | 152,152,66 | **BBPLLと同カテゴリの疑い（未確証）**：DIG_REGはデジタルレギュレータのトリム値で，CPU周波数差に伴う電源電圧要求差でも説明しうる。BBPLLほど確証は無いため「推定・未確証」と明記する。 |
+| ULP_CAL(0x61) | 0x05 | 64(0x40) | 71(0x47) | **自作shimによる既知の差・新規知見ではない**：実施24で`esp_shim_ocode_force_init()`をkeepしたままの計装ビルドを使用しており，このレジスタ（`I2C_ULP_IR_FORCE_CODE`，bit6）はASP3側が意図的にforce書込みしている値。因果検証は実施24で既に完了（症状無関係）。 |
+| UNK_68(0x68) | 0x03 | 95 | 96 | **実施16 4dの再確認（±1，低信頼度ノイズ）**：実施16が「低信頼度・単発」と評価した同一レジスタで，今回も±1差。ノイズ域を出ない。 |
+| UNK_6b(0x6b) | 0x02 | 135(0x87) | 117(0x75) | **実施16 4bの再確認**：txcap探索停止（実施18〜20で`phy_rfcal_txcap`まで追跡済み・因果関係も検討済み）による既知の恒久分岐。stock値が実施16の`0x74`から`0x75`へ変動しているのは実施16でも観測された「stock自体の±1変動」の範囲内。 |
+| SAR_ADC(0x69) host=1 | 全レジスタ | 0xFF固定 | 変動 | **無効ルーティングのアーティファクト**：SAR_ADCの正しいhost_idは0（実施16 4c・本ラウンドの答え合わせで確認）。host=1は本来無効な選択で，ASP3側はバス無応答(0xFF)，stock側はその瞬間にI2C1を使っていた別の正当な処理のライブ値を偶然拾っただけ——**block=0x69自体の内容差ではない**。有効なhost=0では両platform完全一致。 |
+
+**新規かつ未説明のプラットフォーム決定的差分＝ゼロ**。検出された5件は
+全て「(a)確立済みの非WiFi要因（CPU周波数）で完全または高確度に説明可能」
+「(b)自分自身が実施24でkeepした既知の意図的差分」「(c)実施16以来
+追跡済み・既に因果棄却済みの2件の再現」「(d)無効ルーティングの
+アーティファクト」のいずれかに分類できた。
+
+### 5. 因果検証について
+
+上表のとおり，本ラウンドで検出した差分はいずれも「新規のRF状態系候補」
+ではないと判定したため，4節の追加注入実験（計画の手順4）は実施しなかった
+（ULP_CAL/txcap/68reg3はいずれも既に過去ラウンドで注入検証済みか，ノイズ
+と評価済み）。BBPLLの192対240MHz説明は`CORE_CLK_MHZ`定義位置と
+sdkconfigの値を直接読み合わせて確定できる（実測注入なしで十分に強い）。
+DIG_REGの「同カテゴリだが未確証」の扱いは，本質的にCPU周波数の話であり
+WiFi RF較正との関連性が薄いため，今回は追加の注入実験を見送った
+（必要なら次段でASP3を240MHzへ合わせてDIG_REGの差が消えるか確認できるが，
+これはWiFi/PHY調査ではなくクロック移植の話になる）。
+
+### 6. 判定：regi2cで届く範囲（8block×0x00〜0x1F×host 0/1）は，既知の
+非RF要因を除いて全一致——総括§「原理的に未確認の残余」がさらに絞られた
+
+実施14が指摘した「未公開regi2c blockは公開レジスタ名が無いため観測
+不能」という限界を，本ラウンドで**観測可能な形に変えた**（block/host/
+ANA_CONF1の正しい組合せをblob自身のトレースから実測で確立）。その上で
+0x00〜0x1Fの全アドレス空間を4-way比較した結果，**WiFi RF較正に関連しうる
+新規の未説明差分は見つからなかった**。実施24総括の「原理的に未確認の
+残余」（regi2c越しに見えないRF専用アナログ状態）は，「regi2cで**アドレス
+指定可能な**範囲は全て確認し尽くした上でなお一致」という，より強い形に
+更新できる——残る説明領域は，regi2cのアドレス空間そのものでは届かない
+真のアナログ物理量（PLLロック検出そのものが意味する物理現象・LNA/PA
+バイアスの実効値・インピーダンス整合など，レジスタとして読める「設定値」
+ではなく回路の実際の振る舞い）にさらに絞られた。
+
+### 7. 申し送り
+
+- **DIG_REGの「CPU周波数差で説明できるか」は未確証のまま**。もし今後
+  WiFi/PHYと無関係な理由でASP3のCPU周波数移植（192→240MHz対応）を
+  行う機会があれば，DIG_REGの差が消えるかどうかは良い追加確認になる
+  （優先度は低い——WiFi RF較正とは別カテゴリの課題のため）。
+- 実施24総括の推奨2案（(a)Espressif問い合わせ／(b)継続する場合の残り
+  手段）のうち，本ラウンドは(b)の「未公開regi2c blockの逆アセンブル・
+  トレース」を実施し，**新規知見なし（既知差分の確認と説明のみ）**という
+  結果だった。残る(b)手段は「JTAG環境でのPD_TOP系再検証」（優先度低・
+  実施24で因果棄却済み）のみで，実質的に(b)の主要な手段は出尽くした
+  と評価する。ユーザーの最終判断（(a)Espressif問い合わせへ進むか，
+  さらに続けるか）は引き続き保留。
+
+### 8. 変更ファイル（実施25）
+
+- `asp3/target/esp32c5_espidf/wifi/wifi_trace.h`・`wifi_trace.c`：
+  `wifi_regi2c_cfgsnap`（block=0x6b専用，Step Aのプロトコル学習用，
+  読み取り専用）を追加。`ESP32C5_WIFI_REGI2C_TRACE`ガード配下のため
+  既定ビルドに影響なし。
+- `apps/wifi_scan/wifi_scan.c`：`wifi_regi2c_cfgsnap_reset()`/
+  `wifi_regi2c_cfgsnap_dump_addr()`の呼出しを既存のregi2c/txcapリセット
+  呼出しの隣に追加（同ガード配下）。
+- 本doc（`docs/c5-bringup.md`）：実施25セクション追記のみ。
+- ソース側の恒常的な機能変更は無し（診断専用の追加のみ，実験1/実験2に
+  相当する「常時ON」の恒久修正は今回は無い——差分が全て既知/非WiFi要因と
+  判明したため）。
+- スクラッチ（`260d98fa…/scratchpad/`）：`r25_validate.py`／
+  `r25_knownanswer.py`／`r25_ka2.py`（Step Aのプロトコル検証）・
+  `r25_sweep.py`（Step Bのフルスイープ自動化，`r21_capture.py`の
+  OOCD/RTSリセット基盤を再利用）・生データ
+  `r25_sweep_{asp3,stock}_boot{1,2}.sweep.json`・
+  `r25_stock_baseline_console1.log`／`r25_stock_boot2_console.log`
+  （stockのperturbation検証ログ）・`r25_final_state_console.log`
+  （最終状態確認）。
+
+### 9. 検証（実施25）
+
+- ビルド：`build/c5_idf61_trace`（cfgsnap追加後）を再ビルドし成功
+  （`riscv32-esp-elf-nm`でシンボルアドレス確認）。stock側は既存
+  `stock_scan`（実施15/16由来，無改造の素の`examples/wifi/scan`相当）を
+  そのまま使用——本ラウンドの計測はJTAG手動リプレイのみで完結するため
+  stock側のソース改造は不要だった。
+- 実機（C5#1，UARTブリッジ`b04e3bcfa270f0118f4894301045c30f`＋native
+  USB-JTAG`D0:CF:13:F0:A7:44`を都度MAC照合の上で使用）：
+  - Step A：known-answer gate，独立2ブートで`0x87`一致を再現確認。
+  - Step B：ASP3×2ブート・stock×2ブート，各ブート2採取点×512レジスタ
+    読出し（計2048読出し/プラットフォーム）を実施，パースエラーなし。
+  - stock perturbation検証：スイープ挿入後も同一ブートが
+    `Total APs scanned=23`・`Returned from app_main()`まで完走（baseline
+    の`24`と同水準，スイープによる劣化なし）。
+  - 最終状態：`build/c5_idf61_trace`（実施24と同一ソース状態＋cfgsnap
+    追加）を書込み，UARTブリッジRTSリセットで独立1ブート確認——
+    `rst:0x12 (RTC_SWDT_SYS)`ループ約3.5秒周期を再確認，退行なし。
+- C5#2：本ラウンドも物理切断済み・一切未接触。C6 board C：本ラウンドは
+  接続確認すら行わず（`/dev/serial/by-id`一覧で識別のみ），完全に未接触。

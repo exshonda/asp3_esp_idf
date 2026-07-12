@@ -88,6 +88,24 @@
 >   C6-genericの総括・推奨2案（(a)Espressif問い合わせへ／(b)継続する場合の
 >   残り手段）を`docs/c5-bringup.md`実施24に記載，**最終判断はユーザーに委ねる**。
 > - 詳細＝`docs/c5-bringup.md`実施24。
+>
+> **【結果追記（実施25実施済み，2026-07-13）——未公開regi2c block(0x63/0x68/0x6b)
+> 含む全8blockの0x00〜0x1Fフルスイープ，新規かつ未説明の差分ゼロ】**
+> - 総括§6(b)「未公開regi2c blockの逆アセンブル・トレース」を実施。advisor
+>   レビューで「host_idルーティング＋ANA_CONF1 RD_MASKの推測ベースの読取り
+>   プロトコルは未検証」という致命的な穴を指摘され，実測の既知答え合わせ
+>   （block=0x6b,reg=0x02は実施16で確定した恒久値`0x87`）でプロトコルを
+>   先に検証してからスイープを実施（`host=1→I2C1_CTRL`＋block固有の
+>   RD_MASKビット，未公開3blockぶんを新規実測で確定）。
+> - 8block×0x00〜0x1F×host(0/1)×2採取点（`register_chipv7_phy`エントリ／
+>   `phy_iq_est_enable_new`loop-top）を4-way比較。検出された5件の
+>   プラットフォーム決定的候補は全て「CPU動作周波数差（ASP3=192MHz対
+>   stock=240MHz，BBPLL/DIG_REGの較正値差として説明可能）」「実施24で
+>   自ら`keep`したocode force shimによる既知差」「実施16 4b/4dの既知
+>   再現（txcap停止・低信頼度ノイズ）」「無効host_idルーティングの
+>   アーティファクト」のいずれかで説明でき，**新規の未説明差分はゼロ**。
+> - stockのperturbation検証（スイープ挿入後も同一ブートが`Total APs
+>   scanned`まで完走）済み。詳細＝`docs/c5-bringup.md`実施25。
 
 対象：`docs/c5-bringup.md` 実施20時点の唯一の壁＝blob内トーン自己
 ループバック測定の生ADCサンプル（`MODEM0+0x81C..0x828`）がASP3のみ

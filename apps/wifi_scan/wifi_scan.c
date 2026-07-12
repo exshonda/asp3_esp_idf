@@ -211,6 +211,11 @@ main_task(EXINF exinf)
 	 *  同じタイミングでリセット・アドレス出力する。 */
 	wifi_txcap_reset();
 	wifi_txcap_dump_addr();
+	/*  実施25：未公開regi2c block(0x63/0x68/0x6b)アクセス時の
+	 *  ANA_CONF1/ANA_CONF2記録バッファも同じタイミングでリセット・
+	 *  アドレス出力する。 */
+	wifi_regi2c_cfgsnap_reset();
+	wifi_regi2c_cfgsnap_dump_addr();
 #endif /* TOPPERS_ESP32C5_WIFI_REGI2C_TRACE */
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_init");
 	err = esp_wifi_init(&cfg);
