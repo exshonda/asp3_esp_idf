@@ -5003,3 +5003,248 @@ irc_begin_int_demote:
 - スクラッチ（リポジトリ外）：`r28_ringdump.py`・`r28_hrtcheck.py`・
   `r28_acm_capture.py`・`r28_*.log`/`.ring.txt`一式。
 - git commitは行っていない（指示どおり）。
+
+---
+
+## 実施29：Codex round2最重要判別実験——stock `app_main` 先頭（NVS/WiFi/PHY一切未実行）で即ハンドオフしたところ、**ASP3自身のesp_wifi_init＋較正が完走し、scanまで実際に完走（20〜25AP検出、2/2再現）**。判定：鍵の状態は「stockのPHY較正/WiFi実行」ではなく「ESP-IDF標準ブート列（2nd-stageブートローダ〜call_start_cpu0〜esp_system_init）」にあると確定（Codexの候補6が的中、候補1「PHY較正の残留」は明確に反証）
+
+### 背景・目的
+
+実施26/27のハンドオフは「stock scanが完走した**後**」にジャンプしていたため、
+鍵の状態を作ったのが (A) bootloader/startup（ブート列そのもの）か、(B) stockの
+PHY較正/WiFi実行そのものか、まだ区別できていなかった（`tmp/codex_c5_round2_
+output.txt`の批判：「stock scan/PHY較正が作った保持状態」を排除できていない）。
+Codexが最重要と位置づけた判別実験——**stockの`app_main`先頭（NVS・WiFi・
+`esp_wifi_init`・`esp_phy_enable`を一切呼ばない状態）で即ハンドオフし、ASP3の
+冷間相当フロー（実施28のCLIC修正込みwifi_scan）を走らせて較正が完走するかを見る」
+を実施する。
+
+判定基準（事前固定）：
+- **完走する**（done16の0→1遷移をASP3自身が起こす。stock残存値との区別は
+  実施27のdone16時系列手法を流用）→ 鍵はbootloader/startup側 → 次段は
+  `ESP_SYSTEM_INIT_FN`レベルでの二分探索へ
+- **完走しない**（raw_adc=0のまま較正ハング）→ 実施26/27の成功はstockのPHY/WiFi
+  実行が作った状態だった → 次段はstock側PHY実行の段階分割＋残留試験へ
+
+advisor事前レビューで4点の解釈上のガードを確認した上で着手した：
+(1) 実施26型の「pre-esp_wifi_init時点でraw_adc非ゼロ」というシグナルは本実験
+では原理的に出ない（stockが較正を一度も走らせていないため`+0x81C`はstock側
+でも未確定）——判定はASP3自身の`esp_wifi_init`によるdone16の0→1遷移で行う，
+実施26ではなく実施27と比較すること。
+(2) バナー・`wifi_diag`周期タスク・`esp_wifi_init`到達が確認できて初めて
+「機構は動いた」と言える——ハンドオフ失敗（機構）と較正失敗（本題）を必ず
+区別する。
+(3) FAILの場合は「ブートが状態を確立しなかった」のか「確立したがASP3の
+`hardware_init_hook`が壊した」のかが未分離であることを明記する。
+(4) stock（uart0既定コンソール）とゲスト`c5_idf61_uart`（`ESP32C5_CONSOLE=
+uart0`，CMakeCache.txtで確認）が同一ブリッジ（`b04e3bcf...`=ttyUSB0）に出る
+ことを確認済み——実施27のusbjtagコンソール罠を回避。
+
+### 1. 実装：ハンドオフ呼出し点をstockの`app_main`先頭へ移動
+
+実施26/27のスクラッチプロジェクト（`stock_scan/`、`asp3_jump.c`は無改造で
+再利用——実施27で確立したROM-ifポインタ領域`[0x4085fb80,0x4085ffc8)`の
+ゼロクリアと証拠プリントをそのまま流用）を丸ごと複製し，新規スクラッチ
+プロジェクト`stock_headjump/`を作成。`main/scan.c`を以下に置き換えた
+（NVS初期化・`wifi_scan()`呼出しを完全に削除，`app_main`の最初の一文が
+ジャンプ）：
+
+```c
+void app_main(void)
+{
+    esp_rom_printf("r29_headjump: app_main entered (no NVS/WiFi/PHY executed) -- jumping now\n");
+    asp3_jump_now();
+}
+```
+
+`main/CMakeLists.txt`の`PRIV_REQUIRES`は`esp_wifi hal`のまま維持した
+（`asp3_jump.c`の証拠プリントが参照する`g_wifi_osi_funcs`シンボルの解決に
+必要——コンポーネントのリンクのみで自動初期化フックは無いことを実機の
+`g_osi_funcs_p`readingで後述のとおり確認済み）。`sdkconfig.defaults`の
+`CONFIG_ESP_SYSTEM_MEMPROT=n`（実施26で発見したW^X PMPロック解除）は
+そのまま継承。ゲストは実施28の標準ビルド`build/c5_idf61_uart`（CLIC
+synthetic mret修正込み，計装入り）を640KB切詰めでオフセット`0x200000`へ
+配置——実施26/27と同一の手法・同一のゲストソース。
+
+ビルド確認：`idf.py set-target esp32c5 && idf.py build`（`rc=0`）。
+`riscv32-esp-elf-readelf -s`で`asp3_jump_now`のリンク後アドレス
+`0x408027d2`（IRAM常駐）を確認。
+
+### 2. 判別実験本体：結果は**PASS**（生ADC非ゼロ・done16 0→1・**scan自体が完走**、2/2再現）
+
+`esptool write-flash`でstock_headjump一式（bootloader@0x2000・
+partition-table@0x8000・app@0x10000）＋ゲスト@0x200000を書込み，
+UARTブリッジRTSリセット後の出力を独立2試行キャプチャした
+（`r29_headjump_trial1.log`／`r29_headjump_trial2.log`）。
+
+両試行とも同一の結果（値は試行間で変動＝生きた信号）：
+
+```
+I (252) main_task: Started on CPU0
+I (262) main_task: Calling app_main()
+r29_headjump: app_main entered (no NVS/WiFi/PHY executed) -- jumping now
+asp3_jump_now: masking interrupts
+asp3_jump_now: g_osi_funcs_p=0x00000000 g_coa_funcs_p=0x00000000 stock_osi_tbl=0x4080eaac
+
+TOPPERS/ASP3 Kernel Release 3.7.2 for ESP32-C5 ...
+
+wifi_diag: raw_adc=0x00000000 done16=0 pd_top=0x00 pd_hpaon=0x00      ← esp_wifi_init前（advisor予測どおりゼロ）
+...
+wifi_scan: initializing shim
+wifi_scan: esp_wifi_init
+esp_shim: task 'wifi' -> tskid 1 (prio 23)
+wifi_scan: esp_wifi_start -> 0
+wifi_scan: DIAG set_promiscuous_rx_cb -> 0
+wifi_diag: raw_adc=0x0a520a4c done16=1 pd_top=0x00 pd_hpaon=0x00      ← esp_wifi_init後：ASP3自身の較正で成立（試行2は0x0a580a5a）
+...
+wifi_scan: esp_wifi_scan_start -> 0
+esp_event: WIFI_EVENT id=1
+wifi_scan: 20 APs found (err=0)                                       ← 試行1（試行2も20 APs found）
+  [0] <SSID-2G> (rssi=-57 ch=1)
+...
+wifi_scan: RESCAN 24 APs (err=0)                                       ← 試行1（試行2はRESCAN 25 APs）
+```
+
+観測点（判定基準・advisorガードへの対応）：
+
+- **`g_osi_funcs_p=0x00000000`**（証拠プリント，2/2）——実施26/27のような
+  「stockのテーブルへのstaleポインタ」が**存在しない**。stockが
+  `wifi_osi_funcs_register`を一度も呼んでいない（＝WiFi/PHYコードパスに
+  一切入っていない）ことの直接証拠。ROM-ifポインタ領域ゼロクリアは
+  この状況では実質no-opだった（既にゼロ）。
+- **`esp_wifi_init`前のdone16=0・raw_adc=0**（2/2）——advisorが予測した
+  とおり，実施26のような「pre-init時点で既に非ゼロ」というシグナルは
+  出ない（stockが較正を一度も走らせていないため当然）。
+- **`esp_wifi_init`後にdone16が1へ遷移し，raw_adcが非ゼロの生きた値へ**
+  （2/2，試行間で`0x0a520a4c`→`0x0a580a5a`と変動）——これは**ASP3自身の
+  `esp_wifi_init`が呼んだ較正チェーンが成立した**ことを示す，実施27と
+  同型のシグネチャ。
+- **scanが実際に完走**（`20 APs found`→`RESCAN 24/25 APs`，SSID/RSSI/
+  chまで正常出力，2/2）——実施27はここでCLIC mil凍結によりscan未達
+  だったが，実施28の修正が入った今回のゲストではその壁も無い。
+  実施26/27を上回る「最も強い形」の完走。
+
+### 3. 判定：**A（ブート列側）が確定**——B（PHY較正/WiFi実行の残留）はこの実験で明確に反証
+
+事前固定基準に照らし，本実験は「完走する」側にきれいに倒れた。しかも
+stockは`nvs_flash_init`すら呼んでおらず，`esp_wifi_init`／`esp_phy_enable`／
+scanのいずれのコードパスにも一度も入っていない
+（`g_osi_funcs_p=0x00000000`が直接証拠）。**したがって実施26/27で観測された
+「鍵の状態」は，stockのPHY較正やWiFi runtime実行が作ったものではあり得ない**
+——鍵は，stockの**ESP-IDF標準ブート列**（2nd-stageブートローダ→
+`call_start_cpu0`→`esp_system_init`等，`app_main`に到達するまでの経路）に
+確立されている，という結論になる。Codex round2の候補リストでいえば
+「候補1：stockのPHY較正そのものが作った保持状態」は明確に反証され，
+「候補6：PMP/cache/MMU/CPU startup状態」または「候補2〜4のクロック/PMU/
+電源系のブート時一回性シーケンス」のいずれか（＋実施26で機構的に必要
+だった`CONFIG_ESP_SYSTEM_MEMPROT=n`によるPMP解除自体も含む）が生きた
+候補として残る。
+
+advisorガード(2)（機構失敗と較正失敗の区別）：本実験ではバナー・
+`wifi_diag`周期タスク・`esp_wifi_init`到達に加えてscan完走まで確認できた
+ため，「機構は完全に動作した」ことに疑問の余地はない。advisorガード(3)
+（B1/B2分離）は，Aが確定した以上そもそも該当しない（B自体が起きて
+いないので「stockが確立してASP3が壊した」という分岐は発生しない）。
+
+**厳密には**，本実験が比較しているのは「ESP-IDF標準ブート列＋ハンドオフ
+操作（割込みマスク／ROM-ifポインタ域ゼロクリア／MMU unmap-remap／cache
+invalidate）」対「ASP3 Direct Boot」であり，ハンドオフ操作自体も一種の
+共変量である。ただしこれらの操作はいずれもMODEM/PMU/PHYアナログ域に一切
+触れない（レジスタ書込み先はSRAM上のROM-ifポインタ領域とMMU/cache HAL
+のみ）ため，「鍵となる状態」の発生源としては妥当性が低い。かつ，この
+ハンドオフ機構自体は実施26/27/29を通じて完全に同一であり，次段の
+`ESP_SYSTEM_INIT_FN`二分探索でも変更しない予定——共変量として固定され
+続けるため，二分探索の結果はブート列側の中で局所化できる。
+
+### 4. ハンドオフ直前スナップショット（JTAG、次段の差分解析用）
+
+当初`asp3_jump_now`エントリ（`0x408027d2`）にHW breakpointを張る方式で
+試みたが，**RTSリセット→USB-JTAG再列挙検出→OpenOCD attachのレース**が
+実際の起動時間（app_main到達〜ジャンプまで約260ms）より遅く，1回目の
+試行はbreakpoint未着火（`NO-HIT`，機構問題として記録・破棄）。原因は
+実測で確認：早期halt時点で既にPC`0x42027946`——ASP3ゲストのflash
+マッピング域に入っており、素のheadjumpビルドでは間に合わないと判明。
+
+対策として，**スナップショット採取専用**の別ビルド`stock_headjump_snap`
+（`scan.c`にジャンプ直前3秒のbusy-wait`esp_rom_delay_us(3000000)`を追加，
+判定結果には無関係）を作成し，同じbreakpointで2回採取に成功
+（`r29_snapshot_boot1/2.dump.txt`，MODEM0(SYSCON/LPCON域含む)/MODEM1/
+MODEM_PWR0/PCR/PMU_HP_LP/LP_CLKRST/LP_AON/LP_I2C_ANA_MST/LPPERI/LP_ANA/
+PVT_MONITORの11ブロック）。2試行間の差分は`LP_AON`のRTCカウンタ・
+`LPPERI`のノイズ源・`PVT_MONITOR`の温度/電圧系動的読み値のみ（想定内の
+生きた値のばらつき，構造的な差ではない）——安定した採取手法として
+確立した。この2試行分が「stock ESP-IDF標準ブート列完了時点」の
+スナップショットであり，**scan完走後ハンドオフ時点の同リスト
+（実施26/27では時間の都合で見送られ，まだ存在しない）と将来比較する
+ための最初の材料**となる。
+
+**次段への注意（一貫性）**：本スナップショットは「`asp3_jump_now`
+エントリでbreakpoint」かつ「ジャンプ前3秒delay付き」という条件で採取した。
+将来，scan完走後ハンドオフ時点のスナップショットと比較する際は，
+**同じ採取点（asp3_jump_now直前）・同等のタイミング条件**で採る必要がある
+——そうしないと，RTC/PVT/ノイズのドリフト（今回既に確認した唯一の
+ブート間差分）と3秒delayのオフセットが，構造的な差と誤認される恐れが
+ある。
+
+### 5. 追加の安価な対照
+
+Aが明確に確定したため，Codexの「B側の残留試験」（stock scan完走→
+`esp_wifi_stop`/`esp_wifi_deinit`/`esp_phy_disable`後にハンドオフ）は
+本ラウンドでは実施していない——これはB（PHY残留）を疑う場合の対照
+であり，本ラウンドの結果はB自体を明確に反証しているため優先度が
+下がったと判断した。
+
+Codexの「bootloader完了直後（appの`call_start_cpu0`前）でのハンドオフ」
+（二分探索の設計2）は，実装が重い（2nd-stage bootloaderのソース改造・
+別のジャンプ機構が必要）ため，本ラウンドでは**設計メモのみ**に留める：
+- 次段の二分探索は「bootloaderそのもの」と「app側`call_start_cpu0`/
+  `esp_system_init`」を切り分けることが情報量最大——Codexの二分探索案
+  どおり，`ESP_SYSTEM_INIT_FN`のinit levelでの挿入（アセンブリを触るより
+  安全）を優先する。
+- 具体的には，`components/esp_system/startup.c`の`esp_system_init_fn`群
+  （`clk.c:esp_clk_init`／`pmu_init.c:pmu_hp_system_init`・
+  `pmu_lp_system_init`／`esp_rtc_init`等，Codex回答の候補2〜4と対応）の
+  前後にハンドオフ呼出し点を段階的に増やしていく設計が有力。
+- **切る順序**：まず**app側で最も早い時点**（`esp_clk_init`／`pmu`系／
+  `esp_rtc_init`のいずれよりも前，`esp_system_init_fn`群の先頭）で
+  ハンドオフして本ラウンドと同じくPASSするか確認する。もしそこでも
+  PASSするなら，鍵は2nd-stageブートローダまたはROM側にあると判明し，
+  その時点で初めて（コストの高い）bootloader完了直後ハンドオフが必要に
+  なる。もしFAILするなら，鍵はapp側startup（`esp_clk_init`〜
+  `esp_system_init`完了の間）に存在すると判明し，そのまま
+  `esp_system_init_fn`群の間で二分探索を続行する——安価な切り分けを
+  先に行うことで，重い実験（bootloader改造）が必要になるケースを
+  最小化する。
+- 本ラウンドの結果により「PHY較正済み状態」という誤った先入観を排除
+  できたため，次段はブート列側だけに絞って安全に二分探索を進められる。
+
+### 6. C5#1最終状態（終了処理）
+
+- ベースライン再確認（1回）：`build/c5_idf61_uart`（実施28修正込み，
+  本ラウンド開始時点の現flashと同一ビルド）をフル4MB@0x0へ書込み，
+  RTSリセット後UARTキャプチャで`raw_adc=0x00000000 done16=0`・
+  `rst:0x12 (RTC_SWDT_SYS)`によるSWDT周期リセットを確認——実施28終了時
+  点の症状と完全一致，退行なし（本ラウンドは時間の都合上メイン実験の
+  後に実施したが，同一ビルドでの再確認のため有効性に影響しない）。
+- 本ラウンド終了処理として同じ`build/c5_idf61_uart/asp_flash.bin`を
+  フル4MB@0x0へ再書込み（0x200000のゲスト残置・stock_headjump系は
+  全て消去），最終確認1回：バナー正常・`raw_adc=0x00000000 done16=0`・
+  較正ハングの標準症状を再確認。
+- C5#2：物理切断のまま未接触。C6 board C（`14:C1:9F:E0:5A:9C`）・
+  UARTブリッジ`125a266b...`：`/dev/serial/by-id`一覧での識別以外
+  未接触（DUTブリッジ`b04e3bcf...`=ttyUSB0を毎回by-id照合して使用）。
+
+### 変更ファイル
+
+- `docs/c5-bringup.md`：本節（実施29）追加。
+- リポジトリ内ソース変更：**無し**（arch/target/appとも無改造。実施26/27/28
+  の資産をそのまま流用）。
+- スクラッチ（リポジトリ外）：`stock_headjump/`（新規，`stock_scan/`の
+  複製＋`main/scan.c`をapp_main先頭ジャンプへ書換え）・
+  `stock_headjump_snap/`（新規，スナップショット採取専用，3秒delay追加）・
+  `r29_guest_640k.bin`（`build/c5_idf61_uart/asp_flash.bin`から640KB切詰め）・
+  `r29_snapshot.py`（新規，JTAGスナップショット採取ハーネス，r21_capture.py
+  流用）・`r29_headjump_trial1/2.log`・`r29_snapshot_boot1/2.dump.txt`・
+  `r29_baseline_recheck.log`・`r29_final_state_console.log`ほか
+  `r29_*.log`一式。
+- git commitは行っていない（指示どおり）。
