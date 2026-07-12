@@ -99,6 +99,8 @@
  */
 #define ESP32C5_INTMTX_BASE     0x60010000  /* 割込みマトリクス（ソースルーティング．C6と同一） */
 #define ESP32C5_CLIC_BASE       0x20800000  /* CLICグローバル設定（NLBITS・INFO・THRESH等） */
+#define ESP32C5_CLIC_INT_CONFIG (ESP32C5_CLIC_BASE + 0x0)  /* mnlbits等．冷間ブート実測0x6（mnlbits=3．ROM/HW設定）．0への正規化はmil固着凍結を解消せず撤回済み＝書き替えない（実施27） */
+#define ESP32C5_CLIC_INT_THRESH (ESP32C5_CLIC_BASE + 0x8)  /* メモリマップト側threshold（実測0．未使用＝mintthresh CSRを使用） */
 #define ESP32C5_CLIC_CTRL_BASE  0x20801000  /* CLIC per-line制御（CLIC_INT_CTRL_REG(i)=BASE+4i） */
 #define ESP32C5_SYSTIMER_BASE   0x6000A000  /* システムタイマ（C6と同一） */
 #define ESP32C5_USBJTAG_BASE    0x6000F000  /* USB Serial/JTAGコントローラ（C6と同一） */
