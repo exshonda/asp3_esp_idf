@@ -4824,3 +4824,182 @@ mintthresh/mintstatusのOpenOCD読み出し法（`reg mintthresh`／
   プリント＋ROM-ifポインタ領域ゼロ化を追加・再ビルド）、`r27_*`一式
   （ログ・ダンプ・スクリプト）。
 - git commitは行っていない（指示どおり）。
+
+---
+
+## 実施28：mret非経由の割込み出口経路を割込みリング計装で実測特定（2/2）——凍結＝「最初のwake-from-idleでのdispatch_r復帰」と確定し，irc_begin_intのsynthetic mretによるmil即時降格を恒久実装。**凍結は完全解消（hrtcnt進行・全割込み配送継続・test_porting 6/6維持）**。しかし**較正ハング（トーンADCゼロ）は凍結と独立に残存**＝実施27の「凍結が較正ハングの真因」仮説は反証——scanは未達のまま，探索はRF/ブート時確立状態の線へ回帰
+
+### 背景・目的
+
+実施27の申し送り：(1) mret非経由の割込み出口経路をコード読解＋実測で特定，
+(2) 全出口でのmil降格を保証する修正をarch層（`asp3/arch/riscv_gcc/esp32c5/`，
+本リポジトリ側＝編集可）に実装，(3) 決定実験＝修正後の冷間ブートで
+(i)72ms凍結の消滅・(ii)PHY較正の完走・(iii)scan到達，(4) `test_porting`
+6/6回帰維持，(5) C6への波及所見。
+
+### 1. コード読解：mret非経由出口の列挙（asp3_core共通部，読み取りのみ）
+
+`arch/riscv_gcc/common/core_support.S`の割込み出口は`irc_end_int`通過後に
+3分岐し，うち2つがmret非経由：
+
+1. **idle復帰**：nest→0かつ`p_runtsk==NULL`→割込みフレーム破棄→
+   `j dispatcher_0`（L556）。dispatcher_0で`p_schedtsk`があれば
+   `jr TCB_pc`で切替先タスクへ。
+2. **遅延ディスパッチ**：`core_int_entry_3`（`p_runtsk≠p_schedtsk`）→
+   コンテキスト保存→`j dispatcher`→切替先の`TCB_pc`へ`jr`。切替先の
+   再開番地が`ret_int_r`（割込みでプリエンプトされたタスク）なら最終的に
+   `core_int_entry_4`→mretへ合流するが，**`dispatch_r`（自発的に待ちに
+   入ったタスク）と`start_r`（新規起動タスク）はmretを一度も経由しない**。
+3. `core_int_entry_4/5`→mret（これだけがmilを降格できる経路）。
+
+CPU例外側（`core_exc_entry`）にも同型の分岐があるが，CLICは例外では
+milを昇格しない（水平トラップ）ため対象外。
+
+### 2. 実測特定：割込みリング計装（arch層のみ，`ESP32C5_CLIC_DEBUG_RING`）
+
+`irc_begin_int`/`irc_end_int`に32エントリ×8ワードのリング記録を追加
+（既定無効の恒久診断としてリポジトリに残置）。begin側=
+{mcause（exccode=CLIC線番号，**MPIL[23:16]=受付直前のmil**＝直前の割込みの
+出口後のmil値），mepc，mintstatus，hrtcnt}，end側={exit分岐を決定づける
+入力＝excpt_nest_count・p_runtsk・p_schedtsk・p_schedtsk->TCB_pc}。
+例外経路はカウンタのみ（c5dbg_exc_count）。回収は
+`r28_ringdump.py`（スクラッチ，r21ハーネス利用：RTSリセット→attach→
+SWD無効化burst→自由走行→halt→mdw回収）。
+
+**結果（wifi_scan冷間ブート，独立2ブートで全記録が同一＝2/2）**：
+
+- seq189〜219：INTNO17（**UARTコンソール割込み**，`INTNO_SIO`）が実行中
+  タスクに命中（prun==psch）→mret出口。**全エントリでMPIL=0x00＝mretは
+  毎回milを正しく降格していた**。
+- **seq220（最後の割込み・以後永久に配送なし）**：INTNO16（SYSTIMER，
+  CLIC線32）が**idleループに命中**（mepc=dispatcher idle，p_runtsk=NULL，
+  hrt=0x11a23≒72ms）。ハンドラがタスクを起床（p_schedtsk=0x4083e348）→
+  出口=`j dispatcher_0`→`jr TCB_pc=dispatch_r`＝**mret非経由**→
+  mil=0x5f固着。以後idx・hrtcnt完全凍結（3秒後も不変），
+  csr_mintstatus=0x5f000000をJTAG実測。
+- c5dbg_exc_count=0＝例外経路は一切通っていない（見えない経路なし）。
+
+**★「72ms」の正体**＝wifi_scanブートで**最初に発生するwake-from-idle**。
+それ以前の割込み（UART TX等）は全て実行中タスクへのmret復帰のため無害
+だった。
+
+**★test_porting 6/6が凍結を検出できなかった理由も同時に確定**：
+`test/porting/test_porting.c`は項目2/6がビジーポーリング（割込みは実行中
+タスクに命中→prun==psch→mret出口），項目3〜5のディスパッチはタスク
+コンテキストからの`dispatch()`（割込み出口ではない＝mil昇格なし）。
+**「割込みからの遅延ディスパッチ／wake-from-idle」を構造的に一度も
+通らない**ため，このバグと共存して全項目PASSする。
+
+### 3. 恒久修正：irc_begin_intでのsynthetic mretによるmil即時降格
+
+`asp3/arch/riscv_gcc/esp32c5/chip_support.S`の`irc_begin_int`で，
+mintthresh昇格の直後に：
+
+```
+la   t1, irc_begin_int_demote
+csrw mepc, t1
+li   t1, MSTATUS_MPIE
+csrc mstatus, t1       /* MPIE=0：mret後もMIE=0（CPUロック相当）を維持 */
+mret                   /* mil ← mcause.MPIL（受付前レベル）へ降格 */
+irc_begin_int_demote:
+```
+
+- **設計**：milを受付前レベル（HWが受付時にmcause.MPILへ保存済み，
+  無変更で使用）へ即時降格。以後どの出口を通ってもmilは残らない。
+  同一優先度以下のブロックは直前に昇格したmintthreshが担う（C6の
+  PLIC_MX threshと同一意味論）＝milとmintthreshの二重マスクの解消。
+- **整合性**（詳細はコード内コメント）：mepcは共通部が入口で保存済みの
+  ため破壊可。MIE=0維持のため事前にMPIEクリア（MPIEは次トラップ受付時に
+  HWがMIEから再設定するため副作用なし）。この区間はMIE=0でプリエンプト
+  不可＝mcause/mepcは書き換わらない。多重割込みは各入口で同様に降格され
+  整合。出口の正規mret（core_int_entry_5）が読むmcause.MPILも本方式では
+  常にベースレベル＝一貫。
+- 例外経路（irc_begin_exc）は変更なし（例外はmilを昇格しないため）。
+
+### 4. 回帰確認：test_porting 実機 `# 6/6 passed`（修正込み）
+
+`build/c5_r28_tp`（usbjtagコンソール＝実施03と同構成，
+`-DASP3_EXTRA_APP_C_FILES=test/porting/tap.c`）。独立2試行（キャプチャ内の
+再ブート分を含め計7ブート）**全て `# 6/6 passed`**＝回帰なし。
+
+### 5. 決定実験（wifi_scan冷間ブート，`build/c5_idf61_uart`＝従来症状の標準ビルドを修正込みで再ビルド）
+
+- **(i) 72ms凍結の消滅：PASS（2/2）**。JTAGで`_kernel_current_hrtcnt`が
+  3.0秒の壁時計に対し**ちょうど+3,000,000μs進行**（2試行とも），
+  mintstatus=0x00000000（mil=0）。リング計装ビルドでの長時間観測でも
+  85秒以上hrtcnt進行・割込み1800回超を継続配送（凍結前は221回で停止）。
+  UART上も従来未達だった`esp_shim: task 'wifi' -> tskid 1`・
+  `wifi driver task: ...`（wifiドライバタスクの起動）まで**全ブートで
+  到達**（修正前は実施27最終確認9ブート＋本ラウンド3ブートで出現0回）。
+  タスクプリエンプションが効き始めたことによるログの並行交錯も出現。
+- **(ii) PHY較正の完走：FAIL**。生ADC（MODEM0+0x81C）=0x00000000・
+  done16=0のまま（SWD無効化下で100秒観測しても不変）。ハング位置は
+  `phy_iq_est_enable_new`のdoneビット待ち（`esp_shim_time_us`ポーリング）
+  ＝既知の壁と同一。SWDT（rst:0x12）サイクルも継続。
+- **(iii) scan到達：未達**（(ii)がブロック）。
+
+**判定**：mil固着凍結はASP3/C5ポートの実在の致命バグであり修正は必要
+条件だったが，**トーンADCゼロ（較正ハング）の原因ではなかった**——
+実施27の最優先仮説「凍結が較正ハングの真因」は**反証**。実施26/27の
+判別実験の結論（「stockブートが確立するソフト到達可能な状態」がASP3冷間
+ブートに欠けている）が探索対象として復活する。ただし凍結解消により，
+(a)較正チェーンはwifiドライバタスク上で正常なタスク/割込み環境の下で
+走るようになった，(b)今後のあらゆる実験から「割込み死」という巨大な交絡
+が除去された，という点で探索基盤は大きく改善した。
+
+### 6. C6への所見（申し送り）
+
+- **C6は本バグ非該当**。C6の優先度マスクはPLIC_MXのTHRESHメモリマップト
+  レジスタへのlw/swによる完全ソフトウェア方式（irc_begin_int/irc_end_int
+  で保存・昇格・復元）であり，**CLICのmilに相当する「mret以外で降格
+  できないハードウェア状態」が存在しない**。mret非経由出口はC6にも同様に
+  あるが，マスク復元はirc_end_int（全出口共通）で完了し，MIE再許可も
+  dispatcher_2/start_r/dispatch()呼出し元のunlockが行うため取り残しは
+  ない。C6の割込みが〜140/s発火し続けていた観測とも整合。deaf-RXとは
+  無関係。
+- 逆に**CLIC搭載チップ（C5・C61・H4・P4等）へ今後ポートする場合は本修正
+  （または全出口mret化）が必須**。TOPPERSのRISC-V共通部を使う限り
+  同型バグが必ず発生する。
+
+### 7. C5#1最終状態（終了処理）
+
+- **flash＝`build/c5_idf61_uart`（修正込み・リング計装なし・uart0
+  コンソール）フル4MB@0x0**。最終確認ブート（RTSリセット，30秒）：
+  バナー→wifi task起動→較正ハング（raw_adc=0）→SWDTサイクル，の
+  修正後標準症状を確認。0x200000域はフル4MBイメージにより消去状態。
+- C5#2：物理切断のまま未接触。C6 board C（`14:C1:9F:E0:5A:9C`＝ttyACM0）
+  ・UARTブリッジ`125a266b...`（=ttyUSB1）：`/dev/serial/by-id`一覧と
+  udevadmでの識別以外未接触（DUTブリッジ`b04e3bcf...`=ttyUSB0を毎回
+  by-id照合して使用）。
+
+### 8. 次ラウンドへの申し送り
+
+1. 探索は実施26/27の「stockブートが確立するソフト到達可能な状態」の
+   絞り込みへ回帰する（実施26申し送り3：stock完走直後 vs ジャンプ直後の
+   2点JTAGスナップショット差分が本命）。ただし今後は凍結交絡なしで，
+   ASP3上でdly_tsk等も正常動作する環境で実験できる。
+2. `ESP32C5_CLIC_DEBUG_RING`（`ASP3_EXTRA_COMPILE_DEFS`で有効化）と
+   `r28_ringdump.py`/`r28_hrtcheck.py`（スクラッチ）は割込み配送問題の
+   汎用診断として再利用可能。
+3. SWDT（rst:0x12，約8秒周期）が較正ハング中に発火し続ける件は未解決の
+   別問題（ASP3はWDT無効化しているはずだが，wifi経路で再有効化されて
+   いる可能性）。JTAG実験時はr21ハーネスのSWD無効化burstで回避できる。
+4. test_portingは「割込みからの遅延ディスパッチ／wake-from-idle」を
+   検出できない（§2）。移植検証テストとしてこの経路を踏む項目（例：
+   dly_tsk待ちからのタイマ起床）の追加はasp3_core側の改善候補として
+   申し送り（本リポジトリからは編集不可）。
+
+### 変更ファイル
+
+- `asp3/arch/riscv_gcc/esp32c5/chip_support.S`：irc_begin_intへの
+  synthetic mret（恒久修正）＋リング診断（`ESP32C5_CLIC_DEBUG_RING`，
+  既定無効）＋冒頭コメントを実施28の確定事実へ更新。
+- `asp3/arch/riscv_gcc/esp32c5/chip_kernel_impl.c`：リング診断バッファ
+  定義（既定無効）＋clic_initialize()の知見コメント更新。
+- `docs/c5-bringup.md`：本節（実施28）追加。
+- ビルド：`build/c5_r28_ring`（wifi_scan+リング計装），`build/c5_r28_tp`
+  （test_porting回帰），`build/c5_idf61_uart`（標準ビルド再ビルド＝最終
+  flash内容）。
+- スクラッチ（リポジトリ外）：`r28_ringdump.py`・`r28_hrtcheck.py`・
+  `r28_acm_capture.py`・`r28_*.log`/`.ring.txt`一式。
+- git commitは行っていない（指示どおり）。

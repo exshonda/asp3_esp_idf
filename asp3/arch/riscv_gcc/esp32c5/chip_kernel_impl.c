@@ -36,6 +36,20 @@
 uint32_t intmtx_srcmask[32][3];
 uint8_t intmtx_from_cpu[32];
 
+#ifdef ESP32C5_CLIC_DEBUG_RING
+/*
+ *  【診断用（既定無効）．実施28で追加】割込み受付/出口のリングバッファ
+ *  （chip_support.Sのirc_begin_int/irc_end_intが記録する．
+ *  ASP3_EXTRA_COMPILE_DEFS=ESP32C5_CLIC_DEBUG_RINGで有効化し，
+ *  JTAGで回収して解析する）
+ *  1エントリ8ワード：{mcause, mepc, mintstatus, hrtcnt,
+ *                     nest(デクリメント前), p_runtsk, p_schedtsk, schedtsk->pc}
+ */
+volatile uint32_t c5dbg_idx;
+uint32_t c5dbg_ring[32 * 8];
+volatile uint32_t c5dbg_exc_count;   /* irc_begin_excの通過回数 */
+#endif /* ESP32C5_CLIC_DEBUG_RING */
+
 /*
  *  ペリフェラル割込みソースのCPU割込み線への割り当て
  *
@@ -133,11 +147,12 @@ clic_initialize(void)
 	 *  をCTLバイト由来レベル（本ポート符号化では0x5f）へ自動昇格し，
 	 *  これはmret（mcause.MPILからの復元）でしか降格しないことを実機
 	 *  JTAGで確認済み（chip_support.S冒頭コメント参照）．mretを経由
-	 *  しない割込み出口経路があるとmilが昇格したまま固着し，同レベル
-	 *  以下＝本ポートの全割込みが永久ブロックされる（カーネル時刻凍結）．
-	 *  実施27時点でこの凍結が冷間ブートでも起動後約72msで発生している
-	 *  ことが実測されており（詳細と対策候補はdocs/c5-bringup.md実施27），
-	 *  対策は本関数ではなく割込み出口側で行う必要がある．
+	 *  しない割込み出口経路（core_support.Sのidle復帰・遅延ディスパッチ）
+	 *  を通るとmilが昇格したまま固着し，同レベル以下＝本ポートの全割込み
+	 *  が永久ブロックされる（カーネル時刻凍結）．実施28でこの凍結経路を
+	 *  実測特定し，対策としてirc_begin_int（chip_support.S）にsynthetic
+	 *  mretによるmilの即時降格を実装した（詳細はdocs/c5-bringup.md
+	 *  実施27/28）．
 	 */
 }
 
