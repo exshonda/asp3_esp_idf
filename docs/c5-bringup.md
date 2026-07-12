@@ -3563,3 +3563,300 @@ LP_ANA・LPPERIの表面上の差分（機序上無関係と机上棄却）。
 因果関係なし」という結果になっている事実は，「デジタル制御系は健全・アナログ
 測定だけ死ぬ」という統一像を追加で6ラウンド分補強しており，残された説明領域が
 着実に狭まっていることは記録しておく。
+
+---
+
+## 実施23：関数単位の加算移植A/B（`pmu_hp_system_init()`残余・`pmu_lp_system_init()`）——**新規差分4件を発見・すべて実行確認込みで因果棄却**（BBPLL/BB-I2Cアナログ電源`HP_ACTIVE.CK_POWER`／SYSCLK ICG＋retention／LP_ACTIVEレギュレータ＋LP_SLEEPバンク）。**`PMU_POWER_PD_TOP/HPAON/HPCPU/LPPERI_CNTL`のforce解除は，このタイミング（WiFi init時点の後付け移植）で書くとJTAG捕捉のブート到達性が悪化する現象を発見・「悪化したら即revert」方針に従い反転・未検証のまま保留**。`esp_ocode_calib_init()`（bandgap o-code較正，`esp_rtc_init()`の内容の一部）は差分自体を確定した（stockはeFuse値でforce／ASP3は未forceのままHW自動較正）が，ASP3のOCODE実測値が妥当で基準電圧回路自体は生きているため機序的には弱い候補と評価・因果検証は実装コスト（ROM regi2cパッチのリンクが必要）を理由に未着手。**分岐計画ケース2の(2)は「主要項目は尽くしたが完全ではない」状態で終了——C6-generic結論はユーザー判断に委ねる**
+
+コーディネータ指示＝`docs/c5-tone-adc-plan.md`「分岐計画」ケース2(2)：`pmu_hp_system_init()`の
+digital/clock/retentionパラメータ・`pmu_lp_system_init()`・`esp_rtc_init()`のうち実施21/22で
+扱っていない部分を関数単位で段階的に加算移植しA/B判定する回。本ラウンドもC5#1
+（`D0:CF:13:F0:A7:44`，ttyACM0／UARTブリッジttyUSB0）のみ使用。C5#2は物理切断済みで
+一切未接触。
+
+### 0. 事前準備：レジスタレベルでの静的分析
+
+`pmu_hp_system_init()`（`hal/components/esp_hw_support/port/esp32c5/pmu_init.c`）は
+`hp_sys[mode]`（HP_ACTIVE/HP_MODEM/HP_SLEEPの3バンク，各`0x600B0000`+`0x34`*mode）へ
+dig_power/icg_func/icg_apb/icg_modem/sys_cntl/clk_power/bias/backup/backup_clk/
+sysclk/regulator0/regulator1/xtalの13レジスタを書く。`pmu_lp_system_init()`は
+`lp_sys[mode]`（LP_ACTIVE=`0x600B009C`域・LP_SLEEP=`0x600B00B4`域）へ書く。
+`pmu_power_domain_force_default()`（`pmu_init()`内，実施22で1/4ドメインのみ移植済み）は
+`PMU_POWER_PD_{TOP,HPAON,HPCPU,WIFI}_CNTL`＋LP側forceを解除する。`esp_rtc_init()`
+（`hal/components/esp_system/port/soc/esp32c5/clk.c:52`）は**`pmu_init()`を呼ぶだけ**
+（`#if !CONFIG_IDF_ENV_FPGA`）であり，独自の内容を持たない——つまり実施23の対象3関数の
+うち`esp_rtc_init()`は実質`pmu_hp_system_init()`＋`pmu_lp_system_init()`＋
+`pmu_power_domain_force_default()`＋`esp_ocode_calib_init()`＋PVT（実施21で既済）に
+帰着することを確認した（C6実施34で棄却された「esp_rtc_init独自の処理」に相当するものは
+C5には存在しない）。
+
+Direct Bootは起動以来一貫してHP_ACTIVE（かつLP_ACTIVE）モードのままで，light-sleep等の
+電源モード遷移を一度も経験しない。したがって**HP_MODEM/HP_SLEEP/LP_SLEEPバンクの値は
+「現在は参照されない休止中の設定」**であり，PHYトーン測定チェーンには機序的に無関係と
+判断した——これは本ラウンドの明示的な**意識的スコープ判断**であり（コーディネータ指示に
+「HP_SLEEP/HP_MODEM状態バンクがあればそれも」と明記されていたことは認識している），
+LP_SLEEPバンクを実際に移植・実行確認した上で症状不変だったこと（3節）を同種バンクの
+経験的裏付けとして使う。ユーザーが必要と判断すればHP_MODEM/HP_SLEEPバンクも同様の
+手順で移植・検証できる（未実施）。
+
+### 1. JTAG全域ダンプ：HP_ACTIVE/HP_MODEM/HP_SLEEP/LP_ACTIVE/LP_SLEEP全72ワード
+
+`r23_pmu_full_dump.py`（実施22の`r22_dump.py`と同じ「単発遅延一撃」方式，`0x600B0000`
+から72ワード＝`0x120`バイトを一括ダンプ）で，stock×2（`--stock-attach`，安定）・
+ASP3×2（`--asp3-late 9.9`，独立クリーンブート）を採取。ASP3は2ブートとも1回目の
+試行で成功し内部一致（37レジスタ同一・35レジスタ差分），stockも2ブート内部一致。
+
+差分35件のうち，HP_MODEM/HP_SLEEPバンク（意識的に対象外，0節）を除いた**現在
+「生きている」HP_ACTIVE/LP_ACTIVEバンクの新規差分**：
+
+| offset | レジスタ | ASP3 | stock | 判定 |
+|---|---|---|---|---|
+| `+0x14` | `HP_ACTIVE.HP_CK_POWER` | `0x00000000` | `0x70000000` | **新規**（xpd_bb_i2c/xpd_bbpll_i2c/xpd_bbpll全OFF vs 全ON） |
+| `+0x1c` | `HP_ACTIVE.BACKUP`（retention） | `0x00000000` | `0x010200a0` | **新規**（HP_MODEM/SLEEPと同種＝未遷移のため不活性と推定） |
+| `+0x20` | `HP_ACTIVE.BACKUP_CLK` | `0x00000000` | `0xffffffff` | **新規**（同上） |
+| `+0x24` | `HP_ACTIVE.SYSCLK`（icg_sysclk_en） | `0x00000000` | `0x08000000` | **新規** |
+| `+0x28` | `HP_ACTIVE.HP_REGULATOR0` | `0xc667bff0` | `0xc004afd0` | 既知（実施21 PVT軸，因果棄却済み） |
+| `+0x9c` | `LP_ACTIVE.REGULATOR0` | `0xc6600000` | `0xe8400000` | **新規**（LP側dbias，HP側PVT軸のLP版だが未検証） |
+| `+0xb4/bc/c4/c8` | `LP_SLEEP`バンク4語 | 相違 | 相違 | **新規**（意識的スコープ判断＝0節，休止中設定と推定） |
+| `+0xf8/fc/100` | `PD_TOP/HPAON/HPCPU_CNTL` | `0x1c`（POR既定） | `0x00000000` | **新規**（実施22のPD_HPWIFIと同型，未移植3ドメイン） |
+| `+0x10c` | `PD_LPPERI_CNTL` | `0x1c` | `0x00000000` | **新規**（同関数のLP側force解除） |
+
+（HP_ACTIVE.DIG_POWER/ICG_FUNC/ICG_APB/ICG_MODEM/SYS_CNTL/REGULATOR1/XTALは
+両platform一致——実施13/21/22の既存移植・POR既定で説明済み。生データは
+`r23_asp3_full_try1.dump.txt`／`r23_stock_full1.dump.txt`ほか。）
+
+`HP_ACTIVE.HP_CK_POWER`が最優先候補と判断した：BBPLL（ベースバンドPLL）とBB I2C
+（ベースバンド内蔵I2Cバス）はトーン測定が使うBB内部ADCと同じアナログ/BB領域に属し，
+実施11〜22で見つかったどの差分よりもRF/BB機序への近さが高い。
+
+### 2. 単体因果検証(1)：`HP_ACTIVE.HP_CK_POWER`（BBPLL/BB-I2Cアナログ電源）——**因果棄却**
+
+`esp_shim_hpactive_ckpower_init()`を新設し，`esp_shim_pvt_init()`/
+`esp_shim_hpactive_bias_init()`と同じ呼出し点（`wifi_clock_enable_wrapper()`，
+PHY較正より前・一度きり）で`PMU_HP_ACTIVE_HP_CK_POWER`(`0x600B0014`)=`0x70000000`
+（stock実測値）を書込む形で移植した。
+
+実機検証（独立2ブート，「単発遅延一撃」方式`+9.9s`）：
+- **実行確認**：ハングループ内到達後の読み戻しで`0x70000000`＝stock実測値と完全一致
+  （2ブートとも）。
+- **観測**（30秒・20秒）：PCはハングループ内（`phy_get_pkdet_data`/
+  `phy_iq_est_enable_new`域）を巡回，IQ_DONE(`0x600a047c`)=0，
+  生ADC(`0x600a081c`)=全ゼロのまま——**症状不変**。
+
+advisorレビューでの指摘どおり，ASP3は既にトーン測定フェーズに到達している＝
+BBPLLは何らかの別経路（`rtc_clk`/CPUクロック設定側）で既に起動済みであり，
+本レジスタの値はマスクされている可能性が高い（この解釈は事後の推測であり
+追加検証はしていない）。**候補として因果棄却**。
+
+### 3. まとめ移植(2)：SYSCLK/BACKUP/BACKUP_CLK＋PD_TOP/HPAON/HPCPU/LPPERI force解除——**前半は因果棄却，後半はブート到達性の悪化を検出し即revert（未検証のまま保留）**
+
+残り6レジスタは個別に単体因果検証するほどの機序的優先度が無い（BACKUP系は
+未遷移モード専用，SYSCLKは実施13のicg_modemと同系統，PD_*は実施22で因果棄却済みの
+PD_HPWIFIと同型）と判断し，`esp_shim_hpactive_residual2_init()`として1関数分＝
+1回のA/Bにまとめた（`docs/c5-tone-adc-plan.md`の「関数単位」の粒度に対応）。
+
+初回ビルド（SYSCLK+BACKUP+BACKUP_CLK+PD_TOP+PD_HPAON+PD_HPCPU+PD_LPPERIを全て
+含む）をUARTで確認したところ，リブート周期（約3.6秒）に変化はなかった
+（`rst:0x12 (RTC_SWDT_SYS)`ループ継続，自然ブートレベルでの明白な悪化は無し）。
+しかし**「単発遅延一撃」JTAG捕捉法（+9.9s/+12s/+13s）が11回連続でPHYハングループ
+（`0x42026000`-`0x4202a000`）に到達できず，毎回`dispatcher_1`近傍
+（`0x420217xx`-`0x420218xx`）に着地する**という，それ以前のCK_POWER単体ビルドでは
+再現しなかった新しいパターンを検出した。
+
+**ビセクション**：`PD_TOP/HPAON/HPCPU/LPPERI`の4行を`#if 0`で無効化し，
+SYSCLK/BACKUP/BACKUP_CLKのみ残したビルドで再検証したところ，JTAG捕捉の成功率は
+元の「数回に1回成功」という基準的な頻度に復帰した（2回とも2〜3回目の試行で成功）。
+これにより**PD_TOP/HPAON/HPCPU/LPPERIの4行がJTAG捕捉の到達性悪化の原因**と特定した。
+
+- **SYSCLK/BACKUP/BACKUP_CLKのみ（実行確認込み，独立2ブート）**：読み戻しで
+  `SYSCLK=0x08000000`・`BACKUP=0x010200a0`・`BACKUP_CLK=0xffffffff`＝stock実測値と
+  完全一致。20秒観測でIQ_DONE=0・生ADC=0のまま——**症状不変（因果棄却）**。
+- **PD_TOP/HPAON/HPCPU/LPPERI（4行）**：「悪化したら即revertして記録」の方針に従い
+  `#if 0`のまま保留した。**因果検証は未実施**（この状態でPHYハングループに到達
+  できないため）。
+
+★重要な留保（rigor doc 6番目の教訓を踏まえた記述）：確立できたのは
+「PD_*が有効な状態→単発halt捕捉法で11/11失敗，無効化→通常の成功率に復帰」という
+**相関**のみである。UARTのWDTリブート周期（約3.6秒）はPD_*の有無で変化しなかった
+ため，**「PD_*がブートを真にハングさせる」とは断定していない**——確立したのは
+「このタイミング（WiFi init時点の後付け移植）でPD_*を書くと，単発halt捕捉法が
+PHYハングループを捕まえられなくなる」という事実のみで，真のハング／単なる
+捕捉タイミングのシフトのいずれかは切り分けていない。CPU/TOP電源ドメインという
+影響範囲の広さ（実施22で既に因果棄却済みのWIFIドメインより遥かにセンシティブ）から，
+安全側に倒してrevertした。
+
+### 4. `pmu_lp_system_init()`：LP_ACTIVE.REGULATOR0＋LP_SLEEPバンク——**因果棄却**
+
+`esp_shim_lpsystem_init()`を新設し，同じ呼出し点でLP_ACTIVE.REGULATOR0
+(`0x600B009C`)=`0xe8400000`・LP_SLEEPバンク4語(`0x600B00B4/BC/C4/C8`)=stock実測値を
+書込む形で移植した（CPU/TOP等の広域ドメイン制御を含まないプレーンR/Wのみである
+ことを確認した上で適用——3節の教訓を反映）。
+
+実機検証（独立2ブート）：
+- UART確認：リブート周期約3.6秒，変化なし。
+- **実行確認**：ハングループ内到達後の読み戻しで5レジスタ全てstock実測値と完全一致
+  （2ブートとも）。
+- **観測**（20秒・15秒）：IQ_DONE=0・生ADC=0のまま——**症状不変（因果棄却）**。
+
+### 5. `esp_ocode_calib_init()`（bandgap o-code較正）：差分は確定・機序的には弱い候補・因果検証は未着手
+
+0節のとおり`esp_rtc_init()`＝`pmu_init()`の残る未検証部分は
+`esp_ocode_calib_init()`（`hal/components/esp_hw_support/port/esp32c5/ocode_init.c`）
+のみである。`RESET_REASON_CHIP_POWER_ON`時にのみ実行され，本チップ（eFuse
+`chip_version==1`・`blk_version=3`，実施21で確認済み）は`set_ocode_by_efuse(1)`分岐
+（regi2cブロック`I2C_ULP`(`0x61`)の`EXT_CODE`(reg 6)にeFuse由来のocode値を書き，
+`IR_FORCE_CODE`(reg 5, bit6)を1にしてforce）を通る。bandgap基準電圧の較正値であり，
+「デジタル制御系は健全・アナログ測定精度だけ不正確／死ぬ」という統一像と機序的に
+高い整合性を持つ新規候補である。
+
+**未実装の理由**：`esp_rom_regi2c_write_mask`はC5では真のROM関数ではなく，
+`hal/components/esp_rom/patches/esp_rom_hp_regi2c_esp32c5.c`という一個のC実装
+（`regi2c_write_mask_impl`へのalias）であり，esp32c5用の`*.rom.api.ld`（他チップには
+存在するリンカスクリプトのROMシンボル別名定義）がesp32c5には存在しない＝この
+patchesファイル自体をASP3側のビルドにコンパイル対象として追加しない限り呼び出せない
+（`asp3/target/esp32c5_espidf/`のCMake変更が必要，本ラウンドの残り時間では
+構造変更として大きすぎると判断し見送った）。
+
+**簡易diff確認の試行**：正式実装の前段階として，I2C_ANA_MSTバス
+(`0x600AF800`域)を`esp_rom_hp_regi2c_esp32c5.c`の`regi2c_read_impl`と同じ手順で
+JTAGから直接`mww`/`mdw`でビットバンギングし，ASP3/stock双方の`I2C_ULP`
+reg_add=4/5/6（OCODE/IR_FORCE_CODE/EXT_CODE）を読む簡易スクリプト
+（`r23_ocode_regi2c_read.py`）を書いて試行した：
+- **ASP3側**（ハングループ内，独立2ブート）：`OCODE=0x65`/`0x68`（ブート毎に微差＝
+  HW自動較正のアナログノイズとして自然），`IR_FORCE_CODE=0x00`（force無効），
+  `EXT_CODE=0x80`（両ブートで再現）——3レジスタが**互いに異なる値**を返しており，
+  読み出しインデックスが正しく機能している内的整合性がある。
+- **stock側**（安定attach，独立2ブート）：reg_add=4/5/6の3レジスタが3回とも
+  全く同一のバイト値（`0xc2`）を返した。異なるサブレジスタが恒等に一致するのは
+  物理的に不自然で，このアドホックな読み出しプロトコル（CPUをhaltした状態での
+  手動バスビットバンギング）が，stockの他の同時進行中のregi2c状態と何らかの形で
+  干渉した結果のアーティファクトである可能性が高いと判断し，**stock側の実測値
+  そのもの（`0xc2`という数値）は信頼できないデータとして破棄する**。
+- **ただし，diffの有無自体は別経路で確定できる**：ASP3側の読み（信頼できる）で
+  `IR_FORCE_CODE=0x00`（force無効）が2ブートとも再現しており，一方stock側の
+  ソース（0節）は`set_ocode_by_efuse()`が`REGI2C_WRITE_MASK(I2C_ULP,
+  I2C_ULP_IR_FORCE_CODE, 1)`を無条件に実行する（本チップのeFuse条件
+  `chip_version==1 && blk_version>=1`は実施21で確認済みで成立）。かつASP3は
+  `pmu_init()`（＝`esp_ocode_calib_init()`を含む）自体を一切呼ばない構造的事実
+  （0節）と合わせれば，**「stockはIR_FORCE_CODE=1（eFuse値で強制），
+  ASP3はIR_FORCE_CODE=0（POR既定のまま，HW自動較正まかせ）」という差分は
+  ソースコードの論理から確定できる**——stock側の生JTAG読み値（`0xc2`）を
+  経由しなくても divergence 自体は確認済みとしてよい。**未確認なのは
+  この差分がADCハードゼロの症状に因果関係を持つかどうかのみ**（因果検証は
+  未実施）。
+- **機序的な重み付け**：ASP3の`OCODE=0x65`/`0x68`は妥当な中間値であり，
+  `IR_FORCE_CODE=0`（force無効）はHW自動較正（`calibrate_ocode()`相当の
+  回路によるo-code自己較正ループ）が動いていることと整合する——**bandgap
+  基準電圧回路自体は生きており，較正済み**である（eFuse強制値を使うか
+  自己較正値を使うかの違いに過ぎない）。トーン測定の生ADCが**完全な固定
+  ゼロ**という症状は，「生きていて較正済みだが基準点が微妙に異なる」という
+  この差分の性質としては強すぎる可能性が高く，過大評価すべきでない
+  （この解釈は5節末の推奨に反映する）。
+
+### 6. 到達点の整理と判定
+
+**本ラウンドで因果棄却が確定した候補**（実行確認込み，独立2ブート以上）：
+- `HP_ACTIVE.HP_CK_POWER`（BBPLL/BB-I2Cアナログ電源，2節）
+- `HP_ACTIVE.SYSCLK`（icg_sysclk_en）・`BACKUP`・`BACKUP_CLK`（3節）
+- `LP_ACTIVE.REGULATOR0`＋`LP_SLEEP`バンク4語（4節）
+
+**未検証のまま保留**：
+- `PMU_POWER_PD_TOP/HPAON/HPCPU/LPPERI_CNTL`のforce解除（3節，ブート到達性悪化を
+  検出しrevert——真のハングか捕捉アーティファクトかは未切り分け）
+- `esp_ocode_calib_init()`（5節）：**差分自体は確定済み**（stock=IR_FORCE_CODE=1
+  でeFuse値強制／ASP3=IR_FORCE_CODE=0でPOR既定のままHW自動較正まかせ——ソース
+  コードの構造とASP3側の信頼できるJTAG読みから確定，stock側生JTAG読み値のみ
+  アーティファクトとして破棄）だが，**因果検証は未実施**（実装コストを理由に
+  移植を見送った）。ASP3のOCODE実測値（0x65/0x68）が妥当な中間値でHW自動較正が
+  機能していることを示すため，機序的には「基準電圧回路は生きていて較正済み，
+  基準点が違うだけ」であり，ADCの完全固定ゼロという症状に対しては相対的に
+  重みが低い（過大評価しない）。
+- `HP_MODEM`/`HP_SLEEP`バンク（0節，意識的スコープ判断で対象外——ユーザーが
+  必要と判断すれば追加検証可能）
+
+`docs/c5-tone-adc-plan.md`「分岐計画」ケース2(2)＝「電源系初期化列の関数単位・
+段階的加算移植A/B」は，**主要な候補（RF/BBアナログに機序的に近いもの，および
+安全に移植できたもの）は尽くしたが，3件の残余（うち1件はリスクを理由に意図的に
+未検証）が残る状態で終了する**。plan docの「これらを尽くしてから停止・
+ユーザー判断へ」という文言に厳密に従うなら，まだ完全な「尽くした」状態ではない。
+
+**C6-genericという言明について，本ラウンドでは書かない**（意図的な選択）。
+その代わり，以下をユーザーへの申し送りとする：
+
+1. 実施21〜23の合計で，デジタル可視領域の個別候補は**11件**（PCR_FPGA_DEBUG・
+   PVT・PMU HP_ACTIVE 5レジスタ・HP_ACTIVE CK_POWER/SYSCLK/BACKUP/BACKUP_CLK・
+   LP_ACTIVE REGULATOR0+LP_SLEEPバンク）が「差分の有無に関わらず，実行確認込みで
+   因果棄却」という結果になっている。「デジタル制御系は健全・アナログ測定だけ
+   死ぬ」という統一像は，実施11開始からの累計で極めて強く補強されている。
+2. 一方で，**後付け移植（WiFi init時点でのタイミング）という手法自体が
+   PD_TOP/HPAON/HPCPU/LPPERIで初めて限界を露呈した**（ブート到達性の悪化）。
+   これは「静的な電源ドメインforce解除でさえ，実際のブートシーケンスの
+   タイミングでしか安全に行えない可能性がある」ことを示唆しており，
+   もし真因がここにあったとしても，本ポートの現在のアーキテクチャ
+   （Direct Boot＋WiFi init時点での後付けshim）ではそもそも安全に検証できない
+   （実施22までの11件の反証と同じ土俵に立てない）ことを意味する。
+3. `esp_ocode_calib_init()`（bandgap基準電圧較正）の**差分自体はソースコードと
+   ASP3側の信頼できるJTAG読みから確定した**（stock=eFuse値でforce／
+   ASP3=POR既定のままHW自動較正）が，**因果検証は未実施**。かつASP3の実測
+   OCODE値（0x65/0x68，妥当な中間値）はHW自動較正が正常に機能していることを
+   示しており，「基準電圧回路は生きていて較正済み，基準点が違うだけ」という
+   機序である——「トーン測定の生ADCが完全な固定ゼロ」という症状に対しては
+   相対的に弱い候補と評価する（過大評価しない）。
+4. **推奨（2案，優先順位はユーザー判断）**：
+   - (a) `esp_ocode_calib_init()`を正式実装（`esp_rom_hp_regi2c_esp32c5.c`を
+     ASP3ターゲットのCMakeへ追加リンクし，ROM実装と同一のcritical-section手順で
+     移植・A/B検証）してから最終判断する一段階限定の追加ラウンド。ただし3.の
+     機序的評価（弱い候補）を踏まえると，CMake構造変更のコストに見合う情報量は
+     限定的である可能性が高い。
+   - (b) ここまでの11件の反証結果と「後付け移植の限界」，および今回確定した
+     ocode差分の機序的な弱さを材料に，C5の壁をC6-genericとして凍結し，
+     実施21改訂計画の申し送りどおりEspressif問い合わせへ進む（ocode差分は
+     「確定しているが機序的に弱く，因果未検証」として問い合わせに含める）。
+   コーディネータの判断では，ocode差分の機序評価（3.）を踏まえると(b)に
+   やや傾くが，最終的な凍結／継続の判断はユーザーに委ねる。
+
+### 7. 変更ファイル・スクラッチ資産
+
+- `asp3/target/esp32c5_espidf/wifi/esp_wifi_adapter.c`：
+  `esp_shim_hpactive_ckpower_init()`（2節，keep），
+  `esp_shim_hpactive_residual2_init()`（3節，SYSCLK/BACKUP/BACKUP_CLKはkeep，
+  PD_TOP/HPAON/HPCPU/LPPERIの4行は`#if 0`で無効化のまま残置——コード自体は
+  ツリーに残す方針，実施21/22と同じパリティ方針），
+  `esp_shim_lpsystem_init()`（4節，keep）を新設し，
+  `wifi_clock_enable_wrapper()`から3関数とも呼出し。いずれも「因果確定した修正」
+  ではない（症状に影響しないか，または未検証）が，stockとの実在差分を解消し
+  将来のA/B比較から交絡を除く目的で作業ツリーに残置する。採否（keep/revert）は
+  コーディネータ／ユーザーのレビューに委ねる。
+- 本doc（実施23追記）。`docs/c5-tone-adc-plan.md`の分岐計画消化状況も追記予定。
+- スクラッチ（`260d98fa…/scratchpad/`）：`r23_pmu_full_dump.py`（0節の全域ダンプ），
+  `r23_verify_ckpower.py`／`r23_verify_residual2.py`／`r23_verify_lpsystem.py`
+  （各段の実行確認＋観測），`r23_ocode_regi2c_read.py`（5節の簡易diff確認，
+  結果は破棄），生ログ・ダンプ一式（`r23_*.log`／`r23_*.dump.txt`）。stockビルドは
+  実施21資産（`stock_scan/`）を再利用。
+
+### 8. C5#1の最終状態
+
+- `build/c5_idf61_trace`を再ビルド（FLASH 11.77%/RAM 84.62%，実施21/22ビルドと
+  同じ使用量＝新規追加分は誤差程度）→C5#1へ書込み。**PD_TOP/HPAON/HPCPU/LPPERIの
+  4行は`#if 0`で無効化した状態**（3節のブート到達性悪化を受けた措置）でビルド。
+- クリーンブート（UARTブリッジRTSリセット）で症状を最終確認：
+  `ESP-ROM:esp32c5-eco2-20250121`→`rst:0x12 (RTC_SWDT_SYS)`ループが約3.6秒周期で
+  継続（実施13〜22と同一，独立2回のキャプチャで確認，リブート周期の悪化なし）。
+- 移植コード（PVT＋XPD_BIAS/PD_HPWIFI＋CK_POWER＋SYSCLK/BACKUP/BACKUP_CLK＋
+  LP_ACTIVE/LP_SLEEP）はいずれも実行確認済み・stock値との完全一致を確認済みだが，
+  **症状（トーン自己ループバック測定の生ADCサンプルがASP3のみハードゼロ）は不変**。
+  C5#1は本状態（実施21〜23の全移植込みASP3計装ビルド，PD_*系4行のみ無効化）の
+  まま次ラウンドへ引き継ぐ。
+- C5#2（`D0:CF:13:F0:C8:94`）：本ラウンドも物理切断済み・一切未接触。
+
+### 9. 検証（実施23）
+
+- ビルド：`cmake --build build/c5_idf61_trace`成功（警告は実施21/22から既知の
+  2件のみ，新規warning/errorなし）。
+- 実機：CK_POWER単体（独立2ブート，実行確認＋30秒/20秒観測）・
+  SYSCLK/BACKUP/BACKUP_CLKビセクション後（独立2ブート，実行確認＋20秒/15秒観測）・
+  LP system（独立2ブート，実行確認＋20秒/15秒観測）の3段とも，読み戻しでstock値と
+  完全一致を確認した上で症状不変を確認。PD_TOP等はブート到達性悪化を11回の
+  独立試行で確認しビセクションで原因を特定した上でrevert（機械確認込み）。
+  最終状態はUART独立2ブートで確認。厳密性基準（1関数ずつ・実行確認・
+  独立複数ブート・悪化時は即revert）を遵守した。

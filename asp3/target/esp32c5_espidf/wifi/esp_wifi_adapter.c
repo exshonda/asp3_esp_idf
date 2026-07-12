@@ -866,6 +866,141 @@ esp_shim_hpactive_bias_init(void)
 	*pmu_pd_hpwifi = 0x00000000U;	/* force全解除：WIFI電源ドメインをHW FSM委譲へ */
 }
 
+/*
+ *  【実施23】残余(1)：PMU_HP_ACTIVE_HP_CK_POWER（BBPLL/BB-I2Cアナログ電源）
+ *
+ *  実施21/22でHP_ACTIVEバンクの一部（BIAS/HP_REGULATOR0/PD_HPWIFI_CNTL）を
+ *  比較・移植済みだったが，同バンクの`HP_CK_POWER`（`0x600B0014`，
+ *  `pmu_hp_system_init()`のclk_power.val書込み先，`pmu_hp_clk_power_reg_t`
+ *  ＝`xpd_bb_i2c`(bit28)・`xpd_bbpll_i2c`(bit29)・`xpd_bbpll`(bit30)）は
+ *  実施11〜22のどのラウンドでも実測されていなかった．
+ *
+ *  実施23のJTAG A/B実測（同一個体，stock×2・ASP3×2）：
+ *    stock=0x70000000（xpd_bb_i2c=1・xpd_bbpll_i2c=1・xpd_bbpll=1，
+ *    `pmu_param.c`の`PMU_HP_ACTIVE_POWER_CONFIG_DEFAULT().clk_power`と一致）／
+ *    ASP3=0x00000000（POR既定のまま＝BBPLL・BB I2Cのアナログ電源が
+ *    一度も明示起動されていない）。
+ *
+ *  BBPLL（ベースバンドPLL）とBB I2C（ベースバンド内部レジスタバス）は
+ *  トーン自己ループバック測定が使うBB内部ADC（`MODEM0+0x81C..0x828`）と
+ *  同じアナログ/ミックスシグナル領域に属し，実施11〜22で見つかった
+ *  どの差分よりもRF/BBアナログ機序への近さが高い．HP_ACTIVEバンクは
+ *  Direct Boot開始以来ずっとこのモードのまま（light-sleep等のモード遷移が
+ *  一度もない）ため，このバンクの値は現在も生きて反映されている
+ *  （HP_MODEM/HP_SLEEPバンクとは異なり「休止中の設定」ではない）。
+ *
+ *  プレーンなR/Wビットフィールドでトリガ/ラッチ機構は無い
+ *  （`pmu_ll_hp_set_clk_power()`はimm-update呼出しを伴わない）。
+ *  最優先候補として単体で先に因果検証する（他の残余レジスタ群は
+ *  実施23の次段でまとめて移植・検証）．
+ */
+static void
+esp_shim_hpactive_ckpower_init(void)
+{
+	volatile uint32_t	*pmu_ck_power = (volatile uint32_t *)0x600B0014U;	/* PMU_HP_ACTIVE_HP_CK_POWER */
+
+	*pmu_ck_power = 0x70000000U;	/* xpd_bb_i2c=1(bit28)/xpd_bbpll_i2c=1(bit29)/xpd_bbpll=1(bit30) */
+}
+
+/*
+ *  【実施23】残余(2)：pmu_hp_system_init()のHP_ACTIVEバンクに残る
+ *  低確度候補群＋pmu_power_domain_force_default()の未移植3ドメインを
+ *  まとめて移植する（実施23のJTAG全域ダンプで新規に見つかったが，
+ *  いずれも「現在到達しないモード遷移専用の設定」または「実施22で
+ *  棄却済みPD_HPWIFIと同型のforce解除（他ドメイン）」であり，
+ *  個別に単体因果検証するほどの機序的優先度は無いと判断し1件として
+ *  まとめる——残余(1)のCK_POWERのみ単体検証済み）：
+ *
+ *    - `PMU_HP_ACTIVE_SYSCLK`（`0x600B0024`）：stock=0x08000000
+ *      （icg_sysclk_en=1のみ）／ASP3=0x00000000。システムクロックICG
+ *      バイパスの有効化ビットで，実施13のicg_modemと同系統だが対象が
+ *      sysclk全体のICGである点が異なる。
+ *    - `PMU_HP_ACTIVE_BACKUP`/`BACKUP_CLK`（`0x600B001C`/`0x600B0020`）：
+ *      HP_SLEEP→ACTIVE・HP_MODEM→ACTIVEのregdma retention設定。
+ *      ASP3はHP_SLEEP/HP_MODEMへ一度も遷移しない（light-sleep等の
+ *      電源管理を一切呼ばない）ため，この設定が現在参照される経路は
+ *      無いと考えられる（機序的に最も疑わしくない）。
+ *    - `PMU_POWER_PD_TOP_CNTL`/`PD_HPAON_CNTL`/`PD_HPCPU_CNTL`
+ *      （`0xf8`/`0xfc`/`0x100`）：`pmu_power_domain_force_default()`が
+ *      force解除する4ドメイン（実施22はWIFIのみ移植・棄却）のうち
+ *      残り3ドメイン。stock=0x00000000（force全解除）／ASP3=0x0000001c
+ *      （POR既定のまま静的force）。
+ *    - `PMU_POWER_PD_LPPERI_CNTL`（`0x10c`）：同関数のLP側force解除。
+ *      stock=0x00000000／ASP3=0x0000001c。
+ *
+ *  いずれもプレーンR/Wでトリガ/ラッチ機構は無い。値は同一個体の
+ *  stock実測（実施23）をそのまま転記する。
+ */
+static void
+esp_shim_hpactive_residual2_init(void)
+{
+	volatile uint32_t	*pmu_sysclk    = (volatile uint32_t *)0x600B0024U;	/* PMU_HP_ACTIVE_SYSCLK */
+	volatile uint32_t	*pmu_backup    = (volatile uint32_t *)0x600B001CU;	/* PMU_HP_ACTIVE_BACKUP */
+	volatile uint32_t	*pmu_backupclk = (volatile uint32_t *)0x600B0020U;	/* PMU_HP_ACTIVE_BACKUP_CLK */
+#if 0	/* 【実施23 bisection】PD_TOP/HPAON/HPCPU/LPPERI force解除を有効にした
+	 * ビルドでJTAG単発halt(+9.9/12/13s)が11連続でPHYハングループ
+	 * （0x42026000-0x4202a000）に到達できず，毎回dispatcher_1近傍
+	 * （0x420217xx-0x420218xx）に着地する新規の停滞パターンを確認した
+	 * （それ以前のCK_POWER単体ビルドでは同方式で確実に到達できていた）。
+	 * 「悪化したら即revert」の方針に従い，最も疑わしい（CPU/TOP電源
+	 * ドメインという影響範囲の大きさから）本ブロックを一時的に無効化し，
+	 * 単独のビセクションでこの停滞の原因かどうかを切り分ける
+	 * （docs/c5-bringup.md 実施23参照）。因果確認までは残置し，コードは
+	 * ツリーからは削除しない。 */
+	volatile uint32_t	*pmu_pd_top    = (volatile uint32_t *)0x600B00F8U;	/* PMU_POWER_PD_TOP_CNTL */
+	volatile uint32_t	*pmu_pd_hpaon  = (volatile uint32_t *)0x600B00FCU;	/* PMU_POWER_PD_HPAON_CNTL */
+	volatile uint32_t	*pmu_pd_hpcpu  = (volatile uint32_t *)0x600B0100U;	/* PMU_POWER_PD_HPCPU_CNTL */
+	volatile uint32_t	*pmu_pd_lpperi = (volatile uint32_t *)0x600B010CU;	/* PMU_POWER_PD_LPPERI_CNTL */
+#endif
+
+	*pmu_sysclk    = 0x08000000U;	/* icg_sysclk_en=1(bit27) */
+	*pmu_backup    = 0x010200a0U;	/* stock実測値（実施23）をそのまま転記 */
+	*pmu_backupclk = 0xffffffffU;	/* backup_clk：全ビットicgバイパス（stock/デフォルトと同一） */
+#if 0
+	*pmu_pd_top    = 0x00000000U;	/* force全解除 */
+	*pmu_pd_hpaon  = 0x00000000U;	/* force全解除 */
+	*pmu_pd_hpcpu  = 0x00000000U;	/* force全解除 */
+	*pmu_pd_lpperi = 0x00000000U;	/* force全解除 */
+#endif
+}
+
+/*
+ *  【実施23】pmu_lp_system_init()の未移植分（LP_ACTIVE/LP_SLEEPバンク）
+ *
+ *  実施23のJTAG全域ダンプで新規に見つかった差分：
+ *    - `PMU_HP_SLEEP_LP_REGULATOR0`（`0x600B009C`＝`lp_sys[LP_ACTIVE]
+ *      .regulator0`，LPドメイン電圧レギュレータのdbias/xpd）：
+ *      stock=0xe8400000／ASP3=0xc6600000。LP_ACTIVEは（ASP3がlight-sleep等の
+ *      電源管理を一切呼ばないため）Direct Boot開始以来ずっと「現在有効な」
+ *      バンクであり，実施21のHP側dbias（PVT）軸と同型だが対象がLPドメイン
+ *      という点で新規（実施21候補Bはこの軸を棄却済みだがLP側は未検証）。
+ *    - `PMU_LP_SLEEP_LP_REGULATOR0`/`XTAL`/`LP_CK_POWER`/`BIAS`
+ *      （`0x600B00B4`/`0xBC`/`0xC4`/`0xC8`）：LP_SLEEPバンク（ASP3が
+ *      一度も遷移しないモード専用の設定）。HP_MODEM/HP_SLEEPバンクと
+ *      同種の理由で現在は不活性と考えられるが，`pmu_lp_system_init()`の
+ *      パリティとして移植する。
+ *
+ *  ★注意：実施23のPD_TOP/HPAON/HPCPU force解除でJTAG単発halt法が
+ *  ブートリーチャビリティを悪化させた前例があるため，本関数もCPU/TOP等の
+ *  広域ドメイン制御を含まない（LPドメインのレギュレータ/クロック電源の
+ *  プレーンR/Wのみ）ことを確認した上で適用する。
+ */
+static void
+esp_shim_lpsystem_init(void)
+{
+	volatile uint32_t	*lp_active_reg0 = (volatile uint32_t *)0x600B009CU;	/* LP_ACTIVE.REGULATOR0 */
+	volatile uint32_t	*lp_sleep_reg0  = (volatile uint32_t *)0x600B00B4U;	/* LP_SLEEP.REGULATOR0 */
+	volatile uint32_t	*lp_sleep_xtal  = (volatile uint32_t *)0x600B00BCU;	/* LP_SLEEP.XTAL */
+	volatile uint32_t	*lp_sleep_ck    = (volatile uint32_t *)0x600B00C4U;	/* LP_SLEEP.CK_POWER */
+	volatile uint32_t	*lp_sleep_bias  = (volatile uint32_t *)0x600B00C8U;	/* LP_SLEEP.BIAS */
+
+	*lp_active_reg0 = 0xe8400000U;	/* stock実測値（実施23）をそのまま転記 */
+	*lp_sleep_reg0  = 0x60400000U;
+	*lp_sleep_xtal  = 0x00000000U;
+	*lp_sleep_ck    = 0x00000000U;
+	*lp_sleep_bias  = 0xc0000000U;
+}
+
 static void
 wifi_clock_enable_wrapper(void)
 {
@@ -929,6 +1064,17 @@ wifi_clock_enable_wrapper(void)
 		/*  【実施22】決定実験Cのbefore-PHY移植：PMU HP_ACTIVEバイアス
 		 *  生成器起動＋WIFI電源ドメインのforce→FSM委譲を同じ時点で代替する  */
 		esp_shim_hpactive_bias_init();
+
+		/*  【実施23】残余(1)：BBPLL/BB-I2Cアナログ電源起動を同じ時点で代替する  */
+		esp_shim_hpactive_ckpower_init();
+
+		/*  【実施23】残余(2)：SYSCLK ICG・retention・PD_TOP/HPAON/HPCPU/LPPERI
+		 *  force解除を同じ時点で代替する  */
+		esp_shim_hpactive_residual2_init();
+
+		/*  【実施23】pmu_lp_system_init()の未移植分（LP_ACTIVE/LP_SLEEPバンク）
+		 *  を同じ時点で代替する  */
+		esp_shim_lpsystem_init();
 
 		modem_clock_deselect_all_module_lp_clock_source();
 		modem_clock_select_lp_clock_source(PERIPH_WIFI_MODULE,
