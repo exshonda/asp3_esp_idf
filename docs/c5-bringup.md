@@ -5248,3 +5248,294 @@ Codexの「bootloader完了直後（appの`call_start_cpu0`前）でのハンド
   `r29_baseline_recheck.log`・`r29_final_state_console.log`ほか
   `r29_*.log`一式。
 - git commitは行っていない（指示どおり）。
+
+---
+
+## 実施30：ハンドオフ点の二分探索——鍵の状態は単一ではなく**2つに分離**していると判明。(A)較正キー＝P1〜P4の消去法で`call_start_cpu0`内の全候補（`init_cpu`/`get_reset_reason`/`init_bss`/`ext_mem_init`/`sys_rtc_init`=`esp_rtc_init`/`mspi_init`）を除外でき，**2nd-stage bootloader自体にほぼ確定**（次段=2A）。(B)scan/RX（deaf-RX）キー＝`esp_clk_tree_initialize()`＋`esp_clk_init()`（`esp_perip_clk_init()`は既にASP3側で遅延移植済みのため除外，UART文字化け消失点の傍証から`esp_clk_init()`＝CPU周波数切替えが本命）。P1（`system_early_init`直前）でハンドオフすると較正は完走するがscanは恒久0件・promiscuous受信も0件という「一見C6のdeaf-RXに似た」症状が出たが，advisorの介入で「ジャンプが早すぎるゆえのクロック未確定アーティファクト」と正しく切り分け，P2/P3で反証（C6線への安易な統合は回避）。ASP3ソース変更・冷間ブート決定実験は未実施（較正キー未確定のため時期尚早と判断，手順4に従い区切りを固めて申し送り）
+
+### 背景・目的
+
+実施29で「鍵はESP-IDF標準ブート列（2nd-stage bootloader〜`call_start_
+cpu0`〜`esp_system_init`）のどこか」まで絞り込んだ。本ラウンドは
+Codex round2の二分探索案（`tmp/codex_c5_round2_output.txt`）に従い，
+ハンドオフ点を`call_start_cpu0`内のできるだけ早い点へ動かして境界を
+特定する。
+
+### 1. 手法：スクラッチ内`esp_system`コンポーネントoverride
+
+`~/tools/esp-idf-v6.1`は禁則により直接編集できない。標準的な
+`-Wl,--wrap`は`system_early_init()`が`static`関数のため機能しない
+可能性が高く（コンパイラがローカル呼出しを直接解決し得るため），
+確実な方法として**ESP-IDFのコンポーネント検索パス機構**（プロジェクト
+直下の`components/<同名>/`が組込みコンポーネントを完全に上書きする
+仕様）を利用した：
+
+- スクラッチ`stock_earlyjump/`（実施29の`stock_headjump/`を複製）に
+  `components/esp_system/`として`~/tools/esp-idf-v6.1/components/
+  esp_system/`を丸ごとコピーし，**このスクラッチ内コピーだけ**を
+  `cpu_start.c`で編集した（SDK本体は無改造）。`idf.py set-target`の
+  ログで`Component paths`が`.../stock_earlyjump/components/esp_system`
+  を指すことを確認済み。
+- `main/scan.c`は実施29のまま（未到達になるため内容は無関係）。
+- ハンドオフ本体`asp3_jump.c`（実施26/27/29から無改造で流用）は
+  IRAM常駐・`mmu_hal`/`cache_hal`/ROM `esp_rom_printf`のみに依存する
+  ため，どの挿入点でも動作要件は同じ。ただし**`mmu_hal_unmap_all`／
+  `mmu_hal_map_region`は`cache_hal_init`/`mmu_hal_ctx_init`
+  （`ext_mem_init()`内）が完了済みであることが前提**——これが本ラウンド
+  で試せる最速点の下限になる（後述）。
+
+### 2. P1：`system_early_init()`呼出し直前（`ext_mem_init`/`sys_rtc_init`/
+`mspi_init`完了後の`call_start_cpu0`内最速点）
+
+`cpu_start.c`の`call_start_cpu0`，`mspi_init();`直後・
+`system_early_init(rst_reas);`直前（ソース上の`Separator`コメント
+直後）に`asp3_jump_now()`を追加。ここは`ext_mem_init()`が既に
+cache/mmu HALを初期化済み（ジャンプ機構の前提を満たす）かつ，
+`esp_clk_init`／`esp_perip_clk_init`／コンソールUART baud再設定／
+`core_intr_matrix_clear`を含む`system_early_init()`本体は**一切
+実行していない**，という点で「ジャンプ機構が成立する範囲でできる
+だけ早い点」。
+
+結果（`build/c5_idf61_uart`ゲスト，640KB切詰め@0x200000，2/2独立
+RTSリセット試行，`r30_p1_trial1.log`/`r30_p1_trial2.log`）：
+
+- **較正は完走**：`raw_adc`＝試行1 `0x0a6e0a68`／試行2 `0x0a4c0a56`
+  （非ゼロ・試行間variation＝生信号），`done16`は`esp_wifi_init`前0→
+  後1（実施27/29と同型のシグネチャ）。
+- **しかしscan/RXは恒久ゼロ**：`promisc_rx_count=0`（2/2），
+  `wifi_scan: 0 APs found`（2/2），40秒延長キャプチャでも
+  `RESCAN 0 APs`を4回連続確認（`r30_p1_trial2_long.log`）——
+  一過性ではなく安定した「較正は通るがRXが死んでいる」状態。
+- ハンドオフ直後のUARTコンソールが断続的に文字化けした
+  （`asp3_jump_now`の証拠プリント以降，ASP3自身のprintf出力の一部が
+  乱れる）。
+
+### 3. advisor介入：「C6のdeaf-RXが再現した」と早合点しないためのガード
+
+P1の結果を報告した時点でadvisorへ相談した。要点：
+
+- **UART文字化けは副次情報ではなく直接証拠**：`esp_clk_init`／
+  `esp_perip_clk_init`が未実行＝クロックツリーが確定する前にジャンプ
+  している証拠であり，`promisc_rx_count=0`はその「クロック未確定な
+  ジャンプ」の期待される帰結（深刻な新事実ではなく単なるアーティ
+  ファクトの可能性が高い）と評価すべき。
+- **「C5でdeaf-RXが再現した，C6と同根」という統合仮説は書くべきでは
+  ない**——MEMORY.mdで「C6/C3のRF-cal根源共有仮説はDROPPED」と既に
+  一度整理されており，同じ性急な統合の再演になりかねない。
+- **決定実験**：ハンドオフ点を`esp_clk_init`実行直後（CORE
+  init-fn群の後・scheduler開始前）まで進め，2試行で「UARTが正常化し
+  RXも回復する」か「UARTは正常化してもRXは死んだまま」かを見る。
+  前者ならP1のRX死はジャンプ時期尚早のアーティファクトで**C6線への
+  独立反証（クリーンな負の結果）**，後者なら本物のfully-clocked
+  deaf-RXとしてC6と初めて比較可能になる。
+
+### 4. P2：`esp_perip_clk_init()`完了直後（`system_early_init()`の
+クロック／コンソール処理が全て完了した時点）
+
+`system_early_init()`内，コンソールUART baud再設定
+（`_uart_ll_set_baudrate`）＋`ESP_EARLY_LOGI`直後（＝
+`esp_clk_tree_initialize`/`esp_clk_init`/`esp_perip_clk_init`/
+`g_startup_time`/`core_intr_matrix_clear`が全て完了済み）へ
+`asp3_jump_now()`を移設。
+
+結果（2/2，`r30_p2_trial1.log`/`r30_p2_trial2.log`）：**較正・
+scan・RXとも完全PASS**——`promisc_rx_count=210`／`232`，
+`wifi_scan: 20 APs found`／`20 APs found`，`RESCAN 24 APs`／
+`23 APs`（実施29のstock_headjump実測とほぼ同等の規模）。advisor
+予測どおり「UART正常化とともにRXも回復」——**P1のRX死はジャンプ
+時期尚早のクロック未確定アーティファクトであり，C5独自の
+fully-clocked deaf-RXではない**と判定（C6線への性急な統合を回避
+できた，という意味でのクリーンな負の結果）。
+
+### 5. P3：`esp_clk_init()`直後・`esp_perip_clk_init()`呼出し直前
+（P1とP2の間をさらに分割）
+
+ASP3の`esp_wifi_adapter.c`（実施6/13相当の移植）は，`esp_wifi_init`
+経路の中で`modem_clock_select_lp_clock_source(PERIPH_WIFI_MODULE,
+MODEM_CLOCK_LPCLK_SRC_RC_SLOW, 0U)`という**`esp_perip_clk_init()`の
+代替呼出しを既に持っている**（`wifi/esp_wifi_adapter.c:1299-1301`，
+コメントで明記）。したがって「P1→P2間の鍵は本当に`esp_perip_
+clk_init()`か，それとも`esp_clk_init()`（CPU周波数切替）か」を
+切り分ける価値が高いと判断し，`esp_clk_init();`の直後・
+`esp_perip_clk_init();`の直前へ`asp3_jump_now()`を追加した
+（同じスクラッチ内overrideをさらに編集）。
+
+結果（2/2，`r30_p3_trial1.log`/`r30_p3_trial2.log`）：**P2と同じく
+完全PASS**——`promisc_rx_count=270`／`281`，`20 APs found`（2/2），
+`RESCAN 23 APs`／`24 APs`。**`esp_perip_clk_init()`はscan/RX-keyでは
+ない**（ASP3側の遅延移植で既に代替されているため当然の帰結）。
+scan/RX-keyは`esp_clk_tree_initialize()`＋`esp_clk_init()`の区間に
+narrowingされた。
+
+### 6. scan/RX-keyの実体候補：`esp_clk_init()`の`rtc_clk_cpu_freq_
+set_config()`（CPU周波数切替＝共有PLLの起動）
+
+`~/tools/esp-idf-v6.1/components/esp_system/port/soc/esp32c5/clk.c`
+の`esp_clk_init()`（159行目付近，`__attribute__((weak))`）の中身を
+確認した。ブート時点のCPU周波数設定（`old_config`，通常bootloaderの
+低め初期値）から`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ`（フルスピード）へ
+**能動的に切り替える**`rtc_clk_cpu_freq_set_config(&new_config)`を
+呼んでいる。これはXTAL直結ではなくPLLベースの周波数へ切り替える
+操作であり，CPU/APB用のPLLと，WiFiモデムのRFセクションが参照する
+PLL資源が共有されているチップでは，このタイミングでモデム側の
+アナログ参照クロックが実質的に初めて安定供給される可能性がある
+（Codex round2の候補4「clock tree / PLL lock / glitchless muxの
+過渡状態」が的中した形）。もう一つの候補として`esp_clk_tree_
+initialize()`（`esp_hw_support/port/esp32c5/esp_clk_tree.c:84`）も
+`_clk_gate_ll_ref_240m_clk_en(false)`等，現在使用していないPLL
+参照クロックのゲート操作を行っており，副作用皆無ではない——両関数を
+個別に切り分けるさらなる二分探索は本ラウンドでは実施していない
+（時間の都合，次段へ申し送り）。
+
+**追加の状況証拠（UARTの文字化け消失点）**：P3のハンドオフ点
+（`esp_clk_init()`直後）は，コンソールUART baudの明示的再設定
+（`_uart_ll_set_baudrate`，842〜848行目）や`core_intr_matrix_clear()`
+（838行目）よりも**前**にある。それにもかかわらずP3のUARTコンソール
+出力はP1と比べて明確にクリーンだった（コアなdiag行の文字化けは
+解消）。これは「UART文字化けの解消はbaud再設定やintr matrix clear
+が原因ではなく，`esp_clk_init()`自身がAPB周波数をASP3の`CORE_CLK_
+MHZ`前提と一致する値へ引き上げたこと」を示唆する一次証拠であり，
+`esp_clk_tree_initialize()`より`esp_clk_init()`（特に`rtc_clk_
+cpu_freq_set_config()`）をscan/RX-keyの本命とする根拠を補強する。
+
+**★重要な既存コードとの整合**：ASP3の`hardware_init_hook()`
+（`asp3/target/esp32c5_espidf/target_kernel_impl.c`92〜121行）の
+「CPUクロックの切替え」節は，**C6の実績（ROMブートローダが起動時点
+で既にPCRをSPLL÷3÷1＝160MHzへ設定済み）をC5にそのまま仮定して
+クロック切替えレジスタを一切書き換えない**設計になっており，コード
+コメント自身が「C5のPCR相当レジスタの実際の初期値は未確認
+（【実機確認待ち】）」と明記している。本ラウンドの実測（`esp_clk_
+init()`が実際にCPU周波数を能動的に切り替えており，かつその前後で
+RXの生死が切り替わる）は，この「ROMが既に適切に設定している」という
+仮定を再検証すべき具体的根拠になる——次段の最有力ポート候補。
+
+### 7. 較正キー（(A)）：P4でさらに縮小——`sys_rtc_init`(`esp_rtc_init`)・
+`mspi_init`とも除外でき，2nd-stage bootloader自体が最有力候補に確定
+
+P1（`system_early_init()`一切未実行）で較正が既に完走することが
+2/2で確認されたため，**Codex round2候補2〜4（PCR/MODEM clock pulse
+history・PMU FSM handoff・clock tree/PLL lock）は較正キーの説明には
+ならない**（これらは全て`system_early_init()`内部の処理であり，
+P1はそれより前にジャンプしているため）。
+
+advisorの指摘で訂正：「`ext_mem_init()`より前でのハンドオフには
+自前cache/mmu bootstrapが必要でハング риスクを伴う」という記述は
+不正確だった。**`ext_mem_init()`が完了した"直後"であれば，追加の
+bootstrap無しで`asp3_jump_now()`の前提（`cache_hal_init`/
+`mmu_hal_ctx_init`済み）を満たす**——実際に危険なのは
+`ext_mem_init()`**より前**にジャンプする場合のみ。この訂正に従い，
+同一の安全な機構のまま`ext_mem_init()`直後・`sys_rtc_init()`
+呼出し直前へ`asp3_jump_now()`を移設した（P4，スクラッチの
+`components/esp_system/port/cpu_start.c`をさらに編集）。
+
+**P4結果（2/2，`r30_p4_trial1.log`/`r30_p4_trial2.log`）：較正は
+完走**（`raw_adc`＝`0x0a3a0a46`／`0x0a4e0a4e`，`done16`は0→1），
+**scan/RXはP1と同型で恒久ゼロ**（`promisc_rx_count=0`，
+`0 APs found`，2/2——`sys_rtc_init`/`mspi_init`とも未実行なので
+scan/RX-keyがまだ満たされないのは予想どおり）。
+
+**この結果の意味**：`sys_rtc_init()`が呼ぶ`esp_rtc_init()`
+（PMU/RTC電源設定，C6実施34「フル移植済み・NuttXで反証済み」の
+残された「C5では未検証」枠として最有力視していた）も，`mspi_init()`
+（flash timing tuning）も，**較正キーとしては除外できた**——
+どちらも実行せずに較正が2/2で完走している。P4の手前に残る
+`init_cpu()`（`gp`レジスタ設定・例外ベクタ再配置・分岐予測有効化・
+WFEモード無効化のみ）・`get_reset_reason()`（読み取り専用）・
+`init_bss()`（RAMのmemsetのみ）・`ext_mem_init()`（cache/mmu HALの
+XIP設定のみ）は，いずれもMODEM/PMU/アナログ系レジスタへの書込みを
+一切含まない（ソース確認済み，394〜476行目）。
+
+**結論：較正キー（A）は2nd-stage bootloader自体（`bootloader_init()`
+等）にほぼ確定した**——`call_start_cpu0`内の候補（`esp_rtc_init`含む）
+は本ラウンドで実質的に消去法で除外できたため，次段は2A
+（bootloaderの初期化列挙＋選択的無効化，またはASP3側への加算移植）
+に絞って進めるのが妥当。「さらに早い点＝bootloaderそのものの内側
+でのハンドオフ／計装」は，bootloaderは実行ファイル自体が別（app
+ではなくbootloader.elf）なので，同じコンポーネントoverride手法は
+使えず，bootloaderの改造（またはbootloaderからの独自ジャンプ機構）
+が必要になる——次段の実装コストとして明記する。
+
+### 8. なぜ本ラウンドはASP3移植・冷間ブート決定実験を実施しなかったか
+
+較正キー（(A)）が依然未特定である以上，scan/RX-key（(B)）だけを
+ASP3の`hardware_init_hook()`へ移植しても，冷間Direct Bootは
+（(A)が満たされないため）従来どおり較正ハングで停止し，(B)の効果を
+確認できない。そのため「決定実験（冷間ブートで較正完走→scan成功）」
+を今回試みても，既知の失敗（`raw_adc=0`ハング）を再現するだけで
+新規情報が得られないと判断し，ASP3側のソース変更は本ラウンドでは
+行わなかった。これは手順4「1ラウンドで手順3まで届かない場合は，
+境界の特定まで確実に固めて申し送る（無理に完走しない）」に沿った
+判断である。
+
+### 9. C5#1最終状態（終了処理）
+
+- スクラッチ実験終了後，`build/c5_idf61_uart/asp_flash.bin`
+  （フル4MB@0x0，本ラウンド開始時点と同一ビルド）を再書込みし，
+  RTSリセット後20秒キャプチャで確認（`r30_final_state_console.log`）：
+  `raw_adc=0x00000000 done16=0`・`pd_top/pd_hpaon/pd_hpcpu/pd_lpperi
+  =0x1c`（較正未完走の標準値）・`rst:0x12 (RTC_SWDT_SYS)`による
+  約数秒周期のSWDTリセットサイクルを確認——実施28/29終了時点と同型の
+  既知症状，退行なし。
+- C5#2・C6 board C・UARTブリッジ`125a266b...`：完全未接触
+  （前ラウンドから変更なし）。
+
+### 変更ファイル
+
+- `docs/c5-bringup.md`：本節（実施30）追加。
+- リポジトリ内ソース変更：**無し**（arch/target/appとも無改造）。
+- スクラッチ（リポジトリ外）：`stock_earlyjump/`（新規，
+  `stock_headjump/`複製＋`components/esp_system/port/cpu_start.c`
+  にP1→P2→P3→P4の4段階でハンドオフ点を移設編集，SDK本体は無改造）・
+  `r30_p1_trial1/2.log`・`r30_p1_trial2_long.log`・
+  `r30_p2_trial1/2.log`・`r30_p3_trial1/2.log`・
+  `r30_p4_trial1/2.log`・
+  `r30_p1_flash1.log`・`r30_p2_flash1.log`・`r30_p3_flash1.log`・
+  `r30_p4_flash1.log`・
+  `r30_earlyjump_settarget.log`・`r30_earlyjump_build.log`・
+  `r30_p2_build.log`・`r30_p3_build.log`・`r30_p4_build.log`・
+  `r30_final_flash.log`・
+  `r30_final_state_console.log`ほか`r30_*.log`一式。
+- git commitは行っていない（指示どおり）。
+
+### 次段への申し送り
+
+1. **較正キー（A）の特定**：P4により`call_start_cpu0`内の候補
+   （`init_cpu`/`get_reset_reason`/`init_bss`/`ext_mem_init`/
+   `sys_rtc_init`=`esp_rtc_init`/`mspi_init`）は全て消去法で除外
+   でき，**2nd-stage bootloader自体（`bootloader_init()`等）に
+   ほぼ確定**した。次段は2A（bootloaderの初期化列挙＋選択的無効化，
+   またはASP3の`hardware_init_hook()`への加算移植）を最優先で
+   進める。bootloaderは別実行ファイル（`bootloader.elf`）のため，
+   本ラウンドで使ったコンポーネントoverride手法はそのままでは使え
+   ず，bootloader側の改造または独自計装が必要になる点に注意。
+2. **scan/RX-key（B）のASP3移植**：`hardware_init_hook()`の
+   「CPUクロックの切替え」節（現在は無改造でROM任せ）へ，
+   `esp_clk_init()`相当（特に`rtc_clk_cpu_freq_set_config()`による
+   CPU周波数切替え）を移植する。P3のUART文字化け消失（§6追加証拠）
+   は baud再設定や`core_intr_matrix_clear`ではなく`esp_clk_init()`
+   自身が原因である可能性を支持しており，`esp_clk_init()`が本命。
+   `esp_clk_tree_initialize()`の ref-clockゲート操作も候補として
+   残る——両者を個別に切り分ける追加の二分探索（829/830行目の間へ
+   1点，1回のビルド編集で十分安価）を先にやってから移植すると
+   精度が上がる。
+3. **(A)と(B)は無関係な2つの謎ではなく，「クロックレベル」という
+   1つの物語の可能性がある**（advisor指摘）：stockの2nd-stage
+   bootloaderも`bootloader_clock_configure()`等で独自にクロック設定
+   を行っており，P1〜P4の較正はいずれも**その一段階昇格したクロック
+   の下で**走っている（reset直後のデフォルトクロックではない）。
+   つまり「較正にはbootloaderが与えるクロックレベルXで足り，RXには
+   `esp_clk_init()`が与えるさらに上のレベルYが要る」という一本の
+   ストーリーである可能性が高く，(A)の探索でもクロック関連の
+   bootloaderステップ（`bootloader_clock_configure`等）を優先的に
+   疑うべき。
+4. (A)(B)の両方が揃って初めて，冷間Direct Bootでの較正完走→scan
+   成功という最終決定実験が意味を持つ。(B)だけを先に移植しても
+   冷間ブートは(A)未解決のため従来どおりハングする点に注意
+   （手順3の決定実験は(A)特定後に実施すること）。
+5. P1のdeaf-RX的症状（`promisc_rx_count=0`・`0 APs found`）は
+   **C6のdeaf-RXと安易に統合しない**——P2/P3で「クロック確定後は
+   RXが正常に働く」ことを2/2×2点で確認済みであり，これはC5独自の
+   構造的deaf-RXではなく単なる時期尚早ジャンプのアーティファクト
+   だったと判定済み。この判定はadvisor介入によって救われた
+   （最初の思考のまま書いていたら「C5でdeaf-RX再現」という誤った
+   統合仮説を記録するところだった）——今後も同種の早合点に注意。
