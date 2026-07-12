@@ -77,6 +77,7 @@
 #include "hal/modem_syscon_ll.h"
 #include "hal/pmu_ll.h"
 #include "esp_rom_sys.h"	/* esp_rom_delay_us（esp_shim_pvt_init用） */
+#include "target_syssvc.h"	/* target_fput_log（実施24：ocode_force機械確認の直接出力用） */
 
 /*
  *  リンク閉包で解決するesp-hal／blob側の関数（宣言のみ）
@@ -937,7 +938,21 @@ esp_shim_hpactive_residual2_init(void)
 	volatile uint32_t	*pmu_sysclk    = (volatile uint32_t *)0x600B0024U;	/* PMU_HP_ACTIVE_SYSCLK */
 	volatile uint32_t	*pmu_backup    = (volatile uint32_t *)0x600B001CU;	/* PMU_HP_ACTIVE_BACKUP */
 	volatile uint32_t	*pmu_backupclk = (volatile uint32_t *)0x600B0020U;	/* PMU_HP_ACTIVE_BACKUP_CLK */
-#if 0	/* 【実施23 bisection】PD_TOP/HPAON/HPCPU/LPPERI force解除を有効にした
+#if 0	/* 【実施24】UART直接出力（logtask非依存，target_fput_log経由の
+	 * wifi_diag_live）でこのブロックをA/B検証した：書込み成立を機械確認
+	 * （pd_top/hpaon/hpcpu/lpperi=0x00000000，stockと一致）した上で
+	 * ≥5独立ブート（RTSクリーンリセット×2＋同一セッション内WDTループ再現×3）
+	 * とも症状不変（raw_adc=0・done16=0）・WDTリブート周期（約3.5秒）も
+	 * 不変——UART経由では「悪化」は一切観測されなかった。
+	 * しかし本ラウンドはJTAGが使用不能な環境だったため，実施23が実際に
+	 * 検出した問題（**JTAG単発halt捕捉法がPHYハングループへ到達できず
+	 * dispatcher_1近傍に着地する**という，JTAG介入時にのみ現れる現象）を
+	 * 直接再検証することはできていない。advisorレビュー指摘のとおり，
+	 * UART計測とJTAG halt捕捉は異なる観測条件であり，UART側が無事だからと
+	 * いってJTAG側の問題が解消したとは言えない。次回JTAG環境での作業を
+	 * 妨げない（実施23の主要な調査ツールである単発halt捕捉法を壊さない）
+	 * ことを優先し，**因果棄却は確定したが，安全側に倒してrevertを維持する**。
+	 * 【実施23 bisection】PD_TOP/HPAON/HPCPU/LPPERI force解除を有効にした
 	 * ビルドでJTAG単発halt(+9.9/12/13s)が11連続でPHYハングループ
 	 * （0x42026000-0x4202a000）に到達できず，毎回dispatcher_1近傍
 	 * （0x420217xx-0x420218xx）に着地する新規の停滞パターンを確認した
@@ -956,7 +971,7 @@ esp_shim_hpactive_residual2_init(void)
 	*pmu_sysclk    = 0x08000000U;	/* icg_sysclk_en=1(bit27) */
 	*pmu_backup    = 0x010200a0U;	/* stock実測値（実施23）をそのまま転記 */
 	*pmu_backupclk = 0xffffffffU;	/* backup_clk：全ビットicgバイパス（stock/デフォルトと同一） */
-#if 0
+#if 0	/* 実施24：上のブロックと合わせて無効化のまま維持（詳細は上記コメント） */
 	*pmu_pd_top    = 0x00000000U;	/* force全解除 */
 	*pmu_pd_hpaon  = 0x00000000U;	/* force全解除 */
 	*pmu_pd_hpcpu  = 0x00000000U;	/* force全解除 */
@@ -999,6 +1014,211 @@ esp_shim_lpsystem_init(void)
 	*lp_sleep_xtal  = 0x00000000U;
 	*lp_sleep_ck    = 0x00000000U;
 	*lp_sleep_bias  = 0xc0000000U;
+}
+
+/*
+ *  【実施24】手動regi2cリプレイ（実施14で確立したI2C_ANA_MST直叩き手法）の
+ *  shim関数化。hal/esp_rom_hp_regi2c_esp32c5.c（regi2c ROMパッチ，読取り専用で
+ *  参照）と同一のプロトコルをASP3側で独立実装し，リンク構造を変えずに
+ *  regi2cトランザクションを発行する。I2C_ULP(0x61=ULP_CAL)ブロック専用
+ *  （regi2c_enable_block()のULP_CAL分岐のみを再現。他ブロックは未対応）。
+ *
+ *  プロトコル（I2C_ANA_MST base=0x600AF800，実施14/23で確認済み）：
+ *    ANA_CONF2(+0x20) bit10 = ULP_CAL_MST_SEL → i2c_sel（0/1のどちらの
+ *    I2C{0,1}_CTRL_REGを使うか）を決める。ANA_CONF1(+0x1C)に
+ *    RD_MASK（~BIT(8)&0xFFFFFF）を書く。I2C{0,1}_CTRL_REG(+0x0/+0x4)：
+ *    bit25=busy，bits15:8=reg_addr，bits7:0=block/slave_id，
+ *    bit24=WR_CNTL（1=write），bits23:16=data。
+ */
+#define ESP_SHIM_I2C_ANA_MST_BASE	0x600AF800U
+#define ESP_SHIM_I2C_ANA_MST_I2C0_CTRL	(ESP_SHIM_I2C_ANA_MST_BASE + 0x00U)
+#define ESP_SHIM_I2C_ANA_MST_I2C1_CTRL	(ESP_SHIM_I2C_ANA_MST_BASE + 0x04U)
+#define ESP_SHIM_I2C_ANA_MST_ANA_CONF1	(ESP_SHIM_I2C_ANA_MST_BASE + 0x1CU)
+#define ESP_SHIM_I2C_ANA_MST_ANA_CONF2	(ESP_SHIM_I2C_ANA_MST_BASE + 0x20U)
+#define ESP_SHIM_REGI2C_BUSY_BIT	(1UL << 25)
+#define ESP_SHIM_REGI2C_ULP_CAL_MST_SEL	(1UL << 10)
+
+static uint32_t
+esp_shim_regi2c_ctrl_addr(uint8_t block)
+{
+	uint32_t	conf2 = *(volatile uint32_t *)ESP_SHIM_I2C_ANA_MST_ANA_CONF2;
+	uint32_t	mst_sel_bit = (block == 0x61U) ? ESP_SHIM_REGI2C_ULP_CAL_MST_SEL : 0UL;
+	uint32_t	i2c_sel_raw = (conf2 & mst_sel_bit) ? 1U : 0U;
+
+	/*  RD_MASK書込み（regi2c_enable_block()相当，I2C_ULPのみ対応）  */
+	*(volatile uint32_t *)ESP_SHIM_I2C_ANA_MST_ANA_CONF1 =
+		(~(1UL << 8)) & 0x00FFFFFFU;
+
+	return((i2c_sel_raw != 0U) ? ESP_SHIM_I2C_ANA_MST_I2C0_CTRL
+								: ESP_SHIM_I2C_ANA_MST_I2C1_CTRL);
+}
+
+static uint8_t
+esp_shim_regi2c_read(uint8_t block, uint8_t reg_add)
+{
+	uint32_t	ctrl = esp_shim_regi2c_ctrl_addr(block);
+	uint32_t	temp;
+
+	while ((*(volatile uint32_t *)ctrl & ESP_SHIM_REGI2C_BUSY_BIT) != 0U) {
+		;
+	}
+	temp = ((uint32_t)block & 0xFFU) | (((uint32_t)reg_add & 0xFFU) << 8);
+	*(volatile uint32_t *)ctrl = temp;
+	while ((*(volatile uint32_t *)ctrl & ESP_SHIM_REGI2C_BUSY_BIT) != 0U) {
+		;
+	}
+	return((uint8_t)((*(volatile uint32_t *)ctrl >> 16) & 0xFFU));
+}
+
+static void
+esp_shim_regi2c_write_mask(uint8_t block, uint8_t reg_add, uint8_t msb,
+							 uint8_t lsb, uint8_t data)
+{
+	uint32_t	ctrl = esp_shim_regi2c_ctrl_addr(block);
+	uint32_t	temp;
+
+	while ((*(volatile uint32_t *)ctrl & ESP_SHIM_REGI2C_BUSY_BIT) != 0U) {
+		;
+	}
+	temp = ((uint32_t)block & 0xFFU) | (((uint32_t)reg_add & 0xFFU) << 8);
+	*(volatile uint32_t *)ctrl = temp;
+	while ((*(volatile uint32_t *)ctrl & ESP_SHIM_REGI2C_BUSY_BIT) != 0U) {
+		;
+	}
+	temp = (*(volatile uint32_t *)ctrl >> 16) & 0xFFU;
+
+	temp &= (uint32_t)((~(0xFFFFFFFFUL << lsb)) | (0xFFFFFFFFUL << ((uint32_t)msb + 1U)));
+	temp |= (((uint32_t)data & (~(0xFFFFFFFFUL << ((uint32_t)msb - lsb + 1U)))) << lsb);
+
+	temp = ((uint32_t)block & 0xFFU) | (((uint32_t)reg_add & 0xFFU) << 8)
+			| (1UL << 24) | ((temp & 0xFFU) << 16);
+	*(volatile uint32_t *)ctrl = temp;
+	while ((*(volatile uint32_t *)ctrl & ESP_SHIM_REGI2C_BUSY_BIT) != 0U) {
+		;
+	}
+}
+
+/*
+ *  【実施24】esp_ocode_calib_init()（bandgap o-codeトリム）のbefore-PHY移植。
+ *
+ *  実施23で差分自体を確定済み（stock=eFuse値でIR_FORCE_CODE=1を強制／
+ *  ASP3=pmu_init()自体を呼ばないためIR_FORCE_CODE=0のままHW自動較正）。
+ *  実施23はROM regi2cパッチ（hal/esp_rom_hp_regi2c_esp32c5.c）をASP3の
+ *  CMakeへ追加リンクする構造変更のコストを理由に因果検証を見送っていたが，
+ *  本ラウンドでは上記esp_shim_regi2c_*関数（実施14の手動リプレイの
+ *  shim化）でリンク構造を変えずに同じレジスタ操作を行う。
+ *
+ *  stockの`set_ocode_by_efuse(1)`（hal/esp_hw_support/port/esp32c5/
+ *  ocode_init.c，読取り専用で参照）を忠実に再現：
+ *    1. eFuse RD_SYS_PART1_DATA4（0x600B486C）bit[16:9]からocode値を読む。
+ *    2. block=I2C_ULP(0x61) reg=6(EXT_CODE，bits7:0)にocode値を書く。
+ *    3. block=I2C_ULP reg=5(IR_FORCE_CODE，bit6)に1を書く。
+ *  適用条件（stockと同じ，esp_ocode_calib_init()より）：
+ *  chip_revision==1&&blk_version>=1，または chip_revision>=100&&
+ *  blk_version>=2（本DUTはchip_revision=100・blk_version=3で成立，
+ *  実施21/23のeFuse実測で確認済み）。不成立ならstockはcalibrate_ocode()
+ *  （HW自己較正）を使うため何もしない（ASP3は元々この経路＝POR既定の
+ *  ままであり，この分岐は現状維持が正しい）。
+ *
+ *  書込み成立の確認はregi2c読み戻しを直接ポーリング出力
+ *  （`target_fput_log`）でUART越しに記録する（TOPPERS_ESP32C5_WIFI_REGI2C_TRACE
+ *  ガード）。★実施24の実測でsyslog()経由の周期出力（wifi_diag_cyclic_handler，
+ *  wifi_scan.c）はPHY較正の無限リトライループに入ると出力が完全に止まる
+ *  （logtaskがスケジューリングされなくなると推定）ことが判明したため，
+ *  ここでもtarget_fput_log直呼び（カーネルバナー同様，タスク
+ *  スケジューリングに非依存で確実に届く）を使う。本関数はesp_wifi_init()の
+ *  ごく早い段階（PHYハングループへ到達する前）で1回だけ実行されるため
+ *  タイミング的には元々syslogでも間に合っていたはずだが，念のため
+ *  直接出力に統一する。
+ */
+static void
+esp_shim_diag_fput_str(const char *s)
+{
+	while (*s != '\0') {
+		target_fput_log(*s);
+		s++;
+	}
+}
+
+static void
+esp_shim_diag_fput_hex8(uint8_t v)
+{
+	static const char	hexdig[] = "0123456789abcdef";
+
+	target_fput_log(hexdig[(v >> 4) & 0xFU]);
+	target_fput_log(hexdig[v & 0xFU]);
+}
+
+static void
+esp_shim_diag_fput_dec(uint32_t v)
+{
+	char	buf[10];
+	int_t	i = 0;
+
+	if (v == 0U) {
+		target_fput_log('0');
+		return;
+	}
+	while (v != 0U && i < 10) {
+		buf[i++] = (char)('0' + (v % 10U));
+		v /= 10U;
+	}
+	while (i > 0) {
+		target_fput_log(buf[--i]);
+	}
+}
+
+static void
+esp_shim_ocode_force_init(void)
+{
+	uint32_t	sys2 = *(volatile uint32_t *)0x600B484CU;	/* EFUSE_RD_MAC_SYS2_REG */
+	uint32_t	wafer_major = (sys2 >> 4) & 0x3U;
+	uint32_t	wafer_minor = sys2 & 0xFU;
+	uint32_t	chip_revision = wafer_major * 100U + wafer_minor;
+	uint32_t	blk_major = (sys2 >> 11) & 0x3U;
+	uint32_t	blk_minor = (sys2 >> 8) & 0x7U;
+	uint32_t	blk_version = blk_major * 100U + blk_minor;
+	uint32_t	data4;
+	uint32_t	ocode;
+	uint8_t		rb_ext_code;
+	uint8_t		rb_force;
+
+	if (!((chip_revision == 1U && blk_version >= 1U) ||
+		  (chip_revision >= 100U && blk_version >= 2U))) {
+#ifdef TOPPERS_ESP32C5_WIFI_REGI2C_TRACE
+		esp_shim_diag_fput_str("\r\nocode_force: skip chip_rev=");
+		esp_shim_diag_fput_dec(chip_revision);
+		esp_shim_diag_fput_str(" blk_ver=");
+		esp_shim_diag_fput_dec(blk_version);
+		esp_shim_diag_fput_str(" (calib_ocode branch)\r\n");
+#endif /* TOPPERS_ESP32C5_WIFI_REGI2C_TRACE */
+		return;
+	}
+
+	data4 = *(volatile uint32_t *)0x600B486CU;	/* EFUSE_RD_SYS_PART1_DATA4_REG */
+	ocode = (data4 >> 9) & 0xFFU;
+
+	esp_shim_regi2c_write_mask(0x61U, 6U, 7U, 0U, (uint8_t)ocode);	/* I2C_ULP_EXT_CODE */
+	esp_shim_regi2c_write_mask(0x61U, 5U, 6U, 6U, 1U);				/* I2C_ULP_IR_FORCE_CODE */
+
+	rb_ext_code = esp_shim_regi2c_read(0x61U, 6U);
+	rb_force = esp_shim_regi2c_read(0x61U, 5U);
+
+#ifdef TOPPERS_ESP32C5_WIFI_REGI2C_TRACE
+	esp_shim_diag_fput_str("\r\nocode_force: chip_rev=");
+	esp_shim_diag_fput_dec(chip_revision);
+	esp_shim_diag_fput_str(" blk_ver=");
+	esp_shim_diag_fput_dec(blk_version);
+	esp_shim_diag_fput_str(" ocode=0x");
+	esp_shim_diag_fput_hex8((uint8_t)ocode);
+	esp_shim_diag_fput_str(" readback ext_code_reg=0x");
+	esp_shim_diag_fput_hex8(rb_ext_code);
+	esp_shim_diag_fput_str(" force_reg=0x");
+	esp_shim_diag_fput_hex8(rb_force);
+	esp_shim_diag_fput_str(" force_bit=");
+	target_fput_log((char)('0' + ((rb_force >> 6) & 1U)));
+	esp_shim_diag_fput_str("\r\n");
+#endif /* TOPPERS_ESP32C5_WIFI_REGI2C_TRACE */
 }
 
 static void
@@ -1098,6 +1318,11 @@ wifi_clock_enable_wrapper(void)
 		 */
 		_regi2c_ctrl_ll_master_enable_clock(true);
 		regi2c_ctrl_ll_master_configure_clock();
+
+		/*  【実施24】esp_ocode_calib_init()のbefore-PHY移植：regi2cマスタ
+		 *  クロックが実際に有効化された直後（本関数のこの時点で初めて
+		 *  I2C_ANA_MSTトランザクションが物理的に成立する）に置く。  */
+		esp_shim_ocode_force_init();
 
 		lpclk_selected = true;
 	}

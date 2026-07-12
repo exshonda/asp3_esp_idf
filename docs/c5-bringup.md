@@ -3860,3 +3860,276 @@ reg_add=4/5/6（OCODE/IR_FORCE_CODE/EXT_CODE）を読む簡易スクリプト
   独立試行で確認しビセクションで原因を特定した上でrevert（機械確認込み）。
   最終状態はUART独立2ブートで確認。厳密性基準（1関数ずつ・実行確認・
   独立複数ブート・悪化時は即revert）を遵守した。
+
+---
+
+## 実施24：計画残り2項目（ocode強制・PD_TOP系force解除）の因果検証を**JTAG不使用**で完了——**両方とも因果棄却（負）**。ocode=eFuse強制値がASP3の自己較正値とほぼ同値のため弱い試験である点に注意。PD_TOP系はUARTでは無劣化・症状不変を確認したが，実施23のJTAG特有の症状は本ラウンドでは再検証不能につき**安全側で`#if 0`に維持**。分岐計画ケース2は消化完了——C6-generic総括を本節に記載，最終判断はユーザーに委ねる
+
+### 0. ★環境の相違（本ラウンド最大の制約）——JTAG使用不能，UARTのみで遂行
+
+着手時の環境確認で，計画が前提としていた「C5#1のnative USB-JTAG（ttyACM2相当）」が
+**本セッションのホストには接続されていない**ことが判明した。実際に接続されていたのは：
+- `ttyUSB0`：C5#1のUARTブリッジ（`esptool chip-id`で`d0:cf:13:f0:a7:44`と実機確認——
+  docs記載のDUTと一致）。
+- `ttyACM1`/`ttyUSB1`：**C6 AGC調査（`memory/project_c6_agc_investigation.md`，
+  ★FROZEN at 実施85）の「board C」（JTAG MAC`14:C1:9F:E0:5A:9C`，`esptool chip-id`で
+  ESP32-C6と実機確認）**。CLAUDE.mdの禁則・別調査の凍結ボードのため一切未接触。
+
+つまり本ラウンドはC5#1のJTAG（OpenOCD）に一切アクセスできず，**UARTブリッジのみ**で
+遂行した。計画書が指示する「JTAG読み戻しでの機械確認」「JTAG halt注入」はすべて
+UART代替手段に置き換えた（詳細は1節）。この制約は最終判断（6節）にも影響するため，
+以後のJTAG系ラウンドを開始する前に必ず本節を読むこと。
+
+### 1. 方法論：UARTのみでの機械確認手法の確立
+
+- **現flashのコンソールがusbjtag設定だったため，UARTブリッジには何も出力されない**
+  ことをまず確認した（`build/c5_idf61_trace`のCMakeCache＝`ESP32C5_CONSOLE=usbjtag`。
+  target.cmakeの既定は`uart0`だが，このtraceビルドは過去ラウンドで明示的に
+  usbjtagへ切替済みだった）。ROMバナーのみUART0直接出力のためttyUSB0に届くが，
+  ASP3アプリのsyslog/バナーはUSB-Serial-JTAG側へ出るためttyACM無しでは一切見えない。
+- **対策**：同一ソースツリーから`-DESP32C5_CONSOLE=uart0`で新規ビルド
+  `build/c5_idf61_uart`を作成（`cmake -S asp3/asp3_core -B build/c5_idf61_uart -G Ninja
+  -DCMAKE_TOOLCHAIN_FILE=.../toolchain-riscv64.cmake -DRISCV64_TOOLCHAIN_PREFIX=riscv32-esp-elf-
+  -DASP3_TARGET=esp32c5_espidf -DASP3_TARGET_DIR=.../asp3/target/esp32c5_espidf
+  -DASP3_APPLDIR=.../apps/wifi_scan -DASP3_APPLNAME=wifi_scan -DESP32C5_WIFI=ON
+  -DESP32C5_WIFI_REGI2C_TRACE=ON -DESP32C5_CONSOLE=uart0`）。ビルド成功・書込み後，
+  UARTブリッジでASP3自身のバナー・syslog出力が読めることを確認した
+  （ROM側UART0と同一物理ペリフェラルのため，コンソール切替だけで両立）。
+- **★新規発見（重要）**：syslog経由の周期出力は，**PHY較正の無限リトライループに
+  入った時点で完全に停止する**ことを実測で確認した。`wifi_scan.cfg`に1秒周期の
+  `CRE_CYC`（`TNFY_HANDLER`）を追加し`wifi_diag_cyclic_handler`（`wifi_scan.c`，
+  `TOPPERS_ESP32C5_WIFI_REGI2C_TRACE`ガード）でMODEM0生ADC/IQ_DONE/PD_*を
+  `syslog()`で出そうとしたところ，起動直後の1回分（`LOGTASK_PRIORITY=3` >
+  `MAIN_PRIORITY=10`のはずが，起動ごく初期の1発のみ）が届いた後は，ハングループへ
+  入って以降（タイミング計測で確認：ROMバナーからハングループ到達相当点まで
+  0.2秒以内・以後WDTリセット`rst:0x12`までの約3.4秒間は完全に無音）， 一切追加の
+  syslog出力が届かなくなる（`r24_uart_timing.log`で秒単位のタイミングを記録）。
+  優先度上はlogtaskがmain_taskを即座にpreemptできるはずであり，原因は
+  「PHY較正ループが割込みマスクないし長時間のCPUロックを伴う」ことの示唆だが，
+  **本ラウンドでは未確定のまま**（advisorレビュー指摘どおり，これ自体を過大解釈しない）。
+- **対策2（本命）**：`syslog`/logtaskを経由しない直接ポーリング出力
+  `target_fput_log`（`syssvc/logtask.c`の下請け＝カーネルバナー同様，タスク
+  スケジューリングに非依存で常に届く低レベル文字出力）を，PHY較正の無限
+  リトライループが確実に呼び続けると実施21で確認済みの`phy_get_pkdet_data`
+  （引数無し・`0x600a0c50`を読み符号拡張して返すだけの関数．libphy.a内の通常の
+  大域リンケージ関数と`nm`で確認済み＝`-Wl,--wrap`が直接効く．実施16と同じ手法）
+  へ`--wrap`で設置し，1秒に1回だけMODEM0生ADC(`0x600a081c`)・IQ_DONE
+  (`0x600a047c` bit16)・`PMU_POWER_PD_TOP/HPAON/HPCPU/LPPERI_CNTL`
+  (`0x600b00f8/fc/100/10c`)を直接文字出力する`__wrap_phy_get_pkdet_data`
+  （`wifi_trace.c`）を追加した。この方式は**PHY較正ループ中も確実に1秒おきに
+  出力される**ことを実測で確認した（`wifi_diag_live: ...`行，1ブートあたり
+  約3回，WDTリセットまで安定して出続ける）。これにより**JTAGなしで
+  「症状の生きた観測」＋「shim書込みの機械確認」の両方が可能になった**。
+
+### 2. 実験1：`esp_ocode_calib_init()`のbefore-PHY移植——**因果棄却（負）**。ただし弱い試験である点に注意
+
+`esp_shim_ocode_force_init()`（`esp_wifi_adapter.c`）を新設した。実施23が
+「ROM regi2cパッチ（`hal/esp_rom_hp_regi2c_esp32c5.c`）をASP3ビルドへ追加リンクする
+CMake構造変更が必要」と評価していたコストを回避するため，実施14で確立した
+「手動regi2cリプレイ」（`I2C_ANA_MST`(`0x600AF800`)のプロトコルをMMIOで直接
+再現する手法）をshim関数化した（`esp_shim_regi2c_ctrl_addr`/`esp_shim_regi2c_read`/
+`esp_shim_regi2c_write_mask`。hal/の`esp_rom_hp_regi2c_esp32c5.c`は読取り専用で
+参照しアルゴリズムを確認したのみ——**hal/自体は編集していない**）。
+
+stockの`set_ocode_by_efuse(1)`（`hal/esp_hw_support/port/esp32c5/ocode_init.c`）を
+忠実に再現：eFuse `RD_SYS_PART1_DATA4`(`0x600B486C`) bit[16:9]からocode値を読み，
+`I2C_ULP`(0x61) reg6(EXT_CODE)へ書込み，reg5(IR_FORCE_CODE) bit6を1にする。
+適用条件（`chip_revision==1&&blk_ver>=1`または`chip_revision>=100&&blk_ver>=2`）は
+実機のeFuse値（`RD_MAC_SYS2`＝`0x600B484C`）から動的に判定し，本DUTでは
+`chip_revision=100・blk_version=3`で成立することを確認した（実施21/23と一致）。
+呼出し位置は既存shim群（PVT/HP_ACTIVE系）と同じ`wifi_clock_enable_wrapper()`の
+一度きりブロックだが，**regi2cマスタクロックが実際に有効化された直後
+（`_regi2c_ctrl_ll_master_enable_clock(true)`+`regi2c_ctrl_ll_master_configure_clock()`の
+直後）**に置いた（regi2cトランザクションが物理的に成立するために必須）。
+
+**実機検証（独立5ブート＝RTSクリーンリセット×2＋同一セッション内WDTループ再現×3，
+全て同一結果）**：
+
+```
+ocode_force: chip_rev=100 blk_ver=3 ocode=0x65 readback ext_code_reg=0x65 force_reg=0x40 force_bit=1
+```
+
+- **書込み成立の機械確認**：`readback ext_code_reg=0x65`（書いたeFuse由来値と一致）・
+  `force_reg=0x40`（bit6=1＝IR_FORCE_CODE成立）——regi2cトランザクションが物理的に
+  成立していることをJTAG無しで確認した。
+- **観測（`wifi_diag_live`，各ブート3サンプル・約1秒間隔）**：`raw_adc=0x00000000`・
+  `done16=0`のまま——**症状不変**。
+
+**★弱い試験であることの明記（advisorレビュー指摘）**：実施23で確認済みのASP3側
+自己較正値は`OCODE=0x65`/`0x68`（HW自動較正の結果）であり，本ラウンドで強制した
+eFuse値も`0x65`——**ほぼ同一の値を強制したに過ぎない**。したがって本試験が示すのは
+「eFuse強制 vs 自己較正（ほぼ同値）という**書込み経路の違い自体**は症状に無関係」
+ということであり，「bandgap基準電圧が大きくズレていても症状に無関係」を意味しない
+（そのような大きなズレをこのDUTで作る手段が無いため，強い意味での反証はできていない）。
+実施23の評価（「基準電圧回路は生きていて較正済み，基準点が違うだけ」で症状に対しては
+弱い候補）と整合する結果だが，**「ocodeは棄却された」と単純化しないこと**。
+
+### 3. 実験2：`PMU_POWER_PD_TOP/HPAON/HPCPU/LPPERI_CNTL` force解除——**因果棄却（負）・ただし安全側で`#if 0`のまま維持**
+
+実施23で`#if 0`のまま保留されていた4行（`esp_shim_hpactive_residual2_init()`内）を
+`#if 1`へ切替え，1節で確立したUART直接出力手法でA/B検証した。
+
+**実機検証（独立5ブート，前項と同一セッション）**：
+
+```
+wifi_diag_live: raw_adc=0x00000000 done16=0 pd_top=0x00000000 pd_hpaon=0x00000000 pd_hpcpu=0x00000000 pd_lpperi=0x00000000
+```
+（3サンプル/ブート，5ブートとも完全一致）
+
+- **書込み成立の機械確認**：`pd_top`/`pd_hpaon`/`pd_hpcpu`/`pd_lpperi`が全て
+  `0x00000000`（POR既定の`0x1c`から変化＝stock実測値と一致）——force解除が
+  物理的に成立している。
+- **観測**：`raw_adc=0x00000000`・`done16=0`のまま——**症状不変**。
+- **UARTでの劣化なし**：ROMバナー→`ocode_force`行→`wifi_diag_live`×3→
+  `rst:0x12`という起動シーケンスの文字列パターン・タイミング（約3.5秒周期）は
+  本ブロック無効時（baseline，`r24_baseline_pkdet_live.log`）と完全に同一。
+  実施23が観測した「WDTリブート周期はPD_*の有無で変化しなかった」という所見と
+  本ラウンドのUART計測は整合する。
+
+**★重要な留保（advisorレビュー指摘・安全側の判断）**：実施23が実際に検出した問題は
+「**JTAG単発halt捕捉法がPHYハングループへ到達できず，毎回dispatcher_1近傍へ着地する**」
+という，**JTAG介入時にのみ現れる現象**だった。本ラウンドはJTAGが使用不能な環境
+（0節）だったため，**この現象そのものを再検証することはできていない**。UARTでの
+無劣化・自由継続実行時のpkdet呼出し頻度（1ブートあたり3サンプル，1秒間隔で
+安定＝ハングループに正常に留まり続けている）は，実施23の停滞が「真のハング」
+ではなく「JTAG介入自体のアーティファクト」だった可能性を示唆する**傍証**には
+なるが，確定ではない。次回JTAG環境（ユーザーが別PCで再開予定）での実施23の
+主要な調査ツール（単発halt捕捉法）を壊さないことを優先し，**因果棄却の結論
+（症状には無関係）は確定させつつ，コードは`#if 0`のまま安全側で維持する**
+（実施23の判断をそのまま踏襲）。
+
+### 4. 変更ファイル
+
+- `asp3/target/esp32c5_espidf/wifi/esp_wifi_adapter.c`：
+  - `esp_shim_regi2c_ctrl_addr`/`esp_shim_regi2c_read`/`esp_shim_regi2c_write_mask`
+    （実施14の手動regi2cリプレイのshim化，I2C_ULPブロック専用）。
+  - `esp_shim_diag_fput_str`/`esp_shim_diag_fput_hex8`/`esp_shim_diag_fput_dec`
+    （`target_fput_log`ベースの軽量フォーマッタ）。
+  - `esp_shim_ocode_force_init()`（実験1，**keep**＝`wifi_clock_enable_wrapper()`から
+    無条件呼出し。stockとの実在差分を解消するパリティ目的，実施21/22/23の既存shimと
+    同じ位置付け）。
+  - `esp_shim_hpactive_residual2_init()`内のPD_TOP/HPAON/HPCPU/LPPERI 4行は
+    **`#if 0`のまま維持**（3節の判断，実施23から変更なし）。
+- `asp3/target/esp32c5_espidf/wifi/wifi_trace.c`：`__wrap_phy_get_pkdet_data`
+  （1節，`target_fput_log`直接出力，レート制限1秒）を新設。
+- `asp3/target/esp32c5_espidf/esp_wifi.cmake`：`ESP32C5_WIFI_REGI2C_TRACE=ON`時に
+  `-Wl,--wrap=phy_get_pkdet_data`を追加。
+- `apps/wifi_scan/wifi_scan.c`・`wifi_scan.h`・`wifi_scan.cfg`：
+  `wifi_diag_cyclic_handler`（1秒周期syslog版，`TOPPERS_ESP32C5_WIFI_REGI2C_TRACE`
+  ガード）。1節のとおりPHY較正ループ中は出力が止まるため主たる観測手段ではないが，
+  起動ごく初期のPD_*/ADC状態のsnapshot（1回分）は確実に取得できるため残置する。
+- 本doc（実施24追記）。`docs/c5-tone-adc-plan.md`は分岐計画を「消化完了」へ更新
+  （5節）。
+- スクラッチ（`260d98fa…/scratchpad/`）：`r24_baseline_boot1.log`（現状把握，
+  usbjtagコンソール無音の確認）・`r24_uart_console_boot1.log`／`r24_uart_timing.log`
+  （syslog経由出力がハングループで停止する実測）・`r24_baseline_pkdet_live.log`
+  （`__wrap_phy_get_pkdet_data`によるbaseline，PD_TOP無効時）・
+  `r24_ocode_check_boot1.log`（実験1の機械確認ログ）・
+  `r24_pdtop_enabled_boot1.log`／`r24_pdtop_enabled_boot2_independent.log`
+  （実験2のA/B・独立2ブート分）・`r24_final_state_console.log`（最終状態確認）。
+
+### 5. 分岐計画（`docs/c5-tone-adc-plan.md`）の消化状況——**ケース2(2)消化完了**
+
+実施23が残していた2件（`PMU_POWER_PD_TOP/HPAON/HPCPU/LPPERI_CNTL`のforce解除・
+`esp_ocode_calib_init()`）を本ラウンドで両方とも実機検証した。結果は両方とも
+「因果棄却（負）」——ただし2節・3節に記載した2つの重要な留保（ocodeは弱い試験・
+PD_TOP系はJTAG特有の現象を再検証できていない）付きである。これにより，計画書
+「分岐計画」ケース2(2)「電源系初期化列の関数単位・段階的加算移植A/B」は
+**消化完了**とする。
+
+累計：実施21〜24で個別に因果棄却された候補は**13件**
+（`PCR_FPGA_DEBUG`・PVT・PMU HP_ACTIVE 5レジスタ・HP_ACTIVE
+CK_POWER/SYSCLK/BACKUP/BACKUP_CLK・LP_ACTIVE REGULATOR0+LP_SLEEPバンク・
+PD_TOP/HPAON/HPCPU/LPPERI force解除・bandgap ocode強制）。
+
+### 6. C6-genericという言明について——総括と推奨（判断はユーザーに委ねる）
+
+**確定した事実の要約（実施14〜24）**：
+1. デジタル可視領域は実施15/20/21/22/23で反復比較され，説明可能なクロック/ICG/
+   BB-config系レジスタは全てstock/ASP3間でビット同一（唯一の例外＝実施20で
+   確定したMODEM0生ADCサンプル自体，これが症状そのもの）。
+2. 起動時電源初期化列（`pmu_init()`＝`pmu_hp_system_init()`+`pmu_lp_system_init()`+
+   `pmu_power_domain_force_default()`+PVT+ocode）を関数単位で段階的に移植し，
+   stock値との完全一致を機械確認した上で13件全てが症状不変（実施21〜24）。
+3. stockは同一個体（C5#1）・同一libphy.aブロブ上で完走する（実施15/21，陽性対照）
+   ——個体差・環境交絡は排除済み。
+4. regi2c/クロック基盤自体はハング中も生存・応答している（実施14）。
+5. トーン自己ループバック測定チェーンの読み書き先はMODEM0内部MMIO
+   （regi2c非経由）と逆アセンブルで確定済み（実施20）。
+
+**C6との構造比較**：
+- 共通点：Direct Boot構成であること，同世代（Wi-Fi 6デュアルバンド）モデムである
+  こと，「デジタル制御系は全一致なのにアナログ/RF層の応答だけ欠落する」という
+  症状の型が同じであること，双方で十数〜数十項目の個別候補を反証済みという
+  調査の厚みが同水準であること。
+- 相違点：C5は**較正段階そのもの**（`phy_iq_est_enable_new`の自己ループバック
+  測定，実行時通信より前）で無応答，C6は**実行時の受信鎖**（`lmacRxDone`）と
+  TX無放射で無応答——症状が現れる段階が異なる。またC5はstock（同一個体・同一
+  ブロブ）陽性対照があり，個体・環境交絡が完全に排除されている点でC6より
+  条件が良い（C6は既知の交絡除去に82ラウンドを要した）。
+
+**原理的に未確認の残余**：
+- regi2c越しに見えないRF専用アナログ状態（シンセサイザPLLロック・LNA/PA
+  バイアス・インピーダンス整合等）——公開レジスタでは観測不能（実施14で確認）。
+- blob内部のアナログ較正シーケンス自体（regi2c不使用のMODEM0直接アクセス，
+  実施20）——ソースが無く逆アセンブル以上の追跡は困難。
+- 2節・3節の留保（ocodeは弱い試験・PD_TOP系はJTAG特有現象を未検証）。
+
+**推奨（2案，優先順位はユーザー判断）**：
+- **(a) C5/C6の証拠パッケージを揃えてEspressif問い合わせへ進む**。理由：
+  デジタル可視領域を尽くした（13+82=95件の個別反証）という調査の厚みは
+  すでに十分に強く，残る説明領域は公開情報のみでは原理的に確認不能な
+  アナログ内部状態に絞り込まれている。C5はC6より個体・環境交絡が少ない
+  ぶん証拠として強く，「Direct Boot構成でのWi-Fi PHY較正/受信が構造的に
+  失敗する」という共通パターンを補強する良い追加事例になる。
+- **(b) さらに続ける場合の残り手段**：
+  - JTAG環境復帰後に3節の留保（PD_TOP系のJTAG halt捕捉再検証）を解消する
+    （ただし因果棄却自体は本ラウンドで確定済みのため優先度は低い）。
+  - ocode正式実装（`esp_rom_hp_regi2c_esp32c5.c`のASP3ターゲットへの追加
+    リンク）による，より強い試験（eFuse値と自己較正値が意図的に異なる
+    個体があれば理想的だが，本DUTでは両者が近いため得られる情報は限定的）。
+  - 実施14で保留した「未公開regi2c blockの逆アセンブル・トレース」
+    （C6実施23の`wifi_regi2c_patch_install`手法の移植）——ただし打ち切り
+    基準に照らして本命度は低いと評価されている。
+
+**最終判断はユーザーに委ねる**。途中で症状が動いた場合はもちろんそちらを優先し，
+本節の総括は撤回する。
+
+### 7. C5#1の最終状態
+
+- 最終ソース状態：ocode force（keep，実験1）・PD_TOP系4行は`#if 0`維持（実験2，
+  3節の判断）・実施21〜23の既存shim（PVT・HP_ACTIVEバイアス・CK_POWER・
+  SYSCLK/BACKUP/BACKUP_CLK・LP系）は全てkeepのまま変更なし。
+- `build/c5_idf61_trace`（**usbjtag console，実施14〜23と同じ既定設定**）を
+  上記ソース状態で再ビルド（FLASH 11.82%/RAM 84.63%，新規追加分は誤差程度）→
+  C5#1へ書込み。
+- 最終UART確認（RTSクリーンリセット，独立1回・約12秒キャプチャ）：
+  usbjtagコンソール設定のため，ASP3アプリ側の出力はUARTに出ない
+  （実施14〜23と同じ既知の制約）。ROMバナー→`rst:0x12 (RTC_SWDT_SYS)`ループが
+  約3.5秒周期で継続することを確認——実施13〜23と症状同一，退行なし。
+- **新規の恒久資産**：`build/c5_idf61_uart`（同一ソース，`-DESP32C5_CONSOLE=uart0`
+  のみ相違）を今回新設した。次回以降，JTAGが使えない環境でもUARTだけで
+  症状のライブ観測（`wifi_diag_live`）が可能になる恒久的な代替手段として
+  スクラッチではなくビルド設定として残す（ソース側の変更＝
+  `esp_wifi.cmake`の`--wrap=phy_get_pkdet_data`と`wifi_trace.c`の対応する
+  ラッパは常設，コンソール種別のみビルド時選択）。
+- C5#2（`D0:CF:13:F0:C8:94`）：本ラウンドも物理切断済み・一切未接触。
+- C6 board C（`14:C1:9F:E0:5A:9C`，別調査★FROZEN）：本ラウンドは`esptool chip-id`
+  （読取り専用）でのみ識別のため触れ，その後は一切未接触。フラッシュ内容
+  変更なし。
+
+### 8. 検証（実施24）
+
+- ビルド：`build/c5_idf61_uart`（新規構成）・`build/c5_idf61_trace`（既存構成，
+  最終状態）とも成功。警告は実施21〜23から既知の2件のみ，新規warning/errorなし。
+- 実機（C5#1，UARTブリッジ`ttyUSB0`のみ，全操作esptool/pyserial経由）：
+  - baseline確認（PD_TOP無効・ocode force有効）：独立1ブート，`wifi_diag_live`
+    3サンプルで`raw_adc=0・done16=0・pd_top等=0x1c`を確認。
+  - 実験1（ocode force）：独立5ブート（RTSリセット×2＋WDTループ内再現×3），
+    全て`ocode_force: ...readback...`行で書込み成立を機械確認，症状不変。
+  - 実験2（PD_TOP系）：独立5ブート（同上），全て`wifi_diag_live`で
+    `pd_top=0x00000000`等の機械確認，症状不変，WDTリブート周期不変。
+  - 最終状態：`build/c5_idf61_trace`書込み後，独立1ブートでUART症状
+    （`rst:0x12`ループ約3.5秒周期）を再確認。
+- C5#2：物理切断済み・一切未接触。C6 board C：`chip-id`読取りのみ，機能に
+  影響する操作は一切実施せず。

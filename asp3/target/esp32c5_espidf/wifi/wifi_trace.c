@@ -24,6 +24,7 @@
 #include <string.h>
 #include "wifi_trace.h"
 #include "esp_shim.h"
+#include "target_syssvc.h"	/* target_fput_log（実施24：PD_TOP A/B用の直接出力） */
 
 #define WIFI_REGI2C_SIZE 2048
 
@@ -163,4 +164,81 @@ __wrap_phy_set_txcap_reg(uint32_t arg0)
 	e->t_us_low = (uint32_t)esp_shim_time_us();
 	e->arg0 = arg0;
 	__real_phy_set_txcap_reg(arg0);
+}
+
+/*
+ *  【実施24】PD_TOP/HPAON/HPCPU/LPPERI force解除shimのA/B判定用，
+ *  logtask（タスクスケジューリング）に依存しない直接ポーリング出力。
+ *
+ *  本ラウンドの実測で判明：wifi_scan.cfgのCRE_CYC経由のsyslog()による
+ *  周期出力（wifi_diag_cyclic_handler，wifi_scan.c）は，PHY較正の無限
+ *  リトライループに入った後は出力が完全に止まる（1回目の出力のみ届き，
+ *  以後は次のSUPER_WDTリセットまで無音）。原因はlogtask（優先度3）が
+ *  スケジューリングされなくなるためと推定される（未確定，本ラウンドの
+ *  範囲では確定できず）。回避として，`target_fput_log`（syssvc/logtask.cの
+ *  下請け＝低レベルポーリング文字出力．カーネルバナー同様，タスク
+ *  スケジューリングに非依存で常に届く）を直接呼ぶ。
+ *
+ *  フック先＝`phy_get_pkdet_data`（引数無し・`0x600a0c50`を読み符号拡張して
+ *  返すだけの関数．実施16で逆アセンブル確認済み）。実施21〜23で
+ *  「ASP3のPHY較正無限リトライループはこの関数を経由的に呼び続ける」と
+ *  確認済みの唯一の関数のため，これをフック先に選ぶ（regi2c越しの
+ *  phy_i2c_*系は実施20の逆アセンブルにより，トーン測定チェーンが
+ *  MODEM0内部MMIOを直接読むだけでregi2cを経由しないと判明しているため，
+ *  ループ中に呼ばれる保証がない）。1秒に1回だけ出力するようソフトウェア
+ *  タイマ（esp_shim_time_us()差分）でレート制限する。
+ */
+static uint32_t	wifi_diag_last_print_us;
+
+static void
+wifi_diag_fput_str(const char *s)
+{
+	while (*s != '\0') {
+		target_fput_log(*s);
+		s++;
+	}
+}
+
+static void
+wifi_diag_fput_hex32(uint32_t v)
+{
+	static const char	hexdig[] = "0123456789abcdef";
+	int_t				i;
+
+	for (i = 28; i >= 0; i -= 4) {
+		target_fput_log(hexdig[(v >> i) & 0xFU]);
+	}
+}
+
+extern int32_t __real_phy_get_pkdet_data(void);
+int32_t
+__wrap_phy_get_pkdet_data(void)
+{
+	int32_t		ret = __real_phy_get_pkdet_data();
+	uint32_t	now = (uint32_t)esp_shim_time_us();
+
+	if ((now - wifi_diag_last_print_us) >= 1000000U) {
+		uint32_t	raw_adc   = *(volatile uint32_t *)0x600A081CU;
+		uint32_t	done      = *(volatile uint32_t *)0x600A047CU;
+		uint32_t	pd_top    = *(volatile uint32_t *)0x600B00F8U;
+		uint32_t	pd_hpaon  = *(volatile uint32_t *)0x600B00FCU;
+		uint32_t	pd_hpcpu  = *(volatile uint32_t *)0x600B0100U;
+		uint32_t	pd_lpperi = *(volatile uint32_t *)0x600B010CU;
+
+		wifi_diag_last_print_us = now;
+		wifi_diag_fput_str("\r\nwifi_diag_live: raw_adc=0x");
+		wifi_diag_fput_hex32(raw_adc);
+		wifi_diag_fput_str(" done16=");
+		target_fput_log((char)('0' + ((done >> 16) & 1U)));
+		wifi_diag_fput_str(" pd_top=0x");
+		wifi_diag_fput_hex32(pd_top);
+		wifi_diag_fput_str(" pd_hpaon=0x");
+		wifi_diag_fput_hex32(pd_hpaon);
+		wifi_diag_fput_str(" pd_hpcpu=0x");
+		wifi_diag_fput_hex32(pd_hpcpu);
+		wifi_diag_fput_str(" pd_lpperi=0x");
+		wifi_diag_fput_hex32(pd_lpperi);
+		wifi_diag_fput_str("\r\n");
+	}
+	return(ret);
 }

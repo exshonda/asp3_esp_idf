@@ -11,6 +11,9 @@
 
 #ifndef TOPPERS_MACRO_ONLY
 extern void main_task(EXINF exinf);
+#ifdef TOPPERS_ESP32C5_WIFI_REGI2C_TRACE
+extern void wifi_diag_cyclic_handler(EXINF exinf);	/* 実施24 */
+#endif /* TOPPERS_ESP32C5_WIFI_REGI2C_TRACE */
 #endif
 
 #endif /* WIFI_SCAN_H */

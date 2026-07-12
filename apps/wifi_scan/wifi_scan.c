@@ -58,6 +58,42 @@ diag_wifi_nvs_byte0(void)
 	return(*(volatile uint8_t *)p);
 }
 
+#ifdef TOPPERS_ESP32C5_WIFI_REGI2C_TRACE
+/*
+ *  【実施24】PD_TOP/HPAON/HPCPU/LPPERI force解除shimのA/B判定用，
+ *  JTAG非依存のUART計装。wifi_scan.cfgのCRE_CYCから1秒周期で呼ばれる
+ *  （TNFY_HANDLER＝タスク非依存コンテキスト。main_taskがPHY較正の
+ *  無限リトライループ内で停止していても，タイマ割込み経由でこの
+ *  ハンドラは独立して発火し続ける）。
+ *
+ *  出力：トーン自己ループバック測定の生ADCサンプル（MODEM0+0x81C）と
+ *  IQ_DONEビット（MODEM0+0x47C bit16）＝実施14〜23で追ってきた症状
+ *  そのもの，および実施23で新規差分と確定したPMU_POWER_PD_TOP/HPAON/
+ *  HPCPU/LPPERI_CNTL（0x600B00F8/FC/100/10C）の現在値（shim適用の
+ *  機械確認をJTAG無しで行うため）。
+ */
+void
+wifi_diag_cyclic_handler(EXINF exinf)
+{
+	uint32_t	raw_adc = *(volatile uint32_t *)0x600A081CU;
+	uint32_t	done    = *(volatile uint32_t *)0x600A047CU;
+	uint32_t	pd_top    = *(volatile uint32_t *)0x600B00F8U;
+	uint32_t	pd_hpaon  = *(volatile uint32_t *)0x600B00FCU;
+	uint32_t	pd_hpcpu  = *(volatile uint32_t *)0x600B0100U;
+	uint32_t	pd_lpperi = *(volatile uint32_t *)0x600B010CU;
+
+	(void) exinf;
+
+	syslog(LOG_NOTICE,
+		   "wifi_diag: raw_adc=0x%08x done16=%d pd_top=0x%02x pd_hpaon=0x%02x",
+		   (unsigned int)raw_adc, (int_t)((done >> 16) & 1U),
+		   (unsigned int)pd_top, (unsigned int)pd_hpaon);
+	syslog(LOG_NOTICE,
+		   "wifi_diag: pd_hpcpu=0x%02x pd_lpperi=0x%02x",
+		   (unsigned int)pd_hpcpu, (unsigned int)pd_lpperi);
+}
+#endif /* TOPPERS_ESP32C5_WIFI_REGI2C_TRACE */
+
 static void
 promisc_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 {

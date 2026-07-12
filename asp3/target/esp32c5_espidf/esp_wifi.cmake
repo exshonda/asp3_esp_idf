@@ -334,6 +334,11 @@ if(ESP32C5_WIFI_REGI2C_TRACE)
         # 発行元をphy_set_txcap_reg（libphy.a大域リンケージ関数）まで特定
         # できたため，その引数（channel/freq値，a0一本）も同一手法で記録。
         -Wl,--wrap=phy_set_txcap_reg
+        # 実施24: PD_TOP系A/B用。phy_get_pkdet_data（引数無し，実施16で
+        # 逆アセンブル確認済み）はPHY較正の無限リトライループが呼び続ける
+        # 唯一の確認済み関数のため，ここにtarget_fput_log直接出力（logtask
+        # スケジューリングに非依存）のレート制限付きフックを設置する。
+        -Wl,--wrap=phy_get_pkdet_data
     )
 endif()
 
