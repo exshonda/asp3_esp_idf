@@ -818,6 +818,54 @@ esp_shim_pvt_init(void)
 	esp_rom_delay_us(1000U);
 }
 
+/*
+ *  PMU HP_ACTIVEバイアス生成器起動＋WIFI電源ドメインのforce→FSM委譲
+ *  （【実施22】決定実験Cのbefore-PHY移植）
+ *
+ *  実施22のJTAG A/B実測（PMU HP_ACTIVEバンク5レジスタの4-way比較，
+ *  stock×2・ASP3×2）で，PMU_HP_ACTIVE_DIG_POWER/HP_REGULATOR1は差分なし，
+ *  HP_REGULATOR0の差分は既に実施21でPVT/dbias軸として因果棄却済みだが，
+ *  残り2件が実施11〜21のどのラウンドでも一度も実測されていなかった
+ *  新規差分と判明した：
+ *    - PMU_HP_ACTIVE_BIAS（0x600B0018）：stock=0x02000000（XPD_BIAS=1，
+ *      HP_ACTIVEモードのアナログバイアス生成器を明示起動）／
+ *      ASP3=0x00000000（POR既定のまま＝未起動）。
+ *      hal/components/esp_hw_support/port/esp32c5/pmu_param.c:212の
+ *      PMU_HP_ACTIVE_ANALOG_CONFIG_DEFAULT()で`.bias.xpd_bias = 1`と
+ *      確定．stockのpmu_hp_system_init(PMU_MODE_HP_ACTIVE, ...)が
+ *      設定する．ASP3はこの呼出し自体がゼロ行．
+ *    - PMU_POWER_PD_HPWIFI_CNTL（0x600B0108）：stock=0x00000000
+ *      （FORCE_PU/FORCE_NO_RESET/FORCE_NO_ISO等の強制ビットを全解除し
+ *      HW電源シーケンサFSMへ委譲）／ASP3=0x0000001C（POR既定のまま＝
+ *      FORCE_PU=1・FORCE_NO_RESET=1・FORCE_NO_ISO=1で静的固定）。
+ *      hal/.../pmu_init.c:145-152のpmu_power_domain_force_default()相当が
+ *      4電源ドメイン（HPWIFI含む）を順に「force解除→FSM委譲」させる．
+ *      ASP3はこの遷移を一度も経験していない＝WIFI電源ドメインが
+ *      POR以来ずっと静的forceのまま（動的な電源シーケンス・内部リセット
+ *      パルスを一度も経ていない可能性）．
+ *
+ *  両レジスタともプレーンなR/Wビットフィールドでトリガ/ラッチ機構は
+ *  無い（pmu_ll.hのpmu_ll_hp_set_bias_xpd/pmu_ll_hp_set_power_force_*系に
+ *  update系呼出しは存在しない）．
+ *
+ *  実施22はまずASP3がPHY較正の無限リトライループに入った後（mid-hang）
+ *  にJTAGで同値を注入し，読み戻しで注入成立を確認した上で30秒観測したが
+ *  症状不変だった（組合せ・単独とも）．ただしXPD_BIASはアナログバイアス
+ *  基準点そのものであり，較正チェーンが起動時に一度だけ基準点を
+ *  ラッチする設計であれば mid-hang注入は原理的に無力（実施21候補Aと
+ *  同型の限界，advisorレビュー指摘）．本移植はstockと同じ
+ *  「PHY較正開始前」タイミングでの因果検証を兼ねる．
+ */
+static void
+esp_shim_hpactive_bias_init(void)
+{
+	volatile uint32_t	*pmu_bias = (volatile uint32_t *)0x600B0018U;	/* PMU_HP_ACTIVE_BIAS */
+	volatile uint32_t	*pmu_pd_hpwifi = (volatile uint32_t *)0x600B0108U;	/* PMU_POWER_PD_HPWIFI_CNTL */
+
+	*pmu_bias = 0x02000000U;		/* XPD_BIAS=1（bit25）：HP_ACTIVEアナログバイアス生成器起動 */
+	*pmu_pd_hpwifi = 0x00000000U;	/* force全解除：WIFI電源ドメインをHW FSM委譲へ */
+}
+
 static void
 wifi_clock_enable_wrapper(void)
 {
@@ -877,6 +925,10 @@ wifi_clock_enable_wrapper(void)
 		 *  前）に行うPVT自動dbias＋チャージポンプ有効化を，Wi-Fi初期化の
 		 *  一度きりのこの時点（regi2c有効化・phy_enableより前）で代替する  */
 		esp_shim_pvt_init();
+
+		/*  【実施22】決定実験Cのbefore-PHY移植：PMU HP_ACTIVEバイアス
+		 *  生成器起動＋WIFI電源ドメインのforce→FSM委譲を同じ時点で代替する  */
+		esp_shim_hpactive_bias_init();
 
 		modem_clock_deselect_all_module_lp_clock_source();
 		modem_clock_select_lp_clock_source(PERIPH_WIFI_MODULE,

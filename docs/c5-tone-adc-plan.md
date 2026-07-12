@@ -13,6 +13,27 @@
 >   生ADC=0）。
 > - 詳細・教訓（hal/とv6.1の世代差・新PCのJTAG罠3件）＝`docs/c5-bringup.md`実施21。
 >   次段は「実施21改訂：PMU/LP全域スイープ」節（特に決定実験C＝PMU HP_ACTIVE 4レジスタ注入）へ。
+>
+> **【結果追記（実施22実施済み，2026-07-12）】**
+> - **決定実験C＝新規差分2件（XPD_BIAS・PMU_POWER_PD_HPWIFI_CNTL）を発見・
+>   mid-hang注入とbefore-PHY移植の両方で因果棄却**（DIG_POWER・HP_REGULATOR1は
+>   差分なし，HP_REGULATOR0の差分は実施21のPVT軸で既に棄却済み）。XPD_BIAS
+>   （HP_ACTIVEアナログバイアス生成器の起動ビット）はmid-hang注入だけでは
+>   タイミング上不十分な懸念があったため，実施21の候補Bと同水準まで
+>   before-PHY加算移植（`esp_shim_hpactive_bias_init()`）で再検証し，stock値との
+>   完全一致を確認した上で症状不変を確定した。
+> - **PMU/LP/MODEM1/MODEM_PWR0スイープ**：未踏査だった`LP_CLKRST`・`LP_AON`・
+>   `LP_I2C_ANA_MST`・`LPPERI`・`LP_ANA`・`MODEM1`・`MODEM_PWR0`を一括ダンプ。
+>   MODEM1/MODEM_PWR0は差分なし（全ゼロ域）。LP_ANA/LPPERIの表面上の差分は
+>   フィールド解読の結果，BOD（brown-out detector）／電圧グリッチ検出器／
+>   LPドメイン周辺クロックであり，WiFi RF/PHYバイアス経路と機序上無関係と判明し
+>   机上棄却（JTAG注入は実施せず）。
+> - **分岐計画ケース2の(1)（MODEM1/MODEM_PWR0未踏査の解消）は完了**。**(2)（電源系
+>   初期化列の関数単位・段階的加算移植A/B）は未着手のまま**——`pmu_hp_system_init()`
+>   のdigital/clock/retentionパラメータ・`pmu_lp_system_init()`・`esp_rtc_init()`の
+>   今回扱っていない部分が残る。したがって現時点で「C6-genericな共通アナログ壁」と
+>   結論するのは時期尚早（(2)を尽くしてから判断すべき）。
+> - 詳細＝`docs/c5-bringup.md`実施22。
 
 対象：`docs/c5-bringup.md` 実施20時点の唯一の壁＝blob内トーン自己
 ループバック測定の生ADCサンプル（`MODEM0+0x81C..0x828`）がASP3のみ

@@ -3308,3 +3308,258 @@ stock実測ダンプ準拠の全レジスタ（PCRリセットパルス→CLK/FU
     約3.5秒周期`rst:0x12 (RTC_SWDT_SYS)`ループを最終確認（実施13〜20と症状同一）。
   - JTAG介入で停滞したブート（1節の罠2）は測定から全て除外（in-loopゲート不成立＝リトライ）。
 - C5#2（`D0:CF:13:F0:C8:94`）：物理切断済み・一切未接触。
+
+---
+
+## 実施22：決定実験C（PMU HP_ACTIVEバンク4語）＋PMU_POWER_PD_HPWIFI_CNTL＝**新規差分2件を発見・mid-hang注入とbefore-PHY移植の両方で因果棄却（実施21候補Bと同じ完全性水準）**／PMU/LP/MODEM1/MODEM_PWR0スイープ＝残る差分（LP_ANA・LPPERI）はいずれもBOD/電圧グリッチ検出器・LPドメイン周辺クロックで，WiFi RF/PHYバイアス経路と機序上無関係と判明・棄却
+
+コーディネータ指示＝`tmp/c5_review_jisshi21_plan.md`の決定実験C（`pmu_hp_system_init`の
+HP_ACTIVE 4レジスタ注入）を最優先で実施し，解決しなければPMU/LP全域スイープへ。
+本ラウンドもC5#1（`D0:CF:13:F0:A7:44`，ttyACM0／UARTブリッジttyUSB0）のみ使用。
+
+### 0. 方法論的発見（本ラウンド固有）
+
+- **実施21の「+2.6s遅延attach＋SWD無効化バースト」を踏襲した最初の試行は，本ラウンドでは
+  ほぼ常に失敗した**（早期停滞trap＝PCが`dispatcher_1`(0x420217cc/d0)に恒久固定，
+  systimerは進むがカーネルが二度と復帰しない）。30回近く試行してほぼ全滅という，
+  実施21の「体感1/2〜2/3」よりはるかに悪い成功率だった。
+- 原因を切り分けるため，**JTAG介入を一切行わずに単発の遅延halt**（RTS reset後，
+  +9.9s＝WDTループの3サイクル目まで完全に手放しで自然実行させてから初めて1回だけ
+  halt）を試したところ，**初回で確実に`phy_iq_est_enable_new`/`phy_get_pkdet_data`
+  （既知のハングループ）内で捕捉できた**。以後この方式（早期SWD無効化バーストを
+  行わず，単発の遅い一撃読みのみ→ハングループ内と確認できてから初めてSWD無効化）
+  に切替えたところ，ASP3側成功率が大幅に改善した（複数回連続で初回成功）。
+  実施21の「+2.6sバーストは安全」という結論は，**この個体/この時点のこの環境では
+  もはや成立しない**（PC/ビルド内容やUSB/ホスト側の何らかの要因でタイミング窓が
+  シフトした可能性——未解明。次段は+2.6s付近の早期介入を避け，本ラウンドで確立した
+  「単発遅延一撃」方式をデフォルトにすることを推奨）。
+- stock側は`~/tools/esp-idf-v6.1` `examples/wifi/scan`（実施21のスクラッチ資産，
+  libphy.a MD5=`4ccdbdbe1faf04a84b4059c882febe0f`＝実施15/21と同一を確認）を毎回
+  RTSクリーンリセット→UARTでscan完走確認（陽性対照）→JTAG attachのみ（halt不要，
+  常に安定）で読んだ。stock側の停滞は一度も観測されなかった＝停滞trapはASP3
+  （Direct Boot固有の何らかのブート経路）に限定される。
+
+### 1. 決定実験C：PMU HP_ACTIVEバンク5レジスタのstock/ASP3比較＋因果検証
+
+対象：`PMU_HP_ACTIVE_DIG_POWER`(`0x600B0000`)・`BIAS`(`0x600B0018`)・
+`HP_REGULATOR0`(`0x600B0028`)・`HP_REGULATOR1`(`0x600B002C`)・
+`PMU_POWER_PD_HPWIFI_CNTL`(`0x600B0108`)。stock×2・ASP3×2（各独立クリーンブート，
+ASP3は上記「単発遅延一撃」方式でハングループ内到達を確認してから読取り）。
+
+| レジスタ | stock（2ブート一致） | ASP3（2ブート一致） | 判定 |
+|---|---|---|---|
+| DIG_POWER | `0x00000000` | `0x00000000` | 差分なし |
+| BIAS | `0x02000000`（**XPD_BIAS=1**） | `0x00000000`（POR既定＝XPD_BIAS=0） | **新規差分** |
+| HP_REGULATOR0 | `0xC004AFD0` | `0xC667BFF0` | 差分あり＝実施21のPVT/dbias軸（**既に因果棄却済み**，再掲不要） |
+| HP_REGULATOR1 | `0x00000000` | `0x00000000` | 差分なし |
+| PD_HPWIFI_CNTL | `0x00000000`（force全解除＝FSM委譲） | `0x0000001C`（POR既定＝FORCE_PU/NO_RESET/NO_ISO=1のまま） | **新規差分** |
+
+`hal/components/esp_hw_support/port/esp32c5/pmu_param.c:210-212`
+（`PMU_HP_ACTIVE_ANALOG_CONFIG_DEFAULT()`）で`.bias.xpd_bias = 1`と確定——stockの
+`pmu_hp_system_init(PMU_MODE_HP_ACTIVE, ...)`がHP_ACTIVEモードのアナログバイアス
+生成器を明示的に起動している。ASP3はこの呼出しがゼロ行（grep 0件，実施21レビュー
+機上確認どおり）のためPOR既定（バイアス生成器が明示起動されない状態）のまま。
+`PMU_POWER_PD_HPWIFI_CNTL`は`pmu_power_domain_force_default()`が「force固定→HW FSM
+委譲」へ遷移させる4ドメインの1つ（`hal/.../pmu_init.c:145-152`，plain R/Wビットフィールド，
+トリガ不要）——ASP3は一度もこの遷移を経験していない。両方とも**PMU/LP系ブロックの
+中で実施11〜21のどのラウンドでも一度も実測されていなかった具体的レジスタ**であり，
+「制御は健全・アナログ測定だけ死ぬ」症状と機序面で強く整合する候補。
+
+### 2. 因果検証（mid-hang注入）＝**症状不変（棄却）——ただしタイミング上の限界あり（3節）**
+
+判定基準（実施前に固定）：30秒観測でIQ_DONE(`0x600a047c` bit16)が立つ，または
+生ADC(`0x600a081c`)が非ゼロになれば成功。stock値どおりに書込み，読み戻しで注入成立を
+機械確認した上で判定する。
+
+ASP3のハングループ内（`phy_get_pkdet_data`/`phy_iq_est_enable_new`到達を確認した
+1撃halt）で，SWD無効化と同一burst内で注入：
+
+- **組合せ注入**（`BIAS=0x02000000`＋`PD_HPWIFI_CNTL=0x0`）：2回実施，いずれも
+  読み戻しでstock値と完全一致を確認した上で30秒観測（PCはハングループ内を巡回，
+  IQ_DONE=0，生ADC=全ゼロのまま）——**症状不変**。
+- **BIAS単独注入**：1回実施，同条件で症状不変。
+- **PD_HPWIFI_CNTL単独注入**：1回実施，同条件で症状不変。
+
+### 3. ★重要な留保（advisorレビューで指摘）→ 4節のbefore-PHY移植で解消
+
+mid-hang注入（PHY較正が既にハングループに入った後に値を書く）は，**もし該当レジスタが
+PHY初期化の早期（`phy_enable`より前）に一度だけ読まれてそれ以降の測定チェーンの
+内部状態（バイアス基準点・ラッチされた測定系オフセット等）を決めてしまうタイプ
+であれば，注入のタイミングとして原理的に無力**——実施21の候補Aで既に指摘された
+のと同型の限界であり，実施21の候補Bはこの限界を踏まえて**mid-hang注入と
+較正前タイミングでの加算移植の両方**を行って初めて棄却を確定させている。
+2節はXPD_BIAS/PD_HPWIFI_CNTLについて**mid-hang注入のみ**であり，特にXPD_BIAS
+（アナログバイアス生成器の起動ビットそのもの）はこの限界が最も懸念される
+レジスタだった。**したがって2節時点の「症状不変」は限定的な棄却であり，
+「候補として完全に棄却された」とは言えなかった**——そのため4節でbefore-PHY
+移植による再検証を実施し，この留保を解消した（実施21の候補Bと同じ完全性
+水準に揃えた）。
+
+### 4. PMU/LP/MODEM1/MODEM_PWR0スイープ（決定実験Cのmid-hang結果を受けて並行実施）
+
+`tmp/c5_review_jisshi21_plan.md`のブロック表のうち未踏査だった
+`LP_CLKRST`(`0x600B0400`)・`LP_AON`(`0x600B1000`)・`LP_I2C_ANA_MST`(`0x600B2400`)・
+`LPPERI`(`0x600B2800`)・`LP_ANA`(`0x600B2C00`)・`MODEM1`(`0x600AC000`)・
+`MODEM_PWR0`(`0x600AD000`)を一括ダンプ（stock×2・ASP3×2，各ブロック内
+reproducibility確認込み）。
+
+**ノイズ除外**（platform内2ブートで既に変動＝ライブ計測/カウンタ系と確定，
+比較対象から除外）：
+- `LP_AON+0x4`（`0x600B1004`）：stock内でも変動——起動後経過に依存するカウンタ。
+- `LPPERI+0x10/+0x24`（`0x600B2810`/`0x600B2824`）：stock/ASP3いずれも自己内で変動。
+- `MODEM_PWR0`内`+0x800`/`+0xC00`（`0x600AD800`/`0x600ADC00`）と`+0x86C`/`+0xC6C`：
+  自己内で変動。
+
+**reset-cause由来の非本質的差分**（ASP3はJTAG捕捉時点で直近の実リセットが
+内部RTC_SWDTリセット，stockはRTSクリーンリセット直後のまま——**リセット種別が
+異なる**という交絡であり，症状の原因側候補にはならない。除外）：
+- `LP_CLKRST_RESET_CAUSE_REG`(`0x600B0410`)：ASP3`0x32`／stock`0x21`。
+- `LP_CLKRST`の周辺（`+0x0`/`+0x4`/RC32K/FOSC校正関連と目される`+0x10`直近）も
+  同種の起動来歴依存の疑いがあり，本ラウンドでは候補として扱わない
+  （RESET_CAUSEと同一ブロック内・同一交絡下での比較のため）。
+- `MODEM_PWR0+0x868`/`+0xC68`の`001c0000`(ASP3)対`001c6a28`(stock)，および
+  `+0x8AC`/`+0xCAC`の1ビット：ロック/完了ステータス系と推定（IQ_DONEと同種の
+  **症状の結果**であり原因候補ではない——値0はASP3の較正が一度も完了していない
+  ことの反映）。
+- `0x600AD000`〜`0x600AD1FC`（MODEM_PWR0先頭64語）：ASP3側ダンプで該当チャンクが
+  欠落（telnetパース起因の取りこぼしと推定，全ゼロ域でstock側も全ゼロ＝実害なしと
+  判断し再取得は省略）。
+
+**残った genuine 差分＝LP_ANA（`0x600B2C00`，アナログ周辺——計画が名指しした
+`LP_ANA`そのもの）**：
+
+| offset | stock | ASP3 |
+|---|---|---|
+| `+0x0` | `0x6ffc02c0` | `0x0ffc0100` |
+| `+0xC` | `0xffffffc1` | `0xffffffc3` |
+| `+0x18` | `0x80000000` | `0x00000000` |
+
+`lp_analog_peri_reg.h`のBOD/POWER_GLITCH/FIB_ENABLE系ビットフィールド。
+reset-cause系のような起動来歴依存の説明が付かない（2ブートとも安定・
+reset種別に依存する理由が無い）ため，**未検証の新規候補として次段へ持ち越す**
+（本ラウンドでは時間の都合でフィールド解読・因果検証は未実施）。
+
+**追加でスイープした`LPPERI+0x0`（`0x600B2800`）はstock`0x41000000`／ASP3`0x7f000000`
+で差分あり**。
+
+### 5. LP_ANA／LPPERIのフィールド解読——**いずれもWiFi RF/PHYバイアス経路と
+機序上無関係と判明・棄却（因果検証は不要と判断）**
+
+`lp_analog_peri_reg.h`でLP_ANAの3差分を解読した結果，全てBOD（brown-out detector，
+低電圧検出）／電圧グリッチ検出器の設定であることが確定した：
+- `+0x0`＝`LP_ANA_BOD_MODE0_CNTL_REG`（BOD mode0の割込み待ち時間・リセット待ち時間・
+  割込み/リセット有効化ビット）。bit7の`PD_RF_ENA`（「BOD検出時にRFモジュールを
+  強制power downする」有効化ビット）はRFに言及するが，**実際にBODイベント
+  （電源電圧降下）が発生した場合にのみ発火する保護機構**であり，定常動作中
+  （ベンチ電源で安定給電）のPHY較正には無関係。
+- `+0xC`＝`LP_ANA_FIB_ENABLE_REG`（電圧グリッチ検出器の強制有効化ビット）。
+- `+0x18`＝`LP_ANA_INT_ENA_REG`（BOD割込みのCPU配送有効化）——ADC/RF回路そのものとは
+  無関係な純粋な割込みルーティング設定。
+
+`lpperi_reg.h`でLPPERI+0x0を解読した結果，`LPPERI_CLK_EN_REG`＝**LPドメイン周辺機器
+（RNG／OTPデバッグ／LP_UART／LP_IO等）のクロックイネーブル**であり，HP系WiFi/BB
+（MODEM0＝`0x600A0000`）のクロックとは完全に別系統。stock/ASP3の差はどのLP周辺機器を
+使うか（例：ASP3はUSB-Serial-JTAGコンソール，stockはLP_UARTを使わない構成の可能性）の
+違いを反映しているだけで，PHYトーン測定チェーンとは無関係。
+
+**両ブロックとも「計画が名指しした`LP_ANA`＝xpd/LDO/バイアス系」に該当する
+フィールドは実際には含まれておらず**（ブロック名レベルでは一致するが，中身は
+BOD/電圧監視と周辺クロックゲートであり，RFバイアス生成器や電源レギュレータ
+そのものではない），mid-hang注入・before-PHY移植のいずれによる因果検証も
+妥当性が無い（そもそも症状に影響する機序が存在しない）と判断し，**JTAG注入は
+実施せず，机上棄却とする**。
+
+### 6. XPD_BIAS/PD_HPWIFI_CNTLのbefore-PHY移植A/B——**決定実験C，完全棄却確定**
+
+3節の留保（mid-hang注入はタイミング的に不十分な可能性）を解消するため，実施21の
+`esp_shim_pvt_init()`と同じ呼出し点（`wifi_clock_enable_wrapper()`，regi2c有効化・
+`phy_enable`より前，一度きり）に新関数`esp_shim_hpactive_bias_init()`を追加し，
+`PMU_HP_ACTIVE_BIAS`(`0x600B0018`)=`0x02000000`（XPD_BIAS=1）・
+`PMU_POWER_PD_HPWIFI_CNTL`(`0x600B0108`)=`0x00000000`（force全解除）を書込む形で
+移植した（`asp3/target/esp32c5_espidf/wifi/esp_wifi_adapter.c`）。
+
+実機検証（PATHに`riscv32-esp-elf`ツールチェーンを追加して再ビルド→書込み→
+「単発遅延一撃」方式で読取り）：
+- **移植コードの実行確認**：ハングループ内（`phy_get_pkdet_data`/
+  `phy_iq_est_enable_new`）到達後に`BIAS`/`PD_HPWIFI_CNTL`を読み取り，
+  `0x02000000`/`0x00000000`＝**stock実測値と完全一致**を独立2ブートで確認
+  （較正開始よりずっと前に反映済みであることの直接証拠）。
+- **観測（30秒・20秒，独立2ブート）**：PCはハングループ内（`phy_get_pkdet_data`/
+  `phy_iq_est_enable_new`）を巡回，IQ_DONE(`0x600a047c` bit16)=0，
+  生ADC(`0x600a081c`)=全ゼロのまま——**症状不変**。
+- UARTコンソールでも移植後の症状を再確認：約3.5秒周期`rst:0x12 (RTC_SWDT_SYS)`
+  ループ（実施13〜21と同一）。
+
+**結論：XPD_BIAS／PD_HPWIFI_CNTLはmid-hang注入（2節）とbefore-PHY移植（本節）の
+両方で症状不変を確認——実施21の候補Bと同じ完全性水準で因果棄却が確定した**。
+3節の留保は解消済み。
+
+### 7. 変更ファイル・スクラッチ資産
+
+- `asp3/target/esp32c5_espidf/wifi/esp_wifi_adapter.c`：`esp_shim_hpactive_bias_init()`
+  新設＋`wifi_clock_enable_wrapper()`からの呼出し1ヶ所（`esp_shim_pvt_init()`の直後）。
+  **本変更も実施21の`esp_shim_pvt_init()`同様「因果確定した修正」ではない**（6節の
+  とおり症状に影響しない）。stockとの実在差分を解消し将来のA/B比較から交絡を除く
+  目的で作業ツリーに残置するが，採否（keep/revert）はコーディネータのレビューに
+  委ねる。
+- 本doc（実施22追記）。
+- スクラッチ（`260d98fa…/scratchpad/`）：`r22_pmuread.py`／`r22_pmuread2.py`
+  （決定実験C読取り，v2が単発遅延一撃方式），`r22_inject_biaspd.py`（mid-hang因果
+  検証注入，組合せ/単独），`r22_dump.py`（PMU/LP/MODEM1/MODEM_PWR0一括ダンプ），
+  `r22_probe_delay.py`／`r22_probe_nohalt.py`（早期停滞trapの切り分け診断），
+  `r22_uart_ts.py`（WDTループ周期実測），`r22_port_observe.py`（before-PHY移植の
+  観測），生ログ・ダンプ一式（`r22_*.log`／`r22_*.dump.txt`）。stockビルドは実施21
+  資産（`stock_scan/`）を再利用（再ビルドなし）。
+
+### 8. C5#1の最終状態
+
+- `build/c5_idf61_trace`をPATHにツールチェーンを追加して再ビルド
+  （FLASH 11.77%/RAM 84.62%，実施21のPVT移植ビルドと同じ使用量＝新規追加分は
+  誤差程度）→C5#1へ書込み。
+- クリーンブート（UARTブリッジRTSリセット）で症状を最終確認：
+  `ESP-ROM:esp32c5-eco2-20250121`→`rst:0x12 (RTC_SWDT_SYS)`ループが約3.5秒周期で
+  継続（実施13〜21と同一，独立2回のキャプチャで確認）。
+- 移植コード（PVT＋XPD_BIAS/PD_HPWIFI_CNTL）はいずれも実行確認済み・stock値との
+  完全一致を確認済みだが，**症状（トーン自己ループバック測定の生ADCサンプルが
+  ASP3のみハードゼロ）は不変**。C5#1は本状態（実施21のPVT移植＋実施22の
+  HP_ACTIVEバイアス移植込みASP3計装ビルド）のまま次ラウンドへ引き継ぐ。
+- C5#2（`D0:CF:13:F0:C8:94`）：本ラウンドも物理切断済み・一切未接触。
+
+### 9. 到達点の整理と申し送り（次段）
+
+**本ラウンドで潰した候補**（実施21の候補A/Bに続き，計6件が因果棄却済み）：
+`PCR_FPGA_DEBUG` bit31（実施21）／PVT自動dbias（実施21）／PMU HP_ACTIVE
+`DIG_POWER`・`HP_REGULATOR1`（差分なしで棄却）／PMU HP_ACTIVE `XPD_BIAS`
+（mid-hang＋before-PHYの両方で棄却）／`PMU_POWER_PD_HPWIFI_CNTL`（同）／
+LP_ANA・LPPERIの表面上の差分（機序上無関係と机上棄却）。
+
+**未踏査のまま残っている領域**（`docs/c5-tone-adc-plan.md`「分岐計画」ケース2の
+チェックリストとの対比）：
+1. `tmp/c5_review_jisshi21_plan.md`が挙げた`LP_I2C_ANA_MST`(`0x600B2400`)は本ラウンドで
+   ダンプ済みだが，stock/ASP3間の差分抽出（4-way比較のフィールド解読）は未実施
+   （ダンプの生データは`r22_dump_*.dump.txt`に保存済み，次段で再利用可）。
+2. `MODEM1`(`0x600AC000`)・`MODEM_PWR0`(`0x600AD000`)は本ラウンドで初めて全域ダンプし，
+   全ゼロ（一部のライブ計測/ロックステータス系を除く）でstock/ASP3間に config
+   レベルの差分は見つからなかった——「未踏査」だった領域は埋まったが，**有意味な
+   差分は出なかった**（plan doc「分岐計画」ケース2の(1)は本ラウンドで完了）。
+3. **「電源系初期化列の加算移植A/B」（`pmu_init()`+`esp_rtc_init()`相当をより広く
+   関数単位で段階適用）は未着手**（plan doc「分岐計画」ケース2の(2)）。本ラウンドで
+   個別レジスタ注入・移植を行った`esp_shim_modem_icg_init()`(実施13)・
+   `esp_shim_pvt_init()`(実施21)・`esp_shim_hpactive_bias_init()`(実施22)は
+   `pmu_hp_system_init()`/PVTの一部の値のみを狙い撃ちした部分移植であり，
+   `pmu_hp_system_init()`全体（今回明示的に比較しなかったdigital/clock/retentionの
+   各パラメータ群）・`pmu_lp_system_init()`（LPシステム側）・
+   `esp_rtc_init()`のうち今回扱っていない部分は未移植・未検証のまま。
+4. **早期停滞trap（0節）が本ラウンドで大幅に悪化した**（体感1/2〜2/3→ほぼ全滅，
+   「単発遅延一撃」方式で回復）原因は未解明。次ラウンドはこの方式をデフォルトにし，
+   もし再び悪化したら別途切り分けること。
+
+**「C6-genericな共通アナログ壁」への言明について**：plan doc「分岐計画」ケース2は
+「これらを尽くしてから停止・ユーザー判断へ」としている。本ラウンドは(1)を完了し
+(2)は未着手のため，**現時点でC6-genericと結論するのは時期尚早**——(2)の段階
+適用（特に`pmu_hp_system_init()`のdigital/retentionパラメータと`pmu_lp_system_init()`）
+を次段で実施してから改めて判断すべき。ただし，計6件の個別候補（PMU HP_ACTIVE
+バンク5レジスタ全数＋PCR_FPGA_DEBUG＋PVT）が軒並み「差分はある/ないが，あっても
+因果関係なし」という結果になっている事実は，「デジタル制御系は健全・アナログ
+測定だけ死ぬ」という統一像を追加で6ラウンド分補強しており，残された説明領域が
+着実に狭まっていることは記録しておく。
