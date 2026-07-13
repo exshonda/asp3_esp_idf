@@ -69,26 +69,52 @@
  *  する（起動できない・タイミングが合わない場合はまずこの値を疑うこと）。
  */
 /*
- *  【実機確定＝192MHz】実施03のJTAG実測（mcycle CSR vs SYSTIMER 16MHz基準の
- *  二点法：1s/4s計測で191.9993MHz，各raw点も191.99〜192.02MHzと極めて安定）。
- *  C6の160MHz（SPLL÷3）と異なり，C5のROMブートローダは起動時点で既に
- *  CPU=192MHz（=XTAL48MHz×4）に設定済み。レジスタ書換え不要。
+ *  【実施32で訂正＝96MHz】実施03は「CPU=192MHz実機確定」としていたが，
+ *  実施32のJTAG実測（同じmcycle CSR vs SYSTIMER 16MHz基準の二点法，
+ *  WiFi有無2ビルド×独立2回＝計4回，すべて47.96〜48.00MHzで再現）で
+ *  実際にはXTAL48MHz直結（PCR_SYSCLK_CONF.soc_clk_sel=0固定，
+ *  PCR_CPU_FREQ_CONF/PCR_AHB_FREQ_CONF＝div1，stock実測soc_clk_sel=3
+ *  [PLL_F240M]との対比で確認）と判明した——bootloader_clock_configure()
+ *  相当のCPUクロック切替え（XTAL→PLL）をASP3が一度も行っていなかった
+ *  ため。実施03がどう192MHzを得たかは未解明（advisor指摘により本ラウンド
+ *  では追跡せず）。
+ *
+ *  hardware_init_hook()に明示的なCPUクロック切替え（soc_clk_sel=3
+ *  [PLL_F240M]・cpu_div=3・ahb_div=6，レジスタ値としては2nd-stage
+ *  ブートローダのbootloader_clock_configure(CONFIG_BOOTLOADER_CPU_CLK_
+ *  FREQ_MHZ=80)と完全に同一設定）を追加したところ，レジスタ設定は
+ *  意図通り（cpu_div_num=2→÷3・ahb_div_num=5→÷6，stock実測と同一）
+ *  だったにもかかわらず，実際に切り替わった後のmcycle実測は
+ *  95.97〜96.01MHz（2s/2s/6s/8sの4窓で安定・収束傾向なし＝真値と判断，
+ *  期待値80MHzとは一致しない）。ASP3は`rtc_clk_bbpll_configure()`相当の
+ *  BBPLL周波数設定（regi2c I2C_BBPLLブロックへの目標480MHz書込み）を
+ *  実行しておらず，ROMが較正済みのBBPLL（CAL_DONE=1を実施32冒頭で確認
+ *  済み）をそのまま流用したため，ROMが実際にロックした周波数が
+ *  ESP-IDFの前提する480MHzとは異なる（実測から逆算すると"PLL_F240M"
+ *  ネット＝288MHz相当，BBPLL本体は576MHz相当と推定）と考えられる。
+ *  本ラウンドでは，理論値80MHzを追わずBBPLLの実際の周波数設定を修正
+ *  する（regi2c書込みが必要でリスク増）よりも，**実測値96MHzをそのまま
+ *  正としてCORE_CLK_MHZを校正する**方針を採った（advisorの「29ラウンド
+ *  regression huntにしない・実測を信頼する」指針と同じ考え方）。
+ *  docs/c5-bringup.md 実施32参照。
  */
-#define CORE_CLK_MHZ            192  /* 【実機確定】実施03 mcycle実測192.00MHz（48MHz×4） */
+#define CORE_CLK_MHZ            96  /* 【実施32実測確定】CPUクロック切替え後のmcycle実測95.97〜96.01MHz（4窓で安定）。理論値80MHzとは不一致だが実測を正とする */
 
 /*
  *  微少時間待ちのための定義（nsec単位）
  *
- *  【実機確定】docs/c5-bringup.md 実施03。sil_dly_nse(N)の壁時計実測
- *  （SYSTIMER 16MHz基準・N=400M/800Mの二点法・pc→sil_dly_nse注入）で
- *  1反復=20.84ns（=4cyc@192MHz＝分岐ペナルティ由来。C6の12から大きく
- *  外れるのは§8.1.5の警告通り単純外挿が効かない好例）と確定。未達
- *  （delay<要求）を避けるためTIM2=20へ切下げ（実測でsil_dly_nse(N)≈
- *  1.04×N＝約4%の安全余裕・アンダーシュート無し）。TIM1はエントリ
- *  （addi＋分岐成立≒1反復≒20ns）に相当させTIM2と同値の20とする。
+ *  実施03は「1反復=20.84ns(=4cyc@192MHz)」としてTIM1/TIM2=20と較正して
+ *  いたが，実施32でCORE_CLK_MHZが192→96へ訂正されたため，同じ
+ *  「1反復=4サイクル」という（周波数に依らない）マイクロアーキテクチャ
+ *  定数を前提に，実時間コストを96MHzへ比例換算した：4cyc/96MHz=41.67ns。
+ *  【注意・未実測】この42ns（切上げ）はJTAG hw-bp注入による実機再較正
+ *  ではなく，実施03の「1反復=4サイクル」という値からの机上比例外挿
+ *  である。実施32の時間内では改めての実機タイミング較正（実施03 §3と
+ *  同じ手法）は実施していない——次段でのフォローアップ推奨（申し送り
+ *  参照）。アンダーシュート回避のため切り上げ（41.67→42）を採用。
  */
-#define SIL_DLY_TIM1    20  /* 【実機確定】実施03較正．エントリ(addi+分岐)≒1反復≒20ns */
-#define SIL_DLY_TIM2    20  /* 【実機確定】実施03較正．1反復=20.84ns(=4cyc@192MHz)，未達回避に20へ切下げ */
+#define SIL_DLY_TIM1    42  /* 【実施32・机上比例外挿，未実測】エントリ(addi+分岐)≒1反復≒4cyc/96MHz=41.67ns→切上げ42 */
+#define SIL_DLY_TIM2    42  /* 【実施32・机上比例外挿，未実測】1反復=4cyc/96MHz=41.67ns→切上げ42 */
 
 /*
  *  ペリフェラルのベースアドレス

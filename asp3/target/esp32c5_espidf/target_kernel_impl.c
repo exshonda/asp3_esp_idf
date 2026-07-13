@@ -241,6 +241,138 @@ esp32c5_disable_mwdt(uint32_t timg_base)
 }
 
 /*
+ *  【実施32】CPUクロックの明示的切替え（XTAL→PLL_F240M÷3，レジスタ
+ *  設定はbootloader_clock_configure(80MHz)相当だが実測は96MHz——
+ *  下記・esp32c5.hのCORE_CLK_MHZコメント参照）
+ *
+ *  背景：docs/c5-bringup.md 実施32。JTAG実測で，ASP3のDirect BootはPCR
+ *  SOC根クロックmux（PCR_SYSCLK_CONF.soc_clk_sel）がXTAL（=0）のまま
+ *  一度も切り替わっておらず，実CPUクロックはXTAL48MHz直結（実測47.96〜
+ *  48.00MHz，mcycle対SYSTIMER 16MHzの二点法・WiFi有無2ビルド×独立2回で
+ *  再現）と判明した——旧「192MHz実機確定」（実施03）は誤りだったか，
+ *  あるいは何らかの経緯で後退したかは未確定（本ラウンドでは追跡しない）。
+ *  stock（2nd-stageブートローダのbootloader_clock_configure()経由）は
+ *  同じPCRレジスタでsoc_clk_sel=3(PLL_F240M)を使用する。
+ *
+ *  本関数はbootloader_clock_configure()のCPUクロック切替え部分
+ *  （rtc_clk_init→rtc_clk_cpu_freq_set_config）のうち，ASP3の較正キー
+ *  (A)判定実験（実施30のP4ハンドオフ＝ext_mem_init直後・sys_rtc_init前，
+ *  すなわちbootloader_clock_configure完了直後の状態）に対応する構成，
+ *  すなわちCONFIG_BOOTLOADER_CPU_CLK_FREQ_MHZ=80（stock実測sdkconfigで
+ *  確認済み）と同じ「PLL_F240Mソース・CPUディバイダ3・AHBディバイダ6
+ *  ＝CPU80MHz/AHB40MHz」を再現する（rtc_clk_cpu_freq_to_pll_240_mhz()
+ *  のAHBディバイダは要求CPU周波数に関わらず常に6固定であることをソース
+ *  で確認済み）。app側のesp_clk_init()相当（240MHzへのさらなる昇格・
+ *  esp_perip_clk_init）は対象外（次段，(B)scan/RXキーの移植で扱う）。
+ *
+ *  安全設計（JTAG実測を踏まえた最小構成）：
+ *  - BBPLLの較正状態はI2C_ANA_MST_ANA_CONF0_REG bit24(CAL_DONE)で確認
+ *    してから分岐する。ASP3の現在の較正ハング状態でCAL_DONE=1（2/2実測，
+ *    ROMが既に較正を完了させている）ことをJTAGで確認済みのため，通常は
+ *    再較正ループを通らない（`while(!cal_done);`という無条件待ちループを
+ *    ハング状態のまま埋め込むリスクを避ける）。もしCAL_DONE=0の場合の
+ *    フォールバックとして，タイムアウト付きの較正シーケンス
+ *    （clk_ll_bbpll_calibration_start/stop相当）も用意する
+ *    （無限待ちを避けるため上限ループ回数を設ける——rtc_clk.cの
+ *    while(!is_done)は無条件待ちだが，ASP3では安全側に倒す）。
+ *  - PMU_IMM_HP_CK_POWER_REG（0x600B00CC）はWT（write-trigger）型の
+ *    自己クリアレジスタで，clk_ll_bbpll_enable()相当のtie-highパルス
+ *    （XPD_BBPLL/XPD_BBPLL_I2C/XPD_BB_I2C/GLOBAL_BBPLL_ICG）を無条件に
+ *    一度発行する（安全：自己クリア・読み戻し不能だが書込み自体に副作用
+ *    リスクなし，実施23が試験した0x600B0014＝FSM影武者レジスタとは別の
+ *    実効レジスタ）。
+ *  - ディバイダ設定→ソース切替え→bus_clk_update（自己クリア型トリガ）の
+ *    順序はrtc_clk_cpu_freq_to_pll_240_mhz()のとおり保持する。
+ */
+#define ESP32C5_R32_PCR_SYSCLK_CONF        (ESP32C5_PCR_BASE + 0x110U)
+#define ESP32C5_R32_PCR_CPU_FREQ_CONF      (ESP32C5_PCR_BASE + 0x118U)
+#define ESP32C5_R32_PCR_AHB_FREQ_CONF      (ESP32C5_PCR_BASE + 0x11CU)
+#define ESP32C5_R32_PCR_BUS_CLK_UPDATE     (ESP32C5_PCR_BASE + 0x144U)
+#define ESP32C5_R32_PMU_IMM_HP_CK_POWER    0x600B00CCU
+#define ESP32C5_R32_I2C_ANA_MST_ANA_CONF0  0x600AF818U
+
+#define ESP32C5_R32_PMU_TIE_HIGH_GLOBAL_BBPLL_ICG  (1U << 25)
+#define ESP32C5_R32_PMU_TIE_HIGH_XPD_BB_I2C        (1U << 28)
+#define ESP32C5_R32_PMU_TIE_HIGH_XPD_BBPLL_I2C     (1U << 29)
+#define ESP32C5_R32_PMU_TIE_HIGH_XPD_BBPLL         (1U << 30)
+#define ESP32C5_R32_I2C_MST_BBPLL_CAL_DONE         (1U << 24)
+
+static void
+esp32c5_r32_cpu_clock_switch(void)
+{
+	uint32_t	v;
+	uint32_t	i;
+
+	/*
+	 *  BBPLL/BB-I2Cのアナログ電源をIMM（即時）レジスタで確実にtie-high
+	 *  する（clk_ll_bbpll_enable()相当，自己クリア型・無条件で安全）。
+	 */
+	sil_wrw_mem((void *)ESP32C5_R32_PMU_IMM_HP_CK_POWER,
+				ESP32C5_R32_PMU_TIE_HIGH_GLOBAL_BBPLL_ICG
+				| ESP32C5_R32_PMU_TIE_HIGH_XPD_BB_I2C
+				| ESP32C5_R32_PMU_TIE_HIGH_XPD_BBPLL_I2C
+				| ESP32C5_R32_PMU_TIE_HIGH_XPD_BBPLL);
+
+	/*
+	 *  BBPLL較正の要否確認。実施32のJTAG実測（較正ハング状態，2/2）で
+	 *  CAL_DONE=1が既に確認済みのため，通常はこの分岐へは入らない。
+	 *  CAL_DONE=0の場合のみ，タイムアウト付きで較正パルスを発行する
+	 *  （無条件whileループはASP3側では採用しない）。
+	 */
+	v = sil_rew_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0);
+	if ((v & ESP32C5_R32_I2C_MST_BBPLL_CAL_DONE) == 0U) {
+		/*  regi2c_ctrl_ll_bbpll_calibration_start()相当  */
+		sil_wrw_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0,
+					v & ~(1U << 2));
+		v = sil_rew_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0);
+		sil_wrw_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0,
+					v | (1U << 3));
+		for (i = 0U; i < 2000000U; i++) {
+			v = sil_rew_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0);
+			if ((v & ESP32C5_R32_I2C_MST_BBPLL_CAL_DONE) != 0U) {
+				break;
+			}
+		}
+		/*  regi2c_ctrl_ll_bbpll_calibration_stop()相当（タイムアウト時も
+		 *  較正回路を安全な停止状態へ戻してから先へ進む）  */
+		v = sil_rew_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0);
+		sil_wrw_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0,
+					v & ~(1U << 3));
+		v = sil_rew_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0);
+		sil_wrw_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0,
+					v | (1U << 2));
+	}
+
+	/*
+	 *  ディバイダ設定（rtc_clk_cpu_freq_to_pll_240_mhz(80)相当）：
+	 *  CPUディバイダ=3(240/80)・AHBディバイダ=6（固定）。
+	 *  ソース切替え前に設定する（rtc_clk.cと同じ順序）。
+	 */
+	v = sil_rew_mem((void *)ESP32C5_R32_PCR_CPU_FREQ_CONF);
+	v = (v & ~0xFFU) | (3U - 1U);
+	sil_wrw_mem((void *)ESP32C5_R32_PCR_CPU_FREQ_CONF, v);
+
+	v = sil_rew_mem((void *)ESP32C5_R32_PCR_AHB_FREQ_CONF);
+	v = (v & ~0xFFU) | (6U - 1U);
+	sil_wrw_mem((void *)ESP32C5_R32_PCR_AHB_FREQ_CONF, v);
+
+	/*  ソース切替え：soc_clk_sel[17:16]=3(PLL_F240M)  */
+	v = sil_rew_mem((void *)ESP32C5_R32_PCR_SYSCLK_CONF);
+	v = (v & ~(0x3U << 16)) | (3U << 16);
+	sil_wrw_mem((void *)ESP32C5_R32_PCR_SYSCLK_CONF, v);
+
+	/*  bus_clk_update：R/W/WTC型自己クリアトリガ．HWが処理完了後に
+	 *  自動で0へ戻るのを待つ（clk_ll_bus_update()相当，タイムアウト付き）  */
+	sil_wrw_mem((void *)ESP32C5_R32_PCR_BUS_CLK_UPDATE, 1U);
+	for (i = 0U; i < 2000000U; i++) {
+		v = sil_rew_mem((void *)ESP32C5_R32_PCR_BUS_CLK_UPDATE);
+		if ((v & 1U) == 0U) {
+			break;
+		}
+	}
+}
+
+/*
  *  起動時のハードウェア初期化処理
  */
 void
@@ -274,13 +406,24 @@ hardware_init_hook(void)
 	/*
 	 *  CPUクロックの切替え
 	 *
-	 *  【実機確認待ち】docs/c5-port-design.md §8.1 3番。C6はROMブート
-	 *  ローダが起動時点で既にPCRをSPLL÷3÷1＝160MHzへ設定済みと判明し
-	 *  ソフトウェアでの追加操作は不要だったが，C5のPCR相当レジスタの
-	 *  実際の初期値は未確認である（esp32c5.hのCORE_CLK_MHZ参照）。
-	 *  C6と同様「ROMが既に適切に設定している」ことを仮定し，本関数では
-	 *  クロック切替えレジスタを一切書き換えない（誤った書換えによる
-	 *  ハングを避けるため）。
+	 *  【実施32で確定・実装】docs/c5-bringup.md 実施32。「C6はROMが既に
+	 *  適切に設定している」という旧来の仮定（下記，取り消し線的に残す）
+	 *  はC5では成立しないとJTAG実測で判明した——ASP3のDirect Bootは
+	 *  PCR_SYSCLK_CONF.soc_clk_sel=XTAL(0)のまま一度も切り替わらず，
+	 *  実CPUクロックはXTAL48MHz直結（実測47.96〜48.00MHz，旧「192MHz
+	 *  実機確定」は反証）。stockのbootloader_clock_configure()相当の
+	 *  切替え（XTAL→PLL_F240M÷3，レジスタ設定はbootloader_clock_
+	 *  configure(80MHz)相当）を明示的に実行する。実測CPUクロックは
+	 *  96MHz（esp32c5.hのCORE_CLK_MHZコメント参照——理論値80MHzとの
+	 *  不一致はBBPLL実周波数の推定違いによるとみられる，実測を正とする）。
+	 *  CORE_CLK_MHZ/SIL_DLY_TIM1/TIM2もesp32c5.hで96MHz実測基準へ訂正済み。
+	 *  esp_rom_set_cpu_ticks_per_us()より前に実行し，以降のus単位の
+	 *  ROM遅延ループ（esp_rom_delay_us等）が正しい実クロックで動作する
+	 *  ようにする。
+	 *
+	 *  （旧コメント，参考として残す）：C6はROMブートローダが起動時点で
+	 *  既にPCRをSPLL÷3÷1＝160MHzへ設定済みと判明しソフトウェアでの
+	 *  追加操作は不要だった。
 	 *
 	 *  esp_rom_set_cpu_ticks_per_us()（ROMの較正用大域変数
 	 *  s_ticks_per_usへCORE_CLK_MHZを明示的に通知．C6はphy_init較正で
@@ -297,7 +440,27 @@ hardware_init_hook(void)
 	 *  ROM ld一式をリンクするためシンボルが解決可能になる）では，
 	 *  phy_init等のタイミングにROM較正値が必要になるため，C6と同じ
 	 *  理由でここで呼び出す。
+	 *
+	 *  esp32c5_r32_cpu_clock_switch()自体はsil_*w_memのみに依存し
+	 *  ROMシンボルを一切参照しないため，WiFi無効ビルド（B-0/B-1，
+	 *  test_porting等）でもリンク可能・実行して問題ない。むしろ
+	 *  CORE_CLK_MHZ（core_syssvc.hのget_utm()等で使用）が全ビルド共通で
+	 *  96MHz（実測値）を前提とするよう訂正した以上，実クロックも全ビルド
+	 *  でこの設定に揃えておく方が一貫性がある。WiFi無効ビルドかどうかに関わらず
+	 *  無条件で呼び出す。
 	 */
+	/*
+	 *  【実施32・切り分け実験の結果を踏まえ本採用】advisorの指摘に従い，
+	 *  クロック切替えとticks_per_us訂正を分離した対照実験を実施した：
+	 *  クロック切替えを止めXTAL48MHzのまま`esp_rom_set_cpu_ticks_per_us
+	 *  (48)`のみ正しく設定した場合，較正は独立2回のRTSリセット試行＋
+	 *  各キャプチャ内の複数自然リブートすべてでFAIL（raw_adc恒久ゼロ）
+	 *  だった（`r32_control_trial1/2.log`）——delay較正の正しさだけでは
+	 *  不十分で，**PLLへのクロック切替え自体が較正キー(A)の必要条件**
+	 *  であることが確定した（docs/c5-bringup.md 実施32 10節）。
+	 */
+	esp32c5_r32_cpu_clock_switch();
+
 #ifdef TOPPERS_ESP32C5_WIFI
 	esp_rom_set_cpu_ticks_per_us(CORE_CLK_MHZ);
 

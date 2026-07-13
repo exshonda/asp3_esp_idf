@@ -5813,3 +5813,404 @@ toolchain-riscv64.cmake -DRISCV64_TOOLCHAIN_PREFIX=riscv32-esp-elf-
    静的差分」という事実として記録に残すが，**較正には無関係と確定
    済み**——今後このレジスタを再度「有力候補」として持ち出さないこと
    （厳密性基準：一度refuteした指標の再浮上を防ぐ）。
+
+---
+
+## 実施32：`bootloader_clock_configure()`解剖から，ASP3のDirect Bootが
+一度もCPUクロックをXTAL(48MHz)からPLLへ切替えていないという構造的事実を
+JTAG実測で確定——較正キー(A)は**確定・解消**（冷間ブートで較正PASS，
+raw_adc非ゼロ・done16=1を独立2回のRTSリセット試行＋1キャプチャ内5回の
+自然WDTリブートすべてで再現）。副産物として実施03の「CPU=192MHz実機
+確定」を反証（実際はXTAL48MHz直結だった）。(B)scan/RXは新しい壁
+（`set_promiscuous(true)`成功後・`esp_wifi_scan_start`の戻り印字前で
+無条件WDTリブートに至るハング）で未達——次段へ申し送り
+
+### 背景・目的
+
+実施31で(A)候補の最有力として`bootloader_clock_configure()`
+（2nd-stageブートローダのCPU/APBクロック切替え）が申し送られた。本
+ラウンドはこれを解剖し，減算法（部分巻き戻し）または加算法（ASP3への
+移植）で判定した上で，可能なら(B)（`esp_clk_init()`相当）も併せて
+移植し，冷間Direct Bootでの較正完走→scan成功という最終決定実験を狙う
+（task手順どおり）。
+
+### 1. 机上解剖：`bootloader_clock_configure()`の実体
+
+`~/tools/esp-idf-v6.1/components/bootloader_support/src/bootloader_clock_
+init.c:bootloader_clock_configure()`は，リセット要因がSW再起動でない
+（＝POR相当）限り`rtc_clk_init(clk_cfg)`
+（`hal/components/esp_hw_support/port/esp32c5/rtc_clk_init.c`，本
+リポジトリのhal submoduleに同名のC5専用実装がある——esp-idf-v6.1側と
+ほぼ同一だがシンボル名が一部異なる）を呼ぶ。内容を4項目に分解した：
+
+1. **`rtc_clk_modem_clock_domain_active_state_icg_map_preinit()`**：
+   `PMU_HP_ICG_MODEM_CODE_ACTIVE`のICGマップ設定＋MODEM_SYSCON/
+   MODEM_LPCONのICGビットマップ設定＋`PMU_IMM_MODEM_ICG_REG`の
+   force-updateトリガ。→**実施13で既に同等の内容がASP3へ移植済み**
+   （`esp_wifi_adapter.c`の`wifi_clock_enable_wrapper`内，
+   `pmu_ll_hp_set_icg_modem`/`modem_syscon_ll_set_modem_apb_icg_bitmap`
+   等）。「BBは可制御になったが完了ビットは依然立たず」という実施13
+   当時の結論と整合——この項目は較正キー(A)としては既に消化済みと判断。
+2. **RC_FAST/RC_SLOW較正パラメタ＋dbias handover**：
+   `LP_CLKRST_FOSC_DFREQ`・`I2C_DIG_REG`（`SCK_DCAP`/`ENIF_RTC_DREG`/
+   `ENIF_DIG_DREG`/`XPD_RTC_REG`/`XPD_DIG_REG`）と，
+   `PMU_HP_ACTIVE_HP_REGULATOR0`のDBIAS_SEL＋DBIAS値（
+   `get_act_hp_dbias()`＝eFuse由来のhp_cali_dbias）。→regi2c
+   `I2C_DIG_REG`（block=0x6a相当）は実施16/25の8ブロック全域スイープで
+   「新規差分ゼロ」と確認済み，`HP_ACTIVE.HP_REGULATOR0`は実施21の
+   PVT候補として実機注入・因果棄却済み（`get_act_hp_dbias()`の値自体は
+   `pmu_hp_system_init()`の`regulator0.dbias`と同一の値を書く関数
+   であることをソースで確認——実施23が扱った経路と実質同一）。→この
+   項目も較正キー(A)としては既に消化済みと判断。
+3. **CPU周波数切替え**：`rtc_clk_cpu_freq_get_config()`→
+   `rtc_clk_cpu_freq_mhz_to_config(cfg.cpu_freq_mhz)`→
+   `rtc_clk_cpu_freq_set_config()`。stockのsdkconfig実測
+   （`stock_scan/sdkconfig`）で`CONFIG_BOOTLOADER_CPU_CLK_FREQ_MHZ=80`・
+   `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y`を確認——チップrev v1.0
+   （`!ESP_CHIP_REV_ABOVE(chiprev,101)`分岐）では，80MHzでも
+   `SOC_CPU_CLK_SRC_PLL_F240M`・divider=3を使う（IDF-11064のroot clock
+   ICG erratum対策）。`rtc_clk_cpu_freq_to_pll_240_mhz()`内で
+   `rtc_clk_bbpll_enable()`（`PMU_IMM_HP_CK_POWER_REG`のtie-highパルス）
+   ＋（`s_cur_pll_freq`が既に480MHz相当でなければ）
+   `rtc_clk_bbpll_configure()`（regi2c I2C_BBPLLブロックへの480MHz
+   目標書込み＋`regi2c_ctrl_ll_bbpll_calibration_start/is_done/stop`）
+   を経由する——**未検証**。
+4. **RC_FAST/slow clock source set**：`rtc_clk_8m_enable`・
+   `rtc_clk_fast_src_set`・`rtc_clk_slow_src_set`。ASP3のDirect Bootは
+   RTC_FAST/SLOWクロック源を一切使わない（WDT無効化のみ・sleepモード
+   遷移を経験しない）ため機序的関連が薄いと判断し優先度を下げた
+   （未検証のまま次点扱い）。
+
+→ 4項目のうち3.（CPU周波数切替え）だけが，過去の網羅比較（実施14-31）
+で一度もカバーされていない**真に新規の候補**と判定した。
+
+### 2. 判別実験：CPUクロックソースの生JTAG読み（減算/加算いずれにも
+先立つ，安価な事前確認）
+
+advisorの指摘（「switching to PLLかどうかは実測すべき，192MHzという
+既存値を鵜呑みにしない」）に従い，較正ハング状態のASP3（実施31終了
+時点のflashそのまま）を対象に，PCRのSOC根クロックmux
+（`PCR_SYSCLK_CONF_REG.soc_clk_sel`，`0x60096110`ビット[17:16]）と
+ディバイダ（`PCR_CPU_FREQ_CONF_REG`/`PCR_AHB_FREQ_CONF_REG`）を
+JTAG直読みした（`r32_clkcheck.py`，「単発halt→mdw→resume」，2/2独立
+RTSリセット試行）：
+
+- **ASP3（較正ハング状態）**：`PCR_SYSCLK_CONF_REG=0xb0000200`→
+  `soc_clk_sel=0`（**SOC_CPU_CLK_SRC_XTAL**）・`PCR_CPU_FREQ_CONF_REG=
+  0x00000000`（div=1）・`PCR_AHB_FREQ_CONF_REG=0x00000000`（div=1）
+  （2/2一致）。
+- **stock**（実施29 `r29_snapshot_boot1.dump.txt`，ESP-IDF標準ブート列
+  完走後の状態）：同オフセットで`PCR_SYSCLK_CONF_REG=0xb0030200`→
+  `soc_clk_sel=3`（**SOC_CPU_CLK_SRC_PLL_F240M**）。
+
+**ASP3のPCR根クロックmuxはXTAL直結のまま一度も切り替わっていない**
+（対してstockはPLL_F240Mへ切替え済み）——静的レジスタレベルで明確な
+プラットフォーム差分。
+
+副次的に，同じ読み取りで`I2C_ANA_MST_ANA_CONF0_REG`（`0x600AF818`，
+実施14-31のどのMMIOスイープにも含まれていなかった新規ブロック）の
+bit24（`I2C_MST_BBPLL_CAL_DONE`）を確認したところ，ASP3較正ハング
+状態で**既に1**（2/2）——BBPLL自体はROMの時点で較正済みと判明した
+（「BBPLLが一度も較正されていない」という別候補は本チェックだけで
+反証できた）。
+
+### 3. mcycle実測でのCPU周波数二点法再計測——実施03の「192MHz実機確定」
+を反証，実際はXTAL48MHz直結と確定
+
+2節の静的読みだけでは「レジスタの意味付けがヘッダと食い違っている
+可能性」を排除できないため，実施03と同じ手法（mcycle CSR対SYSTIMER
+16MHz基準の二点法：halt→読取→resume→sleep T→halt→再読取）を
+`r32_cpufreq_recheck.py`として再実装し，現在の実機で再計測した：
+
+- **ASP3較正ハング状態（WiFi有効ビルド，現flash）**：T=2.0s→
+  47.9747MHz，T=4.0s→47.9958MHz（独立2回のRTSリセット試行）。
+- **ASP3 WiFi無効ビルド（`build/c5_r31_test_porting`，実施31資産の
+  再フラッシュ）**：T=2.0s→47.9606MHz——**WiFi有無に関わらずXTAL直結**
+  （実施03の当時の測定条件＝WiFi無し，に対応する構成でも同じ結果）。
+- **stock（`stock_scan`，陽性対照として`examples/wifi/scan`をscan完走
+  前の時間窓で計測）**：T=0.5/1.0/1.0/2.0/3.0sの5試行で
+  322.1/283.0/283.2/261.1/255.0MHzと，窓を広げるほど期待値240MHzへ
+  収束する傾向を確認——これは測定法自体のバイアスではなく，**stockの
+  ブート列自体が段階的に加速する**（bootloader段=80MHz→app段=240MHz）
+  実際の二段階遷移を短い窓が拾ってしまうためと判明した（4節で追加
+  確認）。この陽性対照により，計測手法自体（mcycle対SYSTIMER二点法）
+  は高速なCPUクロックも正しく検出できることを確認した——ASP3側の
+  一貫した約48.0MHz（窓を2〜8sへ広げても収束せず安定，5節参照）は
+  測定バイアスではなく真の値と判断した。
+
+**結論：実施03の「CPU=192MHz実機確定（=XTAL48MHz×4）」は反証された**
+——実際のCPUクロックはXTAL48MHz直結（PLLの関与なし）であり，`192MHz
+=XTAL×4`という積算は，`rtc_clk_cpu_freq_to_xtal()`（除算のみでXTALを
+逓倍できない実装）とも整合しない机上の誤りだったか，あるいは実施03
+以降に何らかの理由で後退したかのいずれかである。advisorの指摘に従い，
+この経緯自体の追跡（29ラウンド分の回帰ハント）は本ラウンドでは行わず，
+「較正キー(A)の実体＝CPUクロックがXTALのままPLLへ切り替わっていない
+こと」という機序の確定と，実測値に基づく較正定数の訂正に注力した。
+
+### 4. 加算移植：CPUクロックソースをXTALからPLL_F240M÷3へ明示的に切替え
+
+上記2〜3節で「較正キー(A)候補＝CPUクロック切替えの欠落」が静的・動的
+の両面で確定したため，task手順どおり**加算**（減算より安全側）で実装
+した。`asp3/target/esp32c5_espidf/target_kernel_impl.c`に
+`esp32c5_r32_cpu_clock_switch()`を新設し，`hardware_init_hook()`の
+最初期（WDT無効化の直後・`esp_rom_set_cpu_ticks_per_us()`より前）で
+**無条件に**（`TOPPERS_ESP32C5_WIFI`の有無に関わらず）呼び出す：
+
+1. `PMU_IMM_HP_CK_POWER_REG`（`0x600B00CC`，WT型自己クリアレジスタ）へ
+   `clk_ll_bbpll_enable()`相当のtie-highパルス
+   （`GLOBAL_BBPLL_ICG`/`XPD_BB_I2C`/`XPD_BBPLL_I2C`/`XPD_BBPLL`）を
+   無条件発行（安全：自己クリア・副作用なし）。
+2. `I2C_ANA_MST_ANA_CONF0_REG`のCAL_DONEビットを確認し，**1（既に較正
+   済み，2節で確認済み）ならスキップ**，0の場合のみタイムアウト付き
+   （200万回上限）で較正パルス（`regi2c_ctrl_ll_bbpll_calibration_
+   start/stop`相当）を発行するフォールバックを用意（rtc_clk.cの
+   無条件`while(!done)`はASP3では採用しない安全設計）。
+3. `PCR_CPU_FREQ_CONF_REG.cpu_div_num=2`（÷3）・
+   `PCR_AHB_FREQ_CONF_REG.ahb_div_num=5`（÷6，`rtc_clk_cpu_freq_to_
+   pll_240_mhz()`の固定値）を先に設定し，
+   `PCR_SYSCLK_CONF_REG.soc_clk_sel=3`（PLL_F240M）へ切替え，
+   `PCR_BUS_CLK_UPDATE_REG`（R/W/WTC型自己クリアトリガ）で確定させる
+   （タイムアウト付き）——`rtc_clk_cpu_freq_set_config()`と同じ順序を
+   保持。
+
+レジスタ設定はstockの2nd-stageブートローダ
+（`CONFIG_BOOTLOADER_CPU_CLK_FREQ_MHZ=80`）と完全に同一
+（`soc_clk_sel=3`・`cpu_div=3`・`ahb_div=6`）である。
+
+### 5. 想定外の結果：レジスタ設定は意図通りだが実測CPU周波数は96MHz
+（期待値80MHzと不一致）——BBPLL実周波数の推定誤りと判断し実測値で校正
+
+`build/c5_r31_test_porting`（WiFi無効，安全側で先に検証）へ実装・
+ビルド・書込みし，`test_porting`が引き続き`# 6/6 passed`
+（8秒キャプチャ内3回連続起動，全て成功——退行なし）であることを
+確認した上で，JTAG実読で切替え後のレジスタを確認した
+（`r32_afterport_clkcheck_try1`）：
+
+- `PCR_SYSCLK_CONF_REG=0xb0030200`（`soc_clk_sel=3`＝stockの完走後の値
+  と完全一致）・`PCR_CPU_FREQ_CONF_REG=0x00000002`（div=3）・
+  `PCR_AHB_FREQ_CONF_REG=0x00000005`（div=6）——**レジスタ設定は意図
+  通り**。
+
+しかし`r32_cpufreq_recheck.py`でmcycle二点法により実測したところ：
+
+- T=2.0s×2試行→96.01/96.00MHz，T=6.0s→95.98MHz，T=8.0s→95.97MHz——
+  **窓を2秒から8秒まで広げても収束せず一貫して約96.0MHz**（3節で
+  確認したstockの「短窓バイアス→収束」パターンとは異なり，ASP3側は
+  単一の安定したクロック体制へ即座に切り替わっているため，測定
+  バイアスではなく真の値と判断できる）。理論値80MHz（=240MHz÷3）とは
+  一致しない。
+
+**原因の推定**：本移植は`rtc_clk_bbpll_configure()`相当のBBPLL周波数
+設定（regi2c I2C_BBPLLブロックへの目標480MHz書込み）を実行せず，
+ROMが既に較正済みのBBPLL（2節でCAL_DONE=1を確認）をそのまま流用した
+——ROMが実際にロックした周波数がESP-IDFの前提する480MHzとは異なる
+可能性が高い（実測96MHzから逆算すると"PLL_F240M"ネット＝288MHz相当，
+BBPLL本体は576MHz相当と推定される）。BBPLLの実際の周波数設定を
+regi2c経由で修正する（リスク増）よりも，**実測値をそのまま正として
+較正定数を校正する**方針を採った（advisorの「実測を信頼する・回帰
+ハントにしない」指針を踏襲）。
+
+`asp3/arch/riscv_gcc/esp32c5/esp32c5.h`を実測96MHzへ更新した：
+`CORE_CLK_MHZ` 192→**96**（実施32実測確定），`SIL_DLY_TIM1`/
+`SIL_DLY_TIM2` 20→**42**（4サイクル/96MHz=41.67nsを切上げ，実施03と
+同じ「1反復=4サイクル」という周波数非依存のマイクロアーキテクチャ
+定数からの机上比例外挿——**JTAG hw-bp注入による実機再較正（実施03
+§3と同じ手法）は本ラウンドでは実施していない**，次段への申し送り）。
+更新後，再ビルド・再書込みし，`test_porting`が引き続き`# 6/6 passed`
+（3回連続起動）であることを再確認した。
+
+### 6. 決定実験：WiFiビルドで冷間Direct Boot較正——**PASS確定**（独立2回
+のRTSリセット試行＋1キャプチャ内5回の自然WDTリブートすべてで再現）
+
+`build/c5_idf61_uart`（標準WiFi有効ビルド，実施31までと同一構成＋本
+ラウンドのクロック切替え・較正定数更新のみ）を再ビルド・実機書込みし，
+UARTブリッジRTSリセット後の出力を観測した（判定基準は実施26以降と
+同一：`raw_adc`非ゼロかつブート毎に変動＝生信号，`done16`の0→1遷移を
+PASS，恒久ゼロをFAIL）。
+
+**結果（`r32_wifi_trial1.log`：20秒キャプチャ，自然WDTリブート5回・
+`r32_wifi_trial2.log`：独立RTSリセット，10秒キャプチャで2回）**：
+
+```
+wifi_diag: raw_adc=0x00000000 done16=0 ...                 ← esp_wifi_init前（想定どおりゼロ）
+...
+wifi_scan: esp_wifi_init
+esp_shim: task 'wifi' -> tskid 1 (prio 23)
+wifi_diag_live: raw_adc=0x095a0968 done16=1 ...             ← esp_wifi_init後：較正完走
+wifi_scan: esp_wifi_init -> 0
+wifi_scan: esp_wifi_start -> 0
+wifi_scan: DIAG set_promiscuous_rx_cb -> 0
+wifi_scan: DIAG set_promiscuous(true) -> 0
+wifi_diag: raw_adc=0x095a0968 done16=1 ...                  ← 較正値は安定して保持
+```
+
+7回の独立起動全て（`r32_wifi_trial1.log`の5回＋`r32_wifi_trial2.log`
+の2回）で`raw_adc`が非ゼロかつ起動毎に変動（`0x095a0968`/`0x09640968`/
+`0x09620966`/`0x095e095c`/`0x095a0964`/`0x09680972`/`0x096a0972`/
+`0x096e096e`——実施26/27/29と同型の生信号シグネチャ）・`done16`は
+`esp_wifi_init`前0→後1で再現した。**較正キー(A)＝CPUクロック切替えの
+欠落は確定的に解消した**——25ラウンド以上（実施11〜31）追跡してきた
+「トーン自己ループバック測定の生ADCサンプルがASP3のみ恒久ハードゼロ」
+という壁は，本ラウンドで解消した。
+
+### 7. (B)scan/RXの現状：新しい壁——`set_promiscuous(true)`成功後・
+`esp_wifi_scan_start`の戻り印字前でハングし，WDTリブートに至る
+
+較正PASS後もscanには到達しなかった。UARTログを精査すると，`wifi_scan:
+DIAG set_promiscuous(true) -> 0`まで印字された後，`wifi_scan: esp_wifi_
+scan_start`（呼出し直後に印字される既知のログ行）が一度も現れないまま
+`rst:0x12 (RTC_SWDT_SYS)`によるリブートに至っている（7回の独立起動
+全てで同一パターン，`r32_wifi_trial1.log`/`r32_wifi_trial2.log`で
+`grep -a "APs found|esp_wifi_scan_start|RESCAN"`が空であることを確認
+済み）——`esp_wifi_scan_start()`の内部（戻る前）でハングしていると
+判定できる。
+
+これは実施27で見つかった「promiscuous直後の全割込み凍結（CLIC
+`mintstatus.mil`固着）」と表面的に似た症状域だが，**実施28でその凍結
+自体は解消済み**（`irc_begin_int`のsynthetic mret化，`docs/c5-bringup.
+md`実施28）であり，本ラウンドで新たに導入したCPUクロック切替え
+（XTAL→PLL_F240M÷3，実測96MHz）が，実施28の修正が前提としていた
+タイミング関係（CLICの割込み出口処理とmretのタイミング）を変化させ，
+別の形で類似の症状を再発させている可能性がある——**未確認・未診断**
+（読取り専用のJTAG PCサンプル診断を試みたが，本ラウンドの残り時間内に
+OpenOCD接続の問題で完了できなかった）。
+
+(B)（`esp_clk_init()`相当のさらなる240MHzへの昇格＋`esp_perip_clk_
+init`相当）は，本ラウンドでは着手していない——`esp32c5_r32_cpu_clock_
+switch()`はbootloader相当の設定（PLL_F240M÷3）に留めており，app側の
+さらなる昇格（÷1＝240MHz相当，実測なら約288MHz相当になると予想され
+安全域を超える懸念がある，5節参照）は意図的に見送った。
+
+### 8. test_porting回帰：`# 6/6 passed`（3回連続起動，退行なし）
+
+`build/c5_r31_test_porting`（WiFi無効，実施31資産の再利用）で，
+esp32c5.hの較正定数更新前後それぞれでビルド・実機書込みし，8秒
+キャプチャ内でいずれも3回連続起動を観測しすべて`# 6/6 passed`
+（`r32_port_testporting_uart.log`／`r32_finalconst_testporting_uart.
+log`）。CPUクロックが48MHz→96MHzへ変化したにも関わらずカーネル基本
+機能（syslog・tick timer・task生成/起動・semaphore・eventflag・
+alarm/CLIC割込み配送）は全て正常——退行なし。
+
+### 9. C5#1最終状態（終了処理）
+
+本ラウンドの成果物である`build/c5_idf61_uart/asp_flash.bin`
+（実施32のクロック切替え＋較正定数更新込み，実施31までの全機能を
+包含）を最終状態としてそのまま維持した（手順5「最新ASP3ビルドで
+書き戻し」に該当——本ラウンドの新規ビルド自体が最新版のため追加の
+書き戻しは不要）。RTSリセット後12秒キャプチャで最終確認
+（`r32_final_state_console.log`）：`raw_adc=0x0974097a done16=1`
+（較正PASS，6節と同型），`set_promiscuous(true) -> 0`まで到達し
+その後`rst:0x12 (RTC_SWDT_SYS)`——7節の新しい壁のまま，退行・改善
+双方なく安定。
+
+C5#2・C6 board C・UARTブリッジ`125a266b...`：完全未接触（前ラウンド
+から変更なし）。DUTは常に`b04e3bcf...`（ttyUSB0）をby-id照合の上使用。
+
+### 10. 交絡の分離実験（advisor指摘への対応）：クロック切替え自体が
+較正の必要条件であり，delay較正の訂正だけでは不十分と確定
+
+6節までの加算実験は，(i) CPUクロックをXTAL(48MHz)からPLL(実測96MHz)へ
+切替えることと，(ii) `esp_rom_set_cpu_ticks_per_us()`をCORE_CLK_MHZの
+新しい値（96）で正しく再較正することを**同時に**行っていた。advisorの
+指摘（rigor doc「recurrence 6」と同型：「変更Xをしたら症状が動いた」を
+Xの内訳を分離せずに単一原因へ帰属させていないか）に従い，2つの効果を
+切り分ける対照実験を実施した。
+
+**対照実験の設計**：`esp32c5_r32_cpu_clock_switch()`の呼出しを一時的に
+無効化し（CPUはXTAL48MHzのまま），`esp_rom_set_cpu_ticks_per_us()`の
+引数だけを実速度に合わせた正しい値（`48`，ハードコード）へ変更。
+`SIL_DLY_TIM1`/`SIL_DLY_TIM2`も一時的に48MHz相当（4cyc/48MHz=83.33ns
+→切上げ84）へ変更し，ASP3自身のsil_dly_nse系delayもXTAL速度に対して
+正しくなるようにした——**クロックはXTALのまま，delay較正だけを完全に
+正す**という条件。
+
+**結果（独立2回のRTSリセット試行，各キャプチャ内の自然WDTリブート
+計5回を含む，`r32_control_trial1.log`/`r32_control_trial2.log`）**：
+**すべてFAIL**（`raw_adc=0x00000000 done16=0`が恒久的に継続，較正が
+一度も成立しなかった）。
+
+**判定**：delay較正（`esp_rom_set_cpu_ticks_per_us`とSIL_DLY）を実速度
+に対して完全に正しく設定しても，CPUがXTALのままでは較正はPASSしない
+——**PLLへのクロック切替え自体が較正キー(A)の必要条件**であることが
+確定した。「変更前は`esp_rom_set_cpu_ticks_per_us(192)`という誤った
+較正値のまま4倍遅く走っていたので，PHY blob内部のdelayが実質4倍長く
+なっていたことが真因で，クロック切替えは付随的だったのではないか」
+という代替仮説（advisor提起）は，本実験により**反証**された。
+
+この結果を受け，対照実験用の一時的な変更（クロック切替え無効化・
+ticks_per_us=48固定・SIL_DLY=84）は**revert**し，6節の本採用構成
+（クロック切替え有効・`CORE_CLK_MHZ=96`・`SIL_DLY_TIM1/TIM2=42`・
+`esp_rom_set_cpu_ticks_per_us(CORE_CLK_MHZ)`）へ戻して再ビルド・
+再書込みし，較正PASSが再現することを最終確認した
+（`r32_finalfix_confirm.log`：`raw_adc=0x0964095a done16=1`）。
+`test_porting`も同構成で再度`# 6/6 passed`（3回連続起動，
+`r32_final_testporting_uart.log`）を確認済み。
+
+### 変更ファイル
+
+- `asp3/arch/riscv_gcc/esp32c5/esp32c5.h`：`CORE_CLK_MHZ` 192→96・
+  `SIL_DLY_TIM1`/`SIL_DLY_TIM2` 20→42（実施32実測確定＋机上比例外挿，
+  コメントに実施03からの訂正経緯を明記）。
+- `asp3/target/esp32c5_espidf/target_kernel_impl.c`：
+  `esp32c5_r32_cpu_clock_switch()`（新設，CPUクロックXTAL→PLL_F240M÷3
+  切替え，`PMU_IMM_HP_CK_POWER_REG`/`I2C_ANA_MST_ANA_CONF0_REG`/
+  `PCR_SYSCLK_CONF_REG`/`PCR_CPU_FREQ_CONF_REG`/`PCR_AHB_FREQ_CONF_REG`/
+  `PCR_BUS_CLK_UPDATE_REG`を使用）を新設し，`hardware_init_hook()`の
+  最初期（WiFi有無に関わらず無条件）から呼出し。
+- `docs/c5-bringup.md`：本節（実施32）追加。
+- スクラッチ（リポジトリ外，`/tmp/.../scratchpad/`）：`r32_clkcheck.py`
+  （新規，PCR/I2C_ANA_MST/PMU_IMM_HP_CK_POWERのJTAG読取り）・
+  `r32_cpufreq_recheck.py`（新規，mcycle対SYSTIMER二点法によるCPU
+  周波数再計測）・`r32_pcsample.py`（新規，7節の診断用，本ラウンドは
+  未完走）・`r32_asp3_clk_try1/2.log`（2節）・
+  `r32_cpufreq_try1/2.log`／`r32_cpufreq_noWiFi_try1.log`／
+  `r32_cpufreq_stockscan_try1〜5.log`（3節）・
+  `r32_afterport_clkcheck_try1.log`（5節）・
+  `r32_cpufreq_afterport_noWiFi_try1/2.log`／
+  `r32_cpufreq_afterport_long_try1/2.log`（5節）・
+  `r32_port_testporting_uart.log`／`r32_finalconst_testporting_uart.
+  log`（8節）・`r32_wifi_trial1.log`／`r32_wifi_trial2.log`（6節）・
+  `r32_final_state_console.log`（9節）・`r32_precheck_uart.log`
+  （ラウンド開始時のベースライン再確認）・`r32_control_trial1/2.log`
+  （10節，交絡分離実験）・`r32_finalfix_confirm.log`／
+  `r32_final_testporting_uart.log`（10節，revert後の最終再確認）。
+  stockの陽性対照は実施15/29資産（`stock_scan/`）を再利用。
+- git commitは行っていない（指示どおり）。
+
+### 次段への申し送り
+
+0. **（確認済み・再検証不要）較正キー(A)の因果帰属**：10節の対照実験に
+   より，「クロック切替え」と「delay較正の訂正」を分離した上で，
+   クロック切替え自体が較正PASSの必要条件であることを確定した
+   （delay較正だけを正しくしてもXTALのままではFAIL，独立2回）。
+   「実はdelay較正の誤りが真因で，クロック切替えは付随的だった」と
+   いう代替解釈は反証済み——今後この点を再度切り分け直す必要はない。
+1. **最優先＝7節の新しい壁（`esp_wifi_scan_start`内ハング）の診断**。
+   実施27/28型（CLIC mil固着）の再発かどうかをJTAG PCサンプルで確認
+   すること——本ラウンドで用意した`r32_pcsample.py`（未完走，OpenOCD
+   接続問題）をまず動かすか，実施27の手法（割込みリング計装）を再利用
+   するのが早い。クロック切替えのタイミング変化が実施28の修正の前提
+   （synthetic mretのタイミング）を崩している可能性がある。
+2. **BBPLL実周波数の解明**：実測96MHzがなぜ理論値80MHzと一致しないか
+   （5節）は未解明のまま。`rtc_clk_bbpll_configure()`相当の完全な
+   regi2c設定（`clk_ll_bbpll_set_config()`，480MHz目標値をXTAL周波数
+   から計算しI2C_BBPLLブロックへ書込み）を実装すれば理論値へ近づく
+   可能性がある——ただしregi2c書込みのリスク増を伴うため，7節の壁が
+   解消してから着手する方が優先度として妥当。
+3. **SIL_DLY_TIM1/TIM2=42の実機再較正**：現在は机上比例外挿（未実測）
+   のまま。実施03 §3と同じhw-bp注入による二点法（`sil_dly_nse`への
+   pc=エントリ・a0=N・retにbp）で改めて実機較正することを推奨する
+   （task手順2・5節の申し送りどおり）。
+4. **(B)（`esp_clk_init()`相当のさらなる240MHzへの昇格＋
+   `esp_perip_clk_init`相当）は未着手のまま**。7節の壁が解消してから，
+   実施30で特定済みの設計（`rtc_clk_cpu_freq_set_config()`によるさらに
+   上のCPU周波数への切替え）を検討する。ただし5節の実測結果を踏まえ，
+   「÷1＝240MHz相当」を単純に指定すると実際には約288MHz相当になる
+   懸念があるため，BBPLL実周波数（2の申し送り）を先に解明してから
+   昇格幅を決める方が安全。
+5. **実施03の「CPU=192MHz実機確定」反証の扱い**：本ラウンドでは
+   advisor指摘に従い経緯の追跡（regression hunt）を行わなかった。
+   ユーザーが必要と判断すれば，実施04〜30の各ビルドを遡ってCPU周波数を
+   再測定し，いつ・どの変更で48MHzへ後退した（または実施03の測定自体
+   が誤りだった）かを特定できる——ただし優先度は7節の壁より低いと
+   判断する。
