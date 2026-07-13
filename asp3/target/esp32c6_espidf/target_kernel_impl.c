@@ -87,6 +87,72 @@ esp32c6_disable_mwdt(uint32_t timg_base)
 }
 
 /*
+ *  【実施87・診断ガード付き（既定無効）】APM (Access Permission
+ *  Management) / HP-TEEブロックのアクセス制御をstock相当へ解除する。
+ *
+ *  C5実施42/43で確定した機構のC6移植：ASP3のDirect Bootはstockの
+ *  APPスタートアップが必ず実行するbootloader_init_mem()
+ *  （hal/components/bootloader_support/src/bootloader_mem.c）を一切
+ *  経由しないため，
+ *    (1) apm_hal_enable_ctrl_filter_all(false)
+ *        -- C6ではHP_APM/LP_APM0/LP_APMの3コントローラ（C6にCPU_APMは
+ *           存在しない．soc/esp32c6/include/soc/apm_defs.h）
+ *    (2) apm_hal_set_master_sec_mode_all(APM_SEC_MODE_TEE)
+ *        -- ただしC6はSOC_APM_SUPPORT_TEE_PERI_ACCESS_CTRL未定義のため
+ *           stock/NuttXはこれを呼ばない（フィルタ解除のみで十分＝
+ *           C5実施43のfilteronly変種と同型）．本実装は保守的に
+ *           C5恒久版と同じ「両方」を行う．
+ *  が一度も実行されず，WiFi/BTモデム（APM master id=4=APM_MASTER_MODEM，
+ *  POR既定REE2）のバスマスタアクセスがHP_APMフィルタ（POR既定有効）の
+ *  ゲート対象になり得る。
+ *
+ *  実施87実測（board B 14:C1:9F:E0:61:B0）：
+ *    ASP3冷間（2ブート再現）：HP_APM_FUNC_CTRL=0xF・LP_APM0=0x1・
+ *      LP_APM=0x3（全てPOR既定=有効），TEE_M4(MODEM)=3(REE2)，
+ *      HP_APM M0-M3例外ラッチ=全て0（ただし当日board BのASP3は
+ *      phy-init regi2cハングでMAC/modem活動前に停止しており，
+ *      ラッチ不在は「modemのDMA試行が無かった」ことと区別できない）
+ *    NuttX同一ボード：HP_APM/LP_APM0/LP_APM FUNC_CTRL=全て0
+ *      （bootloader_init_mem実行済み），TEE_M4=3のまま（上記(2)の通り）
+ *  ＝C5と同型の「初期化ギャップ」はC6にも実在する。因果（deaf-RXへの
+ *  寄与）は本ラウンドでは判定不能（board Bのハング＋NuttXでも同板は
+ *  RX不能という個体要因のため）——docs/wifi-shim-c6.md 実施87参照。
+ *
+ *  既定無効（ESP32C6_R87_APMFIX未定義なら完全に空）。機能検証が
+ *  できた時点で恒久化（無条件化）を判断する。
+ */
+#ifdef ESP32C6_R87_APMFIX
+#define ESP32C6_R87_TEE_MASTER_BASE     0x60098000U   /* TEE_M0..M31_MODE_CTRL_REG */
+#define ESP32C6_R87_TEE_MASTER_COUNT    32U
+#define ESP32C6_R87_HP_APM_FUNC_CTRL    0x600990C4U   /* hp_apm_reg.h +0xc4 */
+#define ESP32C6_R87_LP_APM0_FUNC_CTRL   0x600998C4U   /* lp_apm0_reg.h +0xc4 */
+#define ESP32C6_R87_LP_APM_FUNC_CTRL    0x600B38C4U   /* lp_apm_reg.h +0xc4 */
+#define ESP32C6_R87_HP_APM_M0_STATCLR   0x600990CCU   /* +0xcc/+0xdc/+0xec/+0xfc */
+
+static void
+esp32c6_r87_apm_unblock(void)
+{
+	uint32_t	i;
+
+	/*  (1) 3コントローラ全ての経路フィルタを解除  */
+	sil_wrw_mem((void *)ESP32C6_R87_HP_APM_FUNC_CTRL, 0U);
+	sil_wrw_mem((void *)ESP32C6_R87_LP_APM0_FUNC_CTRL, 0U);
+	sil_wrw_mem((void *)ESP32C6_R87_LP_APM_FUNC_CTRL, 0U);
+
+	/*  (2) 全32マスタをTEEモード(0)へ  */
+	for (i = 0U; i < ESP32C6_R87_TEE_MASTER_COUNT; i++) {
+		sil_wrw_mem((void *)(ESP32C6_R87_TEE_MASTER_BASE + i * 4U), 0U);
+	}
+
+	/*  HP_APM M0..M3の例外ラッチをクリア（以降の新規違反を検出可能に．
+	 *  C6のHP_APMは4経路＝status/clr/info0/info1の4語×4組，stride 0x10） */
+	for (i = 0U; i < 4U; i++) {
+		sil_wrw_mem((void *)(ESP32C6_R87_HP_APM_M0_STATCLR + i * 0x10U), 1U);
+	}
+}
+#endif /* ESP32C6_R87_APMFIX */
+
+/*
  *  起動時のハードウェア初期化処理
  */
 void
@@ -179,6 +245,16 @@ hardware_init_hook(void)
 	extern void esp_shim_coex_adapter_register(void);
 	esp_shim_coex_adapter_register();
 #endif /* TOPPERS_ESP32C6_WIFI */
+
+#ifdef ESP32C6_R87_APMFIX
+	/*
+	 *  【実施87・診断ガード付き（既定無効）】APM/HP-TEEのアクセス制御を
+	 *  stock相当へ解除（本関数定義の直上コメント参照．C5実施42/43の
+	 *  esp32c5_r42_apm_unblock()のC6移植）。esp_wifi_init/PHY較正より
+	 *  前＝hardware_init_hook末尾で呼ぶ（C5恒久版と同位置）。
+	 */
+	esp32c6_r87_apm_unblock();
+#endif /* ESP32C6_R87_APMFIX */
 }
 
 void
