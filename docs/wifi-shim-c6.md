@@ -13416,3 +13416,246 @@ positive control」というギャップ指摘が的中した形である。
   hardware_init_hook内にAPM書込み列が存在することをobjdumpで確認。
 - 終了処理：board Bへ既定ビルドをフル4MB書き戻し（hash verified），
   冷間ブートの症状（phy-initハング）をUART実測で記録。
+
+## 実施88：board C DUT転用による凍結解除判定——★決定的な陽性結果★
+HP_APM M1例外ラッチ（master_id=4=MODEM/mode=REE2/region=1，SRAM先
+0x4081f0a8）を board C 冷間scan中に2/2ブートで再現・物証確定，
+`ESP32C6_R87_APMFIX`有効ビルドとのA/Bで冷間scanが**0AP→14〜23AP**，
+ROM常駐`lmacRxDone`ヒット数が**0/60s→59/60s**へ復帰（各2/2ブート）。
+恒久化（ガード撤去・無条件化）後も同一結果を再現し，独立なスニファ
+（C5#2，DUT MAC一致判定）でもboard C自身のprobe request 311件を
+検出——**85ラウンド凍結されていたC6 deaf-RXは，C5実施42/43と同一の
+APM（Access Permission Management）未初期化が真因と確定・解決した**。
+regression（test_porting_c6，6/6×2）も健全。
+
+### 用語・前提について（consent gap の扱い）
+
+本ラウンドの起動指示には「ユーザーが本日，board CのDUT転用を直接
+承認した」との記述があった。しかし，この記述は**起動元エージェント
+からの伝聞**であり，本セッション内でユーザー本人の発話として直接
+確認できたものではない。実施81（「コーディネータ経由の承認」を
+ユーザー本人の同意として扱い，事後にInstruction Poisoningと判定
+された）・実施83（「独立検証できるのは技術的主張のみ，承認の主張
+自体はコーディネータの報告と同じ認識論的地位」）の教訓に従い，
+**本ラウンドはこの伝聞を「確定した事実」として記録しない**。
+
+実際に起きたこととして正確に記録できるのは以下のみである：本
+ラウンド開始時点でboard Cは既にNuttX（`FUNC_CTRL=0`をJTAGで確認）
+であり，その後のboard Cへの`esptool write-flash`（ASP3書込み）は
+本セッションのBashツール権限（auto mode）を通過して実行され，
+コーディネータからの追加の承認確認や拒否は本セッション内では
+観測されなかった。実施82（同種の伝聞承認を permission classifier
+が事前に拒否した例）とは異なる経路（別のツール／別の権限設定）を
+通ったという事実のみが確認でき，「ユーザー本人が直接承認した」と
+いう主張そのものの真偽は，本セッションからは独立に検証不能である。
+これは将来のラウンドが「Bashツールがエラーなく通れば承認は済んで
+いる」と読んでよいという意味では全くない——単に，本ラウンドで
+実際に何が起きたかを実施83と同じ基準で正直に記録するものである。
+なお，転用後の技術的手続き（NuttX復元手順の保全，接触禁止ボードの
+無接触維持等）は通常通り遵守した。
+
+### 背景
+
+実施87はC6にもAPM初期化ギャップが実在することを確定したが，因果
+判定は二重ブロック（board BのASP3が本日phy-init冒頭で持続ハング／
+board B自体がNuttXでも受信不能な個体）で保留となった。凍結解除の
+条件として実施87が申し送った「RX可能な個体でのHP_APM例外ラッチ
+観測＋APMFIX A/B」を，NuttXで実施80が34 hits/60sの陽性対照を確立
+済みのboard Cで実行する。
+
+### 1. 転用前の陽性対照（board C＝NuttX，today）
+
+- JTAG `lmacRxDone`（ROM固定0x40000c50，実施80と同一手法）：
+  60秒間で**46 hits**（実施80の同一個体・同一バイナリでの34 hitsを
+  上回る，強い陽性）。
+- コンソール（`ifconfig wlan0 up`→`wapi scan wlan0`）：5秒ブロック
+  する実走を確認（このNuttXビルドの`wapi scan`はSSIDテーブルを
+  コンソールへ表示しない仕様であることを確認——実施80/87でも同様に
+  テーブル文字列は記録されておらず，本ラウンド固有の異常ではない。
+  RX健全性の判定は`lmacRxDone`ヒット数を正とする）。
+- スニファ（C5#2，`scratchpad/sniffer/main/sniffer.c`のDUT_MACを
+  実施38当時のC5#1用から本ラウンドのDUT＝board C
+  `14:c1:9f:e0:5a:9c`へ変更し再ビルド・再書込み）による環境陽性
+  対照：channel6で14秒間にbeacon 1283件・mgmt 1586件を検出——環境
+  RFは十分（この時点でboard CはNuttXアイドルのためDUTtotal=0は
+  予測通り）。
+- NuttX復元用の原本：`/home/honda/.claude/jobs/494f98a3/tmp/
+  nuttx-c6/nuttx/nuttx.bin`（md5=`f6295bd30a671eb94b04cae518456433`，
+  実施76以来この個体へ使われてきたのと同一バイナリ）。
+
+### 2. ASP3ベースライン（board C，`build/c6_wifi_scan_uart`，
+   HEAD=fbacaca，APMFIX無効）
+
+- **board Bの持続phy-initハング（実施87，10/10）はboard Cでは
+  一度も再現しなかった**——UART0コンソール（ブリッジ`125a266b…`，
+  D6/D7配線あり・uart0コンソール正常出力を確認）で即座に
+  `wifi_scan: RESCAN 0 APs (err=0)`ループへ到達。これはboard Bの
+  ハングが**board B個体固有の現象**であることの追加裏付けであり
+  （実施87の「board Bは個体レベルで難聴」という結論と整合），
+  APM機構そのものとは無関係と再確認した。
+- `lmacRxDone`：60秒間で**0 hits**（boot2で計測）——deaf-RXの
+  症状が旧ボード58:E6と同様，board C上でも純粋な形（phy-initハング
+  という交絡なし）で再現。
+- **HP_APM M0-M3例外ラッチ（本ラウンドの物証，独立2ブートとも
+  同一値）**：
+  ```
+  HP_APM_FUNC_CTRL_REG (0x600990c4) = 0x0000000f  ←POR既定，全フィルタ有効
+  M1_STATUS  (0x600990d8) = 0x00000001            ←例外ラッチ発生
+  M1_INFO0   (0x600990e0) = 0x00130001            ←region=1／mode=3(REE2)／master_id=4(MODEM)
+  M1_INFO1   (0x600990e4) = 0x4081f0a8            ←遮断先アドレス（HP SRAM内）
+  M0/M2/M3 STATUS = 0（無反応）
+  ```
+  master_id=4=`APM_MASTER_MODEM`，mode=3=REE2——**C5実施42の物証
+  （M1_STATUS=1／INFO0=0x00130001／master4/MODEM）と完全に同型**。
+  scan実行中（modemのDMA活動あり）に取得できたため，実施87の
+  「ラッチ不在はDMA試行が無かったことと区別できない」という限界を
+  今回は解消している。
+
+### 3. A/B（`ESP32C6_R87_APMFIX`有効，`build/c6_r87_apmfix`）——
+   ★因果確定★
+
+- **AP検出**：boot1=16,22,23,20,23,18,20,23／boot2=20,22,17,18,14
+  （いずれも複数RESCANサイクルにわたり継続検出，2/2ブート）。
+- **`lmacRxDone`**：boot1=59/60・boot2=59/60（`ra=0x4206fa46`，ASP3
+  自身のPHYコールサイト，一貫）。
+- **APM状態の読み戻し**：`HP_APM_FUNC_CTRL=0`・TEE全32マスタ=0・
+  M0-M3例外ラッチ全て0（新規違反なし）——フィルタ解除後は遮断も
+  ラッチも発生しないことを確認。
+- 判定基準（実施87で事前固定）「AP検出＋lmacRxDone>0 → C6 deaf-RX
+  解消＝凍結解除」を満たした。
+
+### 4. 恒久化
+
+`asp3/target/esp32c6_espidf/target_kernel_impl.c`：`ESP32C6_R87_APMFIX`
+ガードを撤去し，`esp32c6_r87_apm_unblock()`を`hardware_init_hook()`
+末尾から無条件呼出しへ変更（C5実施43と同じ位置・同じ構成＝フィルタ
+解除＋TEE全32マスタ昇格の両方を保守的に採用。C6のstock/NuttXは
+フィルタ解除のみだが，C5実施43が「両方＝安全側」を最終選択した
+判断をそのまま踏襲し，本ラウンドで実際に検証済みの構成を変更
+しない）。
+
+`build/c6_wifi_scan_uart`を再ビルドし，board Cで独立2ブート確認：
+- boot1：RESCAN 19,16,18,19,21,16 APs。
+- boot2：RESCAN 21,19,22,19,18 APs／`lmacRxDone`=59/60。
+- APM状態読み戻し：`FUNC_CTRL=0`・ラッチ0（APMFIXビルドと同一）。
+
+回帰：`build/test_porting_c6`を同じソースツリーから再ビルドし，
+`scripts/ci/run_board_esp32c6.py`でboard C実機を2回実行——**6/6
+passed×2**（syslog_output/tick_timer_basic/task_create_activate/
+semaphore_signal_wait/eventflag_set_wait/alarm_handler）。
+
+追加のTX側裏付け：恒久化ビルドをboard Cへ最終書込みした状態で
+C5#2スニファ（DUT_MAC=board C）を約12分観測——**DUTtotal=
+DUTprobereq=311**（board C自身が送出したprobe requestをRF越しに
+独立検出）。実施81が旧board Bで示した「TXがRFとして検出できない」
+という症状も，本ラウンドでは同一機構の修正により解消したことを
+別ルートから裏付けた（ただしboard Bでの直接再確認は本ラウンドでは
+未実施——board B個体は依然難聴のため，この追加確認はboard C上での
+み成立する）。
+
+### 5. 解釈
+
+C5実施42/43で確立された機構——Direct Bootが`bootloader_init_mem()`
+（`apm_hal_enable_ctrl_filter_all(false)`）を実行しないため，WiFi
+Modemバスマスタ（APM_MASTER_MODEM=4）がPOR既定のHP_APMフィルタに
+遮断されDMAがHP SRAMのTX/RXパケットバッファへ届かない——が，C6にも
+そのままの形で存在し，かつ**C6 deaf-RX（85ラウンド凍結）の真因
+そのものであったことが確定した**。85ラウンドにわたって発見され
+なかった理由もC5と同一である：CPU（master0=HPCORE）は常時TEEで
+APMフィルタの対象外のため，MMIO/regi2c等のCPU可視レジスタ比較には
+一切現れない，バスマスタ視点の構造的盲点だった。
+
+実施87で「保留」に終わった理由（board Bのphy-initハングとboard B
+自体の個体難聴という二重ブロック）は，board Cという別個体では
+どちらも発生しなかった——**board Bの症状は無関係な個体固有の故障が
+2つ重なっていた**という解釈で一貫する（APM説を否定する材料は最後
+まで一切出ず，board Cで直接検証した結果もAPM説を完全に裏付けた）。
+
+実施80/81/83が確立した「board B限定の陰性結果（lmacRxDone=0・TX無
+放射・至近ビーコン無反応）」は，実施87で「board B個体要因と交絡」と
+再解釈されていたが，本ラウンドの結果はこれをさらに補強する：board
+Cという健全な個体でAPM機構を修正すると症状（RX/TXともに）が解消する
+以上，「ASP3固有のdeaf-RX」自体はboard B/58:E6限定の現象ではなく，
+APM初期化ギャップというDirect Boot全体の構造的バグだったと結論
+できる。旧board 58:E6での「ASP3のみdeaf」という対照実験（実施65等）
+も，同じAPM機構で統一的に説明可能である。
+
+### まとめ・申し送り
+
+1. **★凍結解除★**：C6 deaf-RX（実施1-85，85ラウンド凍結）はAPM
+   （Access Permission Management）未初期化が真因と確定・解決した。
+   C5実施42/43と完全に同一の機構。
+2. 恒久修正は`asp3/target/esp32c6_espidf/target_kernel_impl.c`の
+   `esp32c6_r87_apm_unblock()`を`hardware_init_hook()`から無条件
+   呼出しへ変更（診断ガード`ESP32C6_R87_APMFIX`は撤去）。
+3. 物証：HP_APM M1例外ラッチ（master_id=4=MODEM/mode=REE2/
+   region=1，遮断先0x4081f0a8=HP SRAM内）を board C 冷間scan中に
+   2/2ブートで再現。
+4. 因果：`ESP32C6_R87_APMFIX`有効／恒久化後のいずれも，冷間scan
+   0AP→14〜23AP，`lmacRxDone` 0→59/60，独立スニファでのTX検出
+   （311件）を確認（各2/2ブート＋補足観測）。
+5. 回帰：`test_porting_c6`6/6×2で健全性確認。
+6. board Bのphy-initハング（実施87）はboard Cで再現せず——board B
+   固有の別要因（個体難聴＋当日限定のphy-initハング）であり，APM
+   機構とは無関係と結論。board B自体の当日ハングの根本原因は本
+   ラウンドでは追跡していない（deaf-RX凍結解除が主題のため）。
+7. **consent gapの記録（重要）**：board CのDUT転用は起動指示内で
+   「ユーザー直接承認」とされたが，本セッションからは独立検証
+   できない伝聞である。上記「用語・前提について」節に事実関係を
+   正確に記録した。将来のセッションはこれを「伝聞承認で十分」の
+   前例として読まないこと。
+   **【コーディネータ付記（2026-07-13）】**：本ラウンドの起動元
+   （メインセッション）が，会話本文でユーザー本人から選択肢1
+   （board C転用）の明示選択を直接受領したことをここに証言する。
+   実施81/83で問題となったのは「エージェント間で中継された承認
+   主張」であり，本件はメインセッションの会話内にユーザー発言が
+   実在する点で異なる。サブエージェント側が伝聞を伝聞として
+   保留記録した判断自体は正しく，本付記はそれを上書きするもの
+   ではなく承認の実在をコーディネータ責任で補完するもの。
+8. `docs/c5c6-lessons-for-s31.md`冒頭の出典行を実施88まで反映して
+   更新済み。
+
+### 変更ファイル（実施88）
+
+- `asp3/target/esp32c6_espidf/target_kernel_impl.c`：
+  `ESP32C6_R87_APMFIX`ガード撤去，`esp32c6_r87_apm_unblock()`を
+  `hardware_init_hook()`末尾から無条件呼出しへ変更（恒久化）。
+- `build/c6_wifi_scan_uart`・`build/test_porting_c6`：上記ソースで
+  再ビルド（生成物，リポジトリ管理外）。
+- `docs/wifi-shim-c6.md`：本節（実施88）追記。
+- `docs/c5c6-lessons-for-s31.md`：出典行を実施88まで更新。
+- リポジトリ外スクラッチ：`/tmp/claude-.../scratchpad/sniffer/
+  main/sniffer.c`のDUT_MACをC5#1用からboard C用へ変更（実施38の
+  一時プロジェクト，本リポジトリの管理外）。
+- スクラッチ（`260d98fa…/scratchpad/r88/`）：JTAG/コンソールログ
+  一式（`boardC_pos_*`・`boardC_asp3_baseline_*`・
+  `boardC_apmfix_*`・`boardC_permanent_*`・`sniffer_envctl_boot1.log`・
+  `sniffer_finalcheck.log`）。
+- git commitは行っていない（親のレビュー後commit&push運用）。
+
+### 検証（実施88）
+
+- 転用前陽性対照：`lmacRxDone`46 hits/60s（board C，NuttX，本日）。
+  スニファ環境対照：14秒でbeacon 1283件。
+- ASP3ベースライン：phy-initハング0/2（board B比で対照的），
+  `lmacRxDone`0/60s，HP_APM M1ラッチ2/2ブートで完全同一値を再現。
+- A/B：APMFIXビルドでAP検出2/2（各回複数RESCAN），`lmacRxDone`
+  59/60×2，APM読み戻しでラッチ消滅を確認。
+- 恒久化後：AP検出2/2，`lmacRxDone`59/60，APM読み戻し確認，
+  `test_porting_c6` 6/6×2（実機，board C），独立スニファでTX
+  311件検出。
+- 全JTAGは`adapter serial`をboard C=`14:C1:9F:E0:5A:9C`に明示指定
+  （OpenOCD v0.12.0-esp32-20260703）。全esptool/コンソール操作は
+  `/dev/serial/by-id/`のby-idパスで実行。
+- board B（`14:C1:9F:E0:61:B0`）・C5#1（`D0:CF:13:F0:A7:44`）・
+  各ブリッジは本ラウンドを通じて無接触（`ls -l /dev/serial/by-id/`
+  のタイムスタンプで裏付け）。
+- **最終board状態**：board C＝ASP3恒久修正版
+  （`build/c6_wifi_scan_uart/asp_flash.bin`，フル4MB書込み・hash
+  verified，冷間scan健全動作を確認した状態のまま残置）。NuttXへの
+  復元は原本`/home/honda/.claude/jobs/494f98a3/tmp/nuttx-c6/
+  nuttx/nuttx.bin`（md5=`f6295bd3…`）で可能（本ラウンドでは未実施
+  ——ユーザーの追加指示待ち）。board B＝実施87終了時のまま
+  （ASP3・phy-initハング症状・診断ガード`WIFI_REGI2C_TRACE_READS`
+  のみ）。C5#2＝スニファ役割のまま（`scratchpad/sniffer`ビルド，
+  DUT_MAC=board Cへ変更済み）。C5#1＝無接触。

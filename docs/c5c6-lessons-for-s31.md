@@ -2,7 +2,11 @@
 
 対象読者：ESP32ファミリの新チップ（S31等）へASP3を移植する開発者・調査担当。
 出典：`docs/c5-bringup.md` 実施01〜43（C5、真因確定・解決済み）と
-`docs/wifi-shim-c6.md` 実施01〜85＋実施86（C6、APM検証）。
+`docs/wifi-shim-c6.md` 実施01〜88（C6。実施87でAPM初期化ギャップの
+実在を確認，実施88でboard C上の物証（HP_APM M1例外ラッチ，
+master_id=4=MODEM/mode=REE2）取得＋APMFIX A/Bで冷間scan 0AP→
+14〜23AP・`lmacRxDone` 0→59/60ヒットを確認し，85ラウンド凍結の
+C6 deaf-RXをC5と同一機構＝APM未初期化として解決・恒久化）。
 本書は「何が起きたか」ではなく「**次の移植で同じ穴に落ちないために何をするか**」に絞る。
 
 ---

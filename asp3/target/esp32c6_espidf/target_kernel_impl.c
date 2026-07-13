@@ -118,10 +118,18 @@ esp32c6_disable_mwdt(uint32_t timg_base)
  *  寄与）は本ラウンドでは判定不能（board Bのハング＋NuttXでも同板は
  *  RX不能という個体要因のため）——docs/wifi-shim-c6.md 実施87参照。
  *
- *  既定無効（ESP32C6_R87_APMFIX未定義なら完全に空）。機能検証が
- *  できた時点で恒久化（無条件化）を判断する。
+ *  実施88（docs/wifi-shim-c6.md）：board C（14:C1:9F:E0:5A:9C）上で
+ *  因果を確定・恒久化。ASP3冷間スキャン中にHP_APM M1例外ラッチが
+ *  独立2ブートとも同一値で再現（STATUS=1／INFO0=0x00130001＝
+ *  master_id=4(MODEM)+mode=3(REE2)+region=1／INFO1=0x4081f0a8＝
+ *  HP SRAM内アドレス）＝C5実施42と同一機構の物証。本関数を無条件
+ *  呼出しへ切替えたA/Bで，独立2ブートとも冷間scanが0APから
+ *  14〜23APへ復帰し，ROM常駐`lmacRxDone`（0x40000c50，ファーム
+ *  非依存）ヒット数も0/60sから59/60sへ復帰——deaf-RXが解消することを
+ *  確認した。旧`ESP32C6_R87_APMFIX`ガードは撤去し無条件化する
+ *  （C5実施43と同じ「フィルタ解除＋TEE昇格の両方」を保守的に採用，
+ *  既に本ラウンドで検証済みの構成のまま変更しない）。
  */
-#ifdef ESP32C6_R87_APMFIX
 #define ESP32C6_R87_TEE_MASTER_BASE     0x60098000U   /* TEE_M0..M31_MODE_CTRL_REG */
 #define ESP32C6_R87_TEE_MASTER_COUNT    32U
 #define ESP32C6_R87_HP_APM_FUNC_CTRL    0x600990C4U   /* hp_apm_reg.h +0xc4 */
@@ -150,7 +158,6 @@ esp32c6_r87_apm_unblock(void)
 		sil_wrw_mem((void *)(ESP32C6_R87_HP_APM_M0_STATCLR + i * 0x10U), 1U);
 	}
 }
-#endif /* ESP32C6_R87_APMFIX */
 
 /*
  *  起動時のハードウェア初期化処理
@@ -246,15 +253,13 @@ hardware_init_hook(void)
 	esp_shim_coex_adapter_register();
 #endif /* TOPPERS_ESP32C6_WIFI */
 
-#ifdef ESP32C6_R87_APMFIX
 	/*
-	 *  【実施87・診断ガード付き（既定無効）】APM/HP-TEEのアクセス制御を
+	 *  【実施87で発見・実施88で恒久化】APM/HP-TEEのアクセス制御を
 	 *  stock相当へ解除（本関数定義の直上コメント参照．C5実施42/43の
 	 *  esp32c5_r42_apm_unblock()のC6移植）。esp_wifi_init/PHY較正より
 	 *  前＝hardware_init_hook末尾で呼ぶ（C5恒久版と同位置）。
 	 */
 	esp32c6_r87_apm_unblock();
-#endif /* ESP32C6_R87_APMFIX */
 }
 
 void
