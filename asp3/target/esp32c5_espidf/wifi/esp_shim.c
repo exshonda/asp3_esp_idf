@@ -430,11 +430,33 @@ esp_shim_mutex_unlock(void *mtx)
 }
 
 /*
- *		キュー（DTQプール＋ヒープ確保item）
+ *		キュー（DTQプール＋固定プールitem．S3 commit dd7a76d移植．
+ *		C3 (asp3/target/esp32c3_espidf/wifi/esp_shim.c) 実施1の修正を
+ *		C5へ横展開．C5固有差なし＝C3から無改変で移植可能だった
+ *		（docs/load-test-c3c5c6.md「C5」節，実施46参照）。
+ *
+ *  旧実装は送受信のたびに esp_shim_malloc/free でitemバッファを
+ *  確保していた．これは
+ *   (1) ISR文脈（queue_send_from_isr．WiFi MAC ISRから呼ばれる）での
+ *       malloc失敗がtx-done完了通知の取りこぼしに直結し，WiFi動的TX
+ *       バッファが永久未回収になって送信自己ロックを招く，
+ *   (2) 持続高レート送受信でのalloc/freeチャーンがシムヒープを
+ *       断片化させる，
+ *  という潜在欠陥だった（docs/s3-throughput-findings-for-c6.md参照）。
+ *
+ *  対策：生成時にdepth*item_sizeのプールとスロット空きスタックを
+ *  1回だけ確保し，送受信ではmallocせずスロット番号のみをDTQで運ぶ。
+ *
+ *  なお C3 の esp_shim_queue_reset（NimBLE eventq_reset用．C3独自の
+ *  BT対応で追加）はC5には存在しない（C5はBT非対応）ため移植不要。
  */
 typedef struct {
 	ID			dtqid;		/* 0なら未使用スロット */
 	uint32_t	item_size;
+	uint8_t		*pool;		/* depth*item_size．生成時に1回だけ確保 */
+	uint16_t	*free_stk;	/* 空きスロット番号スタック（LIFO） */
+	uint32_t	depth;
+	volatile uint32_t free_top;	/* 空きスロット数 */
 } SHIM_QUE;
 
 static const ID shim_dtq_id[ESP_SHIM_NUM_DTQ] = {
@@ -446,24 +468,48 @@ void *
 esp_shim_queue_create(uint32_t len, uint32_t item_size)
 {
 	uint_t		i;
+	uint32_t	k, depth = len;
 	SHIM_QUE	*q = NULL;
+	uint8_t		*pool;
+	uint16_t	*stk;
 
-	if (len > ESP_SHIM_DTQ_CNT) {
+	if (depth > ESP_SHIM_DTQ_CNT) {
 		syslog(LOG_NOTICE, "esp_shim: queue len %u > pool depth %u",
 			   (uint_t)len, (uint_t)ESP_SHIM_DTQ_CNT);
+		depth = ESP_SHIM_DTQ_CNT;
+	}
+	/*  プールと空きスタックを生成時に1回だけ確保（以後mallocしない）。 */
+	pool = (uint8_t *) esp_shim_malloc((size_t)depth * item_size);
+	stk = (uint16_t *) esp_shim_malloc((size_t)depth * sizeof(uint16_t));
+	syslog(LOG_NOTICE, "esp_shim: queue create depth=%u item=%u pool=%uB",
+		   (uint_t)depth, (uint_t)item_size, (uint_t)(depth * item_size));
+	if (pool == NULL || stk == NULL) {
+		esp_shim_free(pool);
+		esp_shim_free(stk);
+		syslog(LOG_ERROR, "esp_shim: queue pool alloc failed");
+		return(NULL);
 	}
 	SHIM_LOCK();
 	for (i = 0U; i < ESP_SHIM_NUM_DTQ; i++) {
 		if (shim_que[i].dtqid == 0) {
-			shim_que[i].dtqid = shim_dtq_id[i];
-			shim_que[i].item_size = item_size;
 			q = &shim_que[i];
+			q->dtqid = shim_dtq_id[i];
+			q->item_size = item_size;
+			q->pool = pool;
+			q->free_stk = stk;
+			q->depth = depth;
+			for (k = 0U; k < depth; k++) {
+				stk[k] = (uint16_t)k;
+			}
+			q->free_top = depth;
 			break;
 		}
 	}
 	SHIM_UNLOCK();
 
 	if (q == NULL) {
+		esp_shim_free(pool);
+		esp_shim_free(stk);
 		syslog(LOG_ERROR, "esp_shim: queue pool exhausted");
 	}
 	return((void *)q);
@@ -477,10 +523,33 @@ esp_shim_queue_delete(void *que)
 
 	if (q != NULL) {
 		while (prcv_dtq(q->dtqid, &data) == E_OK) {
-			esp_shim_free((void *)data);
+			;	/* スロットはプール管理のため個別freeしない */
 		}
+		esp_shim_free(q->pool);
+		esp_shim_free(q->free_stk);
+		q->pool = NULL;
+		q->free_stk = NULL;
 		q->dtqid = 0;
 	}
+}
+
+/*  空きスロットを1つ取得（無ければ0xFFFFFFFF）。SHIM_LOCK下で呼ぶこと。 */
+static uint32_t
+shim_que_slot_alloc(SHIM_QUE *q)
+{
+	if (q->free_top == 0U) {
+		return(0xFFFFFFFFU);
+	}
+	q->free_top--;
+	return((uint32_t)q->free_stk[q->free_top]);
+}
+
+/*  スロットを返却。SHIM_LOCK下で呼ぶこと。 */
+static void
+shim_que_slot_free(SHIM_QUE *q, uint32_t slot)
+{
+	q->free_stk[q->free_top] = (uint16_t)slot;
+	q->free_top++;
 }
 
 int32_t
@@ -488,20 +557,24 @@ esp_shim_queue_send(void *que, void *item, uint32_t block_time_tick,
 					bool_t to_front)
 {
 	SHIM_QUE	*q = (SHIM_QUE *)que;
-	void		*buf;
+	uint32_t	slot;
 
 	if (q == NULL) {
 		return(0);
 	}
-	buf = esp_shim_malloc(q->item_size);
-	if (buf == NULL) {
-		return(0);
+	SHIM_LOCK();
+	slot = shim_que_slot_alloc(q);
+	SHIM_UNLOCK();
+	if (slot == 0xFFFFFFFFU) {
+		return(0);	/* 満杯 */
 	}
-	memcpy(buf, item, q->item_size);
+	memcpy(q->pool + (size_t)slot * q->item_size, item, q->item_size);
 	(void) to_front;	/* 先頭送信は非対応（通常送信で代用） */
-	if (tsnd_dtq(q->dtqid, (intptr_t)buf,
+	if (tsnd_dtq(q->dtqid, (intptr_t)slot,
 				 esp_shim_tick_to_tmo(block_time_tick)) != E_OK) {
-		esp_shim_free(buf);
+		SHIM_LOCK();
+		shim_que_slot_free(q, slot);
+		SHIM_UNLOCK();
 		return(0);
 	}
 	return(1);
@@ -511,18 +584,22 @@ int32_t
 esp_shim_queue_send_from_isr(void *que, void *item)
 {
 	SHIM_QUE	*q = (SHIM_QUE *)que;
-	void		*buf;
+	uint32_t	slot;
 
 	if (q == NULL) {
 		return(0);
 	}
-	buf = esp_shim_malloc(q->item_size);
-	if (buf == NULL) {
+	SHIM_LOCK();
+	slot = shim_que_slot_alloc(q);
+	SHIM_UNLOCK();
+	if (slot == 0xFFFFFFFFU) {
 		return(0);
 	}
-	memcpy(buf, item, q->item_size);
-	if (psnd_dtq(q->dtqid, (intptr_t)buf) != E_OK) {
-		esp_shim_free(buf);
+	memcpy(q->pool + (size_t)slot * q->item_size, item, q->item_size);
+	if (psnd_dtq(q->dtqid, (intptr_t)slot) != E_OK) {
+		SHIM_LOCK();
+		shim_que_slot_free(q, slot);
+		SHIM_UNLOCK();
 		return(0);
 	}
 	return(1);
@@ -541,8 +618,10 @@ esp_shim_queue_recv(void *que, void *item, uint32_t block_time_tick)
 				 esp_shim_tick_to_tmo(block_time_tick)) != E_OK) {
 		return(0);
 	}
-	memcpy(item, (void *)data, q->item_size);
-	esp_shim_free((void *)data);
+	memcpy(item, q->pool + (size_t)(uint32_t)data * q->item_size, q->item_size);
+	SHIM_LOCK();
+	shim_que_slot_free(q, (uint32_t)data);
+	SHIM_UNLOCK();
 	return(1);
 }
 
