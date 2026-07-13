@@ -223,6 +223,7 @@
 #define ESP32C5_TIMG_WDTCONFIG0(base)   ((base) + 0x48)
 #define ESP32C5_TIMG_WDTWPROTECT(base)  ((base) + 0x64)
 #define ESP32C5_TIMG_WDT_WKEY           0x50D83AA1U  /* hal timer_group_reg.h defaultで確認済み */
+#define ESP32C5_TIMG_WDTFEED(base)      ((base) + 0x60)  /* 【実施33追加】hal TIMG_WDTFEED_REG */
 
 #define ESP32C5_RTC_CNTL_WDTCONFIG0     ESP32C5_LP_WDT_CONFIG0
 #define ESP32C5_RTC_CNTL_WDTWPROTECT    ESP32C5_LP_WDT_WPROTECT
@@ -233,11 +234,22 @@
 #define ESP32C5_RTC_CNTL_SWD_AUTO_FEED_EN  (1U << 18)
 
 #define ESP32C5_LP_WDT_CONFIG0          (ESP32C5_LP_WDT_BASE + 0x00)
+#define ESP32C5_LP_WDT_FEED             (ESP32C5_LP_WDT_BASE + 0x14)  /* 【実施33追加】hal LP_WDT_FEED_REG（RWDTフィード） */
 #define ESP32C5_LP_WDT_WPROTECT         (ESP32C5_LP_WDT_BASE + 0x18)
-#define ESP32C5_LP_WDT_WDT_WKEY         0x50D83AA1U  /* 【未確認・暫定値】C3/C6実績の転用．実機要確認 */
+#define ESP32C5_LP_WDT_WDT_WKEY         0x50D83AA1U  /* 【実施33確認】hal lp_wdt_reg.h LP_WDT_WDT_WKEYの
+                                                       * ドキュメントコメントと一致（TIMG/RWDT/SWD共通キー） */
 #define ESP32C5_LP_WDT_SWD_CONFIG       (ESP32C5_LP_WDT_BASE + 0x1c)
 #define ESP32C5_LP_WDT_SWD_WPROTECT     (ESP32C5_LP_WDT_BASE + 0x20)
-#define ESP32C5_LP_WDT_SWD_WKEY         0x8F1D312AU  /* 【未確認・暫定値】同上 */
+/*
+ *  【実施33で確定・修正】旧値0x8F1D312Aは誤り（C6のesp32c6.hに一度
+ *  あった前例と同型の誤記）。hal `lp_wdt_reg.h`のLP_WDT_SWD_WKEY
+ *  フィールドコメント（"0x50D83AA1: unlock the RWDT configuration
+ *  registers."——SWD_WPROTECT_REGの説明文自体がRWDTのコメントを
+ *  コピペしたものだが，キー値0x50D83AA1はTIMG/RWDTと共通）により，
+ *  正しい解錠キーはTIMG/RWDTと同じ0x50D83AA1と確定した。
+ */
+#define ESP32C5_LP_WDT_SWD_WKEY         0x50D83AA1U  /* 【実施33修正】旧0x8F1D312Aは誤記（hal lp_wdt_reg.hで確認） */
 #define ESP32C5_LP_WDT_SWD_AUTO_FEED_EN (1U << 18)
+#define ESP32C5_LP_WDT_SWD_FEED_BIT     (1U << 31)  /* 【実施33追加】hal LP_WDT_SWD_FEED（SWDフィード，WT） */
 
 #endif /* TOPPERS_ESP32C5_H */

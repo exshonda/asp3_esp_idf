@@ -373,6 +373,57 @@ esp32c5_r32_cpu_clock_switch(void)
 }
 
 /*
+ *  【実施33で分離・export】全ウォッチドッグ（MWDT0/1・RTC WDT・
+ *  スーパーWDT）を無効化する．
+ *
+ *  背景：docs/c5-bringup.md 実施33。hardware_init_hook()で起動最初期に
+ *  disableしているにも関わらず，esp_wifi_scan_start()到達前後で
+ *  約数秒周期のSUPER_WDT_RESET（rst:0x12）が発生し続ける現象を発見した。
+ *  JTAGでLP_WDT_SWD_CONFIG_REG(0x600B1C1C)のDISABLEビット(bit30)を
+ *  ハング中に繰り返し読むと終始1（無効化済みに見える）のに実機は
+ *  リセットし続けるという矛盾から出発し，**真因はSWD_WPROTECT解錠キー
+ *  の誤り**（`ESP32C5_LP_WDT_SWD_WKEY`が旧値0x8F1D312A——hal
+ *  `lp_wdt_reg.h`のLP_WDT_SWD_WKEYフィールドの正しい値は0x50D83AA1，
+ *  TIMG/RWDTと共通）と確定した。誤ったキーでは`SWD_WPROTECT`の解錠に
+ *  失敗し，続く`SWD_CONFIG`へのDISABLEビット書込みが書込み保護で
+ *  無視される（＝実行時は一度も真に無効化されていなかった）。DISABLE
+ *  ビットがJTAG読出しで1に見えたのは，JTAG haltがWDTのカウント自体を
+ *  一時停止させる副作用（r21ハーネスのSWD無効化burstと同型）により，
+ *  無効化されていない実行時の挙動と、halt中の読出し値が一致しない
+ *  ためだった（advisor指摘どおり）。esp32c5.hのキー定数修正により
+ *  hardware_init_hook()の一度きりのdisableで完全に解消することを確認
+ *  済み（本関数の追加のFEED書込みは，鍵が万一再び誤っていた場合の
+ *  保険として残す．無害＝WT型自己完結）。
+ */
+void
+esp32c5_reassert_wdt_disable(void)
+{
+	esp32c5_disable_mwdt(ESP32C5_TIMG0_BASE);
+	esp32c5_disable_mwdt(ESP32C5_TIMG1_BASE);
+	sil_wrw_mem((void *)ESP32C5_TIMG_WDTWPROTECT(ESP32C5_TIMG0_BASE),
+				ESP32C5_TIMG_WDT_WKEY);
+	sil_wrw_mem((void *)ESP32C5_TIMG_WDTFEED(ESP32C5_TIMG0_BASE), 1U);
+	sil_wrw_mem((void *)ESP32C5_TIMG_WDTWPROTECT(ESP32C5_TIMG0_BASE), 0U);
+	sil_wrw_mem((void *)ESP32C5_TIMG_WDTWPROTECT(ESP32C5_TIMG1_BASE),
+				ESP32C5_TIMG_WDT_WKEY);
+	sil_wrw_mem((void *)ESP32C5_TIMG_WDTFEED(ESP32C5_TIMG1_BASE), 1U);
+	sil_wrw_mem((void *)ESP32C5_TIMG_WDTWPROTECT(ESP32C5_TIMG1_BASE), 0U);
+
+	sil_wrw_mem((void *)ESP32C5_RTC_CNTL_WDTWPROTECT,
+				ESP32C5_RTC_CNTL_WDT_WKEY);
+	sil_wrw_mem((void *)ESP32C5_RTC_CNTL_WDTCONFIG0, 0U);
+	sil_wrw_mem((void *)ESP32C5_LP_WDT_FEED, 1U);
+	sil_wrw_mem((void *)ESP32C5_RTC_CNTL_WDTWPROTECT, 0U);
+
+	sil_wrw_mem((void *)ESP32C5_RTC_CNTL_SWD_WPROTECT,
+				ESP32C5_RTC_CNTL_SWD_WKEY);
+	sil_orw((void *)ESP32C5_RTC_CNTL_SWD_CONF,
+			ESP32C5_RTC_CNTL_SWD_AUTO_FEED_EN | (1U << 30));
+	sil_orw((void *)ESP32C5_LP_WDT_SWD_CONFIG, ESP32C5_LP_WDT_SWD_FEED_BIT);
+	sil_wrw_mem((void *)ESP32C5_RTC_CNTL_SWD_WPROTECT, 0U);
+}
+
+/*
  *  起動時のハードウェア初期化処理
  */
 void
@@ -389,19 +440,7 @@ hardware_init_hook(void)
 	 *  実際に誤記があった前例あり）。実機で解錠成功（WDTリセットが
 	 *  発生しないこと）を必ず確認すること。
 	 */
-	esp32c5_disable_mwdt(ESP32C5_TIMG0_BASE);
-	esp32c5_disable_mwdt(ESP32C5_TIMG1_BASE);
-
-	sil_wrw_mem((void *)ESP32C5_RTC_CNTL_WDTWPROTECT,
-				ESP32C5_RTC_CNTL_WDT_WKEY);
-	sil_wrw_mem((void *)ESP32C5_RTC_CNTL_WDTCONFIG0, 0U);
-	sil_wrw_mem((void *)ESP32C5_RTC_CNTL_WDTWPROTECT, 0U);
-
-	sil_wrw_mem((void *)ESP32C5_RTC_CNTL_SWD_WPROTECT,
-				ESP32C5_RTC_CNTL_SWD_WKEY);
-	sil_orw((void *)ESP32C5_RTC_CNTL_SWD_CONF,
-			ESP32C5_RTC_CNTL_SWD_AUTO_FEED_EN | (1U << 30));
-	sil_wrw_mem((void *)ESP32C5_RTC_CNTL_SWD_WPROTECT, 0U);
+	esp32c5_reassert_wdt_disable();
 
 	/*
 	 *  CPUクロックの切替え

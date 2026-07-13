@@ -6214,3 +6214,319 @@ ticks_per_us=48固定・SIL_DLY=84）は**revert**し，6節の本採用構成
    再測定し，いつ・どの変更で48MHzへ後退した（または実施03の測定自体
    が誤りだった）かを特定できる——ただし優先度は7節の壁より低いと
    判断する。
+
+---
+
+## 実施33：precheckで(i)CLIC mil固着の再燃を確定的に反証（mintstatus=0終始・hrtcnt実時間進行・PC分布はidle支配）——約8秒周期のSUPER_WDT_RESET（rst:0x12）というhang構造そのものを発見・**真因＝LP_WDT_SWD_WPROTECTの解錠キー誤り**（`0x8F1D312A`は誤記，hal `lp_wdt_reg.h`確認済み正値`0x50D83AA1`。実機確認待ちのまま25ラウンド放置されていた既知の罠が実際に発火していた）と特定・修正——**scanハングは解消**（冷間Direct Bootで`esp_wifi_scan_start -> 0`到達・約11秒の実スキャン完走を2/2再現，WDTリセット0件）。ただし**新しい壁＝0 APs found**（近隣に強信号AP多数を確認済みの環境で0件——deaf-RX類縁の新規課題，未着手）。test_porting 6/6維持
+
+### 背景・目的
+
+実施32の申し送り：(B)scan/RXの壁＝`set_promiscuous(true)`成功後・
+`esp_wifi_scan_start`の戻り印字前で無条件WDTリブートに至るハング。
+疑い筋は(i)CLIC mil固着の再燃／(ii)(iii)クロック起因のタイマ・
+ペリフェラル不整合／(iv)純粋な別バグ，の4択。本ラウンドはprecheckで
+大分類した上で，可能なら修正し，冷間Direct Bootでのscan成功（AP検出）
+を狙う。
+
+### 1. 準備：診断リング計装の記録位置修正（精査レポート§5-#8の反映）
+
+`docs/c5-clic-exit-fix-review.md`§5-#8の指摘（`ESP32C5_CLIC_DEBUG_RING`の
+begin側記録がsynthetic mretの**後**にあるため，記録されるmepc/mintstatus
+が常に降格後の値になり，実施28型の凍結特定に使えない）を先に修正した。
+`chip_support.S`の`irc_begin_int`で，begin側リング記録ブロックを
+synthetic mret（`la t1, irc_begin_int_demote`以降）の**前**（mintthresh
+昇格直後の`fence`の後）へ移動。加えて精査レポート§5-#6/#4/#10で指摘
+された3つの保守制約（窓内フォールト命令追加禁止・mcause無保存との
+隠れ結合・mnxti非互換）をコメントとして明文化した。**non-ring（既定）
+ビルドへの影響はゼロ**であることをobjdump比較で確認済み（後述2節）
+——`#ifdef ESP32C5_CLIC_DEBUG_RING`外のコードは1バイトも変更していない。
+
+### 2. precheck：(i)CLIC mil固着の再燃を確定的に反証
+
+`build/c5_r33_ring`（`ASP3_EXTRA_COMPILE_DEFS=ESP32C5_CLIC_DEBUG_RING`）
+と`build/c5_r33_std`（無計装，1節のchip_support.S修正のみ）の2種類を
+ビルドし，`build/c5_idf61_uart`（実施32の実際のflashバイナリ，未変更）
+とobjdump比較したところ，`_kernel_irc_begin_int`/`_kernel_irc_end_int`の
+機械語列は**完全に同一**（1節の変更は診断コード内に閉じている）ことを
+確認した。
+
+冷間Direct Boot後，`set_promiscuous(true)`成功直後からハング中に
+`r33_pcsample2.py`（JTAG：halt→`reg pc/ra/mcause/csr_mintstatus`＋
+`_kernel_current_hrtcnt`読出し→resume→0.4s→繰返し）で複数点サンプルを
+採取した（`r33_pc_try3_a1〜a3.log`，独立3試行×各8サンプル）：
+
+- **`csr_mintstatus`は全サンプルで`0x00000000`**（mil=0）——固着なし。
+- **`_kernel_current_hrtcnt`は壁時計とほぼ1:1で進行**（サンプル間隔
+  ~0.6sに対しhrtcnt増分もほぼ同量）——凍結していない。
+- PCの分布：大半は`dispatcher_2`（idleループ）,一部
+  `core_int_entry_2+4`（ra=`dly_tsk+0x82`＝dly_tsk実行中に割込み受付）,
+  一度だけ`phy_pwdet_tone_start`内の busy-wait ループ（後述4節）。
+
+**判定：(i)CLIC mil固着の再燃は反証**。全割込みが正常に配送され続けて
+おり，カーネル時刻も実時間で進行している——「凍結」ではなく，別の
+機構によるハングである。
+
+### 3. hangの真の構造：ソフトハングではなく約8秒（96MHz化後は約3.5〜4秒）
+周期のハードウェアWDTリセットループだった
+
+`r33_precheck_uart.log`（ringビルド，冷間ブート25秒キャプチャ）で，
+`set_promiscuous(true) -> 0`直後から`no time event is processed in
+hrt interrupt.`（asp3_core `kernel/time_event.c:625`のLOG_NOTICE．
+HRT割込みハンドラが呼ばれたが処理すべきタイムイベントが無かった場合に
+出る，**正常系のメッセージ**——`asp3_core/docs/dev/esp32c6-target.md`
+でC6実機検証時に「SYSTIMER割込みが正しく・継続的に配送されている
+証拠」と明記されている）が多数出力され続け，その後`rst:0x12
+(RTC_SWDT_SYS)`（ROMのreset_reason=18=`SUPER_WDT_RESET`．hal
+`esp32c5/rom/rtc.h`で確認）でリブートし，同じ症状で再ブートし続ける
+（周期ループ）ことを確認した。
+
+★このメッセージは実施32のログ（`r32_wifi_trial1/2.log`）には一切
+現れていなかった（grep 0件）。しかし2節のobjdump比較で機械語が
+同一と確認済みであり，かつ`build/c5_idf61_uart`（実施32のバイナリ
+そのもの，一切未変更）を**そのまま再flash**して再確認したところ
+（`r33_orig32_recheck.log`），同じ`rst:0x12`周期ループが再現した
+（メッセージの有無だけが異なる）。これは`memory/feedback_hardware_
+investigation_rigor.md`が警告する「ASP3のsyslogにはburst-loss既知
+バグがある」ことと整合する——**実際の症状（周期的WDTリセット）は
+実施32時点から一貫して同一だったと判断**し，メッセージ出現の有無を
+別の症状として扱わない（advisor指摘に従い，見かけの差分を追わず
+実体の症状に絞った）。
+
+PC分布が主にidle（2節）であることと合わせ，**「ソフトウェアの無限
+ハング」ではなく，何らかのウォッチドッグが周期的に発火してリセット
+している**という構造が本ラウンドの一次発見である。
+
+### 4. 途中で発見した副次事項（因果棄却）：`phy_pwdet_tone_start`の
+busy-waitは無限ループではなかった
+
+2節の1回のサンプルでPCが`phy_pwdet_tone_start`（APB_SARADCおよび
+MODEM0レジスタを触るblob関数．PCR bit18セット→MODEM0+0x808の
+リセットパルス→2μs待ち→MODEM0+0x80cのbit[16:14]が0x7になるまで
+busy-wait，**タイムアウト無し**）内の busy-wait ループ命令アドレス
+（`phy_pwdet_tone_start+0x54`）で一致した。「タイムアウト無し
+busy-wait」は過去25ラウンドの`phy_iq_est_enable_new`等と同型の危険
+パターンに見えたため追跡したが，`r33_reg808c.py`で同一タイミング帯
+（RTSリセット後+4〜+10秒）を再サンプルしたところ，**MODEM0+0x80cの
+bits[16:14]は既に0x7に到達しPCはidleへ復帰していた**（10サンプル
+全て）——この関数のbusy-waitは正常に完了していると判明し，本ラウンド
+の主要因ではないと**因果棄却**した（scan中のper-channel PHYキャリブ
+レーションの一部と推定，正常動作）。
+
+### 5. advisorとの合流：「無限ハング」ではなく「WDTが正常に動いている
+scanを殺している」可能性への転換
+
+2〜4節の材料（mil=0，hrtcnt進行，PC=idle支配，WDTリセットが周期的）を
+advisorに提示したところ，「システムは生きて待っている状態であり，
+scanが実際には進行しているが8秒のSuper-WDTより長くかかりリブートに
+巻き込まれている可能性が高い」という再解釈が示された。決定実験として
+提案されたのは「scan_start直前で到達可能な全WDT（TIMG0/1・RWDT・
+SWD）を無効化し直し，60秒自由走行させて進行/完了を見る」。
+
+### 6. 決定実験1回目：disable再アサート（診断）——効果なし
+
+`target_kernel_impl.c`に`esp32c5_reassert_wdt_disable()`を新設し
+（既存の無効化列を関数化），`apps/wifi_scan/wifi_scan.c`の
+`set_promiscuous(true)`直後・`esp_wifi_scan_start()`直前・毎秒の
+待ちループ内の計3箇所から呼び出す診断ビルドを作成した。60秒キャプチャ
+（`r33_wdtfix_boot1.log`）でも**周期的な`rst:0x12`は変わらず継続**
+（16回/60秒）——disable再アサートだけでは症状不変だった。
+
+### 7. 決定実験2回目：disable＋FEED（能動フィード）——それでも効果なし
+
+「disableビットの書込みが実際には効いていない可能性」（JTAG読出しでは
+DISABLE=1に見えても，実行時挙動と食い違う——5節のadvisor指摘）を
+踏まえ，TIMG0/1・RWDT・SWDそれぞれの明示的FEED（WT型カウンタリセット
+ビット）も追加で叩く版を実装・実機投入したが，**やはり`rst:0x12`は
+変わらず継続**（`r33_wdtfeed_boot1.log`，16回/60秒，6節と同一パターン）。
+この時点で「頻度・タイミングの問題ではなく，そもそも無効化/フィード
+自体が届いていない」という仮説へ転換した。
+
+### 8. 根本原因の特定：`ESP32C5_LP_WDT_SWD_WKEY`の解錠キー誤記
+
+hal `hal/components/soc/esp32c5/register/soc/lp_wdt_reg.h`の
+`LP_WDT_SWD_WPROTECT_REG`フィールドコメントを直接確認したところ：
+
+```
+/** LP_WDT_SWD_WKEY : R/W; bitpos: [31:0]; default: 0;
+ *  Configure this field to lock or unlock SWD`s configuration registers.
+ *  0x50D83AA1: unlock the RWDT configuration registers.
+ *  ...
+ */
+```
+
+（コメント文自体はRWDT用の説明文がコピペされたもの——Espressif純正
+ヘッダ側の軽微な記述バグ——だが，**キー値`0x50D83AA1`はTIMG/RWDTと
+共通**であることが読み取れる）。一方，`asp3/arch/riscv_gcc/esp32c5/
+esp32c5.h`の`ESP32C5_LP_WDT_SWD_WKEY`は**`0x8F1D312A`**という別の値
+を使っていた——コード内コメントが最初から「【未確認・暫定値】C3/C6
+実績の転用であり，ヘッダに正しく記載されていない可能性がある（C6の
+esp32c6.hに実際に誤記があった前例あり）。実機で解錠成功を必ず確認
+すること」と警告していた，まさにその罠が現実に発火していたと確定
+した。
+
+誤ったキーでは`LP_WDT_SWD_WPROTECT_REG`の解錠に失敗し，後続の
+`LP_WDT_SWD_CONFIG_REG`へのDISABLEビット書込みが書込み保護によって
+**無視される**（実行時は一度もSWDが真に無効化されていなかった）。
+2節でJTAG読出しにDISABLE=1が見えていた点は，「JTAG haltがWDTの
+カウント進行を一時停止させる副作用（r21ハーネスの『SWD無効化burst』
+と同型）により，無効化されていない実行時の実際の挙動とhalt中の読出し
+値が一致しなかった」という説明を試みたが，**この点はadvisor査読で
+未解決と指摘された**——書込み保護でブロックされたなら，CONFIGビット
+自体はPOR既定値0のまま読めるはずで，「カウンタが止まる」ことと
+「設定ビットの読出し値」は別の話である。この細部の機構は**未確定
+のまま**とし，本節で確定しているのは「SWDの解錠キーを正しい値へ
+訂正した」という**変更点**と，9節のA/B実験（キー訂正**のみ**を単一
+変数として切替え，disable/feed呼出し箇所は同一のまま症状が消えた
+ことを確認）による**因果の実証**であり，「保護がどう見え方に影響
+したか」という正確な内部機構の解明は今回の修正の正しさには影響しない
+（advisor指摘のとおり，追加調査の優先度は低い）。
+
+### 9. 修正と決定実験：単一変数A/B（キー訂正のみ）で因果確認，さらに
+最小修正版（reassert呼出し全廃）でも解消を確認（2/2再現）
+
+**単一変数A/B**：7節の構成（誤キーのまま，`wifi_scan.c`側3箇所＋
+`hardware_init_hook()`のdisable+feed拡張）から，**`ESP32C5_LP_WDT_
+SWD_WKEY`の値だけ**を`0x8F1D312A`→`0x50D83AA1`へ変更し，他は一切
+変更せずに再ビルド・実機投入した（`r33_flash_keyfix.log`）。結果
+（`r33_keyfix_boot1.log`/`r33_keyfix_boot2.log`，独立2回）：**`rst:
+0x12`が0回**（POR以外のリセットなし）・`esp_wifi_scan_start -> 0`
+到達・約11秒のscan完走。7節（誤キー，`rst:0x12`が16回/60秒）との
+唯一の差分がキー値であることから，**キー訂正が原因であることを
+単一変数の実験で確認した**。
+
+続いて，`apps/wifi_scan/wifi_scan.c`側の診断的reassert呼出し3箇所
+（6〜7節で追加したもの）が最小修正でも不要か検証するため，これらを
+**revert**し，`hardware_init_hook()`一箇所（起動最初期の1回きりの
+無効化）だけを正しいキーで実行する最小構成でビルド・実機投入した。
+
+**結果（`r33_minimal_boot1.log`/`r33_minimal_boot2.log`，独立2回の
+RTSリセット試行，各45秒キャプチャ）**：
+
+```
+wifi_scan: DIAG set_promiscuous(true) -> 0
+（no time event spamなし，またはあっても正常範囲）
+wifi_scan: esp_wifi_scan_start -> 0
+wifi_scan: 0 APs found (err=0)
+```
+
+**`rst:0x12`は0回**（POR以外のリセットなし，2/2）。`esp_wifi_scan_
+start()`の戻り値印字に**本調査で初めて到達**し，約11秒の実スキャン
+（チャンネル走査の実時間相当）を完走した。**scanハングは解消した**
+——起動時1回のWDT無効化（正しいキー）だけで十分であり，6〜7節の
+scan経路への追加呼出しは不要と判明した（最小修正の原則どおり，
+target_kernel_impl.cには関数として残置——保険的なFEED拡張は無害な
+まま，将来キーが再び誤っていた場合の保険として残す）。
+
+### 10. 新しい壁：0 APs found（deaf-RX類縁，未着手）
+
+scanは完走したが，**検出AP数は0件**（2/2とも）。host機（同一室内）の
+`nmcli device wifi list`で確認したところ，信号強度84・62・59等の強い
+近隣APが多数存在しており（同室内・至近距離），**環境要因（周辺に
+APが無い）ではない**——真のRX/検出失敗と判定できる。promiscuous
+モードでの3秒間観測でも`promisc_rx_count=0`（1パケットも受信して
+いない）。scanの所要時間（約11秒）は瞬時ではなく，チャンネル走査
+自体は実時間で進行していたと見られる（OSIRATE計装のsemTake/qRecv/
+qSend/qSendISR/timerArmは全て0のままだったが，これらは特定の5箇所の
+OSI呼出しのみを数える計装であり，scanが使う別経路を捕捉していない
+可能性がある——未確認）。**C6のdeaf-RX（85ラウンドの調査）と表面的に
+類似する新規課題**だが，本ラウンドでは未着手（時間配分の都合，
+手順3の「区切りを固めて申し送る」に従う）。C6線への安易な統合は
+時期尚早（rigor docの教訓どおり）。
+
+★advisor査読で指摘された**有力な代替仮説（次段の最優先候補）**：
+「0 APs」はC6型の未知deaf-RXではなく，実施32から持ち越しの**BBPLL
+未較正周波数（実測96MHz，理論80MHz）の続き**である可能性が高い。
+根拠——(a)実施29：クロックが正しく確立された時点（stockの
+`app_main`先頭でのハンドオフ）でジャンプすると，ASP3自身のscanが
+20〜25AP検出まで完走した実績がある。(b)実施30：scan/RXの鍵（B）は
+`esp_clk_init()`（CPU周波数切替え）と特定されていた。(c)実施32：
+ASP3 Direct BootのCPU周波数切替えは実装したが，BBPLL自体は
+ROMの未較正値（理論480MHzに対し実測相当576MHz程度と推定）のまま
+流用しており，理論80MHzに対し実測96MHzという不一致が残ったまま
+だった。——**「較正キー(A)＝クロック切替えの欠落」は解消したが
+「BBPLL実周波数の不一致」は解消していない**という実施32の申し送り
+がそのまま，0 APsという形で顕在化した可能性がある。次段では，
+実施26/27/29のクロスカーネル・ハンドオフ（stockの正しいクロック
+確立状態からASP3へジャンプ）上でscanのAP検出を確認することを
+**クロック仮説の判別実験として最優先**で行うべき（AP検出できれば
+BBPLL不一致が0 APsの主因と確定，できなければ別要因を探る）。
+
+### 11. test_porting回帰：`# 6/6 passed`（独立2ブート）
+
+`build/c5_r33_tp`（WiFi無効，usbjtag→uart0コンソール，9節の最小修正
+構成を含む現HEAD）で，独立2回のRTSリセット試行それぞれ12秒キャプチャ
+にて`# 6/6 passed`（`r33_tp_boot1.log`/`r33_tp_boot2.log`）——退行なし。
+
+### 12. C5#1最終状態（終了処理）
+
+`build/c5_r33_std`（wifi_scanアプリ，9節の最小修正構成，フル4MB@0x0）
+を最終flashとして書き戻した（`r33_flash_final.log`）。RTSリセット後
+45秒キャプチャで最終確認（`r33_final_state_console.log`）：POR以外の
+`rst:`は0回，`set_promiscuous(true) -> 0`→`esp_wifi_scan_start -> 0`
+→`0 APs found (err=0)`——9〜10節と同型（scan完走・0 AP検出・退行
+なし）。
+
+C5#2・C6 board C・UARTブリッジ`125a266b...`：完全未接触（前ラウンド
+から変更なし）。DUTは常に`b04e3bcf...`（ttyUSB0，MAC照合済み）／JTAG
+は`D0:CF:13:F0:A7:44`（ttyACM1，MAC照合済み）を使用。
+
+### 変更ファイル
+
+- `asp3/arch/riscv_gcc/esp32c5/esp32c5.h`：`ESP32C5_LP_WDT_SWD_WKEY`
+  `0x8F1D312A`→**`0x50D83AA1`**（実施33で根本原因と確定・修正）。
+  `ESP32C5_TIMG_WDTFEED`/`ESP32C5_LP_WDT_FEED`/
+  `ESP32C5_LP_WDT_SWD_FEED_BIT`マクロを新設（保険用FEED拡張のため）。
+  `ESP32C5_LP_WDT_WDT_WKEY`のコメントを「実機確認待ち」から「実施33
+  確認済み」へ更新。
+- `asp3/target/esp32c5_espidf/target_kernel_impl.c`：
+  `hardware_init_hook()`内のWDT無効化列を`esp32c5_reassert_wdt_
+  disable()`として関数化・export（起動時に1回呼ぶのみ．正しいキーで
+  disableのみで十分と確認済み）。各WDTの明示的FEEDも追加済み（保険，
+  無害）。
+- `asp3/arch/riscv_gcc/esp32c5/chip_support.S`：`ESP32C5_CLIC_DEBUG_
+  RING`のbegin側リング記録をsynthetic mretの前へ移動（`docs/c5-clic-
+  exit-fix-review.md`§5-#8の反映）＋保守制約3点（§5-#6/#4/#10）を
+  コメントとして明文化。non-ringビルドへの影響ゼロ（objdump確認済み）。
+- `apps/wifi_scan/wifi_scan.c`：診断的に追加した`esp32c5_reassert_
+  wdt_disable()`呼出し3箇所は，9節の検証後**revert**（最小修正の
+  ため不要と判明）——最終的な差分なし。
+- `docs/c5-bringup.md`：本節（実施33）追加。
+- スクラッチ（リポジトリ外）：`r33_pcsample2.py`／`r33_reg808c.py`／
+  `r33_swdcheck.py`（新規，JTAG診断）。`r33_pc_try*.log`（2節）・
+  `r33_precheck_uart.log`／`r33_orig32_recheck.log`（3節）・
+  `r33_reg808c_try1.log`（4節）・`r33_wdtfix_boot1.log`（6節）・
+  `r33_wdtfeed_boot1.log`（7節）・`r33_keyfix_boot1/2.log`（9節の
+  reassert残置版）・`r33_minimal_boot1/2.log`（9節の最終最小構成）・
+  `r33_tp_boot1/2.log`（11節）・`r33_final_state_console.log`（12節）。
+  ビルド：`build/c5_r33_ring`（診断用リング計装）・`build/c5_r33_std`
+  （最終wifi_scan構成）・`build/c5_r33_tp`（test_porting回帰）。
+- git commitは行っていない（指示どおり）。
+
+### 次段への申し送り
+
+1. **最優先＝10節の新しい壁「0 APs found」の診断——BBPLL/クロック
+   仮説（実施32からの持ち越し）を筆頭候補として判別実験から着手
+   すること**（advisor査読で指摘・10節に根拠を記載）。「deaf-RXの
+   入口」に見えるが，C6型の未知の新規原因と決めつけず，まず実施
+   26/27/29のクロスカーネル・ハンドオフ（stockが確立した正しい
+   クロック状態からASP3へジャンプ）上でscanのAP検出を確認する
+   ことを**最初の一手**とする——実施29はこの経路で20〜25AP検出を
+   達成した実績があり，「クロックが正しければ検出できる」という
+   一次仮説の判別が安価に行える。AP検出できればBBPLL実周波数の
+   解明（旧項目2，`rtc_clk_bbpll_configure()`相当のregi2c設定実装）
+   がそのまま0 APs解消の本命ルートとなり優先度が上がる。検出でき
+   なければ別要因（真のRX/MAC経路の問題）を疑う——C6の85ラウンド
+   調査の知見（`memory/project_c6_agc_investigation.md`）はその際の
+   参照先だが，C6線への性急な統合は避けること（rigor doc）。
+3. **`ESP32C5_LP_WDT_WDT_WKEY`（RWDT用，TIMG用）は今回`0x50D83AA1`で
+   正しく動作することを実質的に確認した**（本ラウンドのdisable単独
+   では効果がなかったが，これはSWDキーの問題であり，RWDT/TIMGの
+   キー自体は当初から正しかったと判断できる——disableの効果が出な
+   かったのはSWDの解錠失敗が支配的だったため）。
+4. 本ラウンドで確定した教訓：**JTAG haltでのレジスタ読出しは，読出し
+   対象がカウントダウン系（WDT等）の場合，halt自体がカウントを止める
+   副作用を持つため「効いているように見える」が実際には効いていない
+   ケースを覆い隠しうる**——今後同種の「レジスタは正しい値なのに実機
+   挙動が伴わない」場面では，firmwareでの動作確認（本ラウンドの
+   `esp32c5_reassert_wdt_disable`のような直接介入）を優先すべき。
+   `memory/feedback_hardware_investigation_rigor.md`への追加候補。

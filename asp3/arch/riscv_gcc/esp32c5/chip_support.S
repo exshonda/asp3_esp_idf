@@ -148,6 +148,40 @@ ALABEL(irc_begin_int)
     csrw 0x347, t0
     fence                  /* mintthresh反映をMIE再許可前に保証 */
 
+#ifdef ESP32C5_CLIC_DEBUG_RING
+    /*
+     *  【診断用（既定無効）．実施28で追加，実施33でsynthetic mretの
+     *  前へ移動（docs/c5-clic-exit-fix-review.md §5-#8指摘の反映）】
+     *  割込み受付リングバッファ記録（begin側）。ASP3_EXTRA_COMPILE_DEFS=
+     *  ESP32C5_CLIC_DEBUG_RINGで有効化し，JTAGでc5dbg_ring/c5dbg_idxを
+     *  回収して解析する（回収スクリプトの例はdocs/c5-bringup.md実施28
+     *  参照）。mcause（exccode=CLIC線番号，MPIL[23:16]=受付直前のmil＝
+     *  直前の割込み出口後のmil値），mepc（割込まれた地点．synthetic
+     *  mretのmepc上書き前なので実施28時点の「常にdemoteラベル」問題は
+     *  解消済み），mintstatus（synthetic mretによる降格前＝受付直後の
+     *  昇格後の値），hrtcntを記録する。t4〜t6はcore_int_entryが保存済み
+     *  のため自由に使える（a0/a1/t0〜t3は後続のsynthetic mret・ハンドラ
+     *  アドレス取得で引き続き使うため触らない）。
+     */
+    la   t4, c5dbg_idx
+    lw   t5, 0(t4)
+    addi t6, t5, 1
+    sw   t6, 0(t4)
+    andi t5, t5, 31        /* 32エントリのリング */
+    slli t5, t5, 5         /* 1エントリ32バイト（8ワード） */
+    la   t6, c5dbg_ring
+    add  t5, t6, t5
+    csrr t6, mcause
+    sw   t6, 0(t5)
+    csrr t6, mepc
+    sw   t6, 4(t5)
+    csrr t6, 0xFB1         /* mintstatus（降格前） */
+    sw   t6, 8(t5)
+    la   t6, _kernel_current_hrtcnt
+    lw   t6, 0(t6)
+    sw   t6, 12(t5)
+#endif /* ESP32C5_CLIC_DEBUG_RING */
+
     /*
      *  mintstatus.milの即時降格（synthetic mret）【実施28で追加】
      *
@@ -186,41 +220,30 @@ ALABEL(irc_begin_int)
      *     割込みがハンドラ本体（unlock後）で受け付けられた場合も，その
      *     入口で同様に即時降格されるため整合する。
      */
+    /*
+     *  【保守上の制約，docs/c5-clic-exit-fix-review.md §5-#6/#4/#10】
+     *   - 「HW受付〜mret」の本区間（`csrr mcause`から直下の`mret`まで）は
+     *     MIE=0のため割込みではプリエンプトされないが，同期例外（フォー
+     *     ルト）はMIE=0でもトラップし，その時点のmilをmcause.MPILへ
+     *     書いてしまう＝mil固着バグの静かな再発条件になる。この区間へ
+     *     フォールトし得る命令を追加してはならない（現状はレジスタ操作
+     *     とCLIC_INT_CTRL_REGへのlbuのみ＝M-mode/PMPロック無しのDirect
+     *     Bootでは常時アクセス可，実機長時間動作で実害なしを確認済み）。
+     *   - 本ポートはmcauseをスタックに保存/復元しない（core_int_entry_5
+     *     はmepc/mstatusのみ復元）。これが正当なのは「受付時は常にmil≡0
+     *     （＝mcause.MPIL≡0）」という本synthetic mret方式の不変量に
+     *     依存しているため——この方式を外す場合はmcauseの保存/復元も
+     *     同時に追加する必要がある。
+     *   - CLICのmnxti CSR（テールチェイン最適化）はアクセス自体がmilを
+     *     再昇格する副作用を持つため，本方式とは非互換。mnxtiは本ポート
+     *     未使用（今後も導入する場合は本方式の見直しが必要）。
+     */
     la   t1, irc_begin_int_demote
     csrw mepc, t1
     li   t1, MSTATUS_MPIE
     csrc mstatus, t1       /* MPIE=0：mret後もMIE=0（CPUロック相当）を維持 */
     mret                   /* mil ← mcause.MPIL（受付前レベル）へ降格 */
 ALABEL(irc_begin_int_demote)
-
-#ifdef ESP32C5_CLIC_DEBUG_RING
-    /*
-     *  【診断用（既定無効）．実施28で追加】割込み受付リングバッファ記録
-     *  （begin側）．ASP3_EXTRA_COMPILE_DEFS=ESP32C5_CLIC_DEBUG_RINGで
-     *  有効化し，JTAGでc5dbg_ring/c5dbg_idxを回収して解析する
-     *  （回収スクリプトの例はdocs/c5-bringup.md実施28参照）．
-     *  mcause（exccode=CLIC線番号，MPIL[23:16]=受付直前のmil＝直前の
-     *  割込み出口後のmil値），mepc，mintstatus，hrtcntを記録する。
-     *  t4〜t6はcore_int_entryが保存済みのため自由に使える。
-     */
-    la   t4, c5dbg_idx
-    lw   t5, 0(t4)
-    addi t6, t5, 1
-    sw   t6, 0(t4)
-    andi t5, t5, 31        /* 32エントリのリング */
-    slli t5, t5, 5         /* 1エントリ32バイト（8ワード） */
-    la   t6, c5dbg_ring
-    add  t5, t6, t5
-    csrr t6, mcause
-    sw   t6, 0(t5)
-    csrr t6, mepc
-    sw   t6, 4(t5)
-    csrr t6, 0xFB1         /* mintstatus */
-    sw   t6, 8(t5)
-    la   t6, _kernel_current_hrtcnt
-    lw   t6, 0(t6)
-    sw   t6, 12(t5)
-#endif /* ESP32C5_CLIC_DEBUG_RING */
 
     /*
      *  割込みハンドラアドレスの取得
