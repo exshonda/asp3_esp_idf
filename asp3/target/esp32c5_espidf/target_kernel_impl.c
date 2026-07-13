@@ -971,6 +971,93 @@ esp32c5_r34_bbpll_configure_480mhz(void)
 	sil_wrw_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0, v | (1U << 2));
 }
 
+#ifdef ESP32C5_R36_REGI2C_SEED
+/*
+ *  【実施36・診断専用・既定無効】ハンドオフ(WORKS)状態で実測した
+ *  regi2c系譜決定的差分8箇所へ，冷間ブートの較正実行前（点(b)）に
+ *  ハンドオフ側の値をシードする因果検証実験。
+ *
+ *  背景：実施36の同一ソフトウェア4-way regi2cスイープ（8block×
+ *  host0/1×reg0x00-0x1F，known-answer gate 4/4 PASS）で，冷間/
+ *  ハンドオフ間の系譜決定的差分9語を検出した（BBPLL 3・DIG_REG 3・
+ *  UNK_63 2・UNK_6b 1。ULP_CALのreg5は実施24で自己shim起因と
+ *  既確定のため除外）。scan前注入（点(a)，JTAG，t=2.5s）は2/2で
+ *  AP=0（因果棄却）。本関数は残る注入タイミング＝「較正前」の検証：
+ *  JTAGブレークポイントによる較正前捕捉は，JTAG haltそのものが
+ *  サブ秒の較正タイムラインを大きく歪めるため不可能と実測で判明
+ *  したため（実施36の記録参照），ソースレベルのシードで代替する。
+ *
+ *  値はC5#1個体・特定時点の実測値の焼付けであり，恒久コードでは
+ *  ない（実施35候補2〜4と同じ理由で既定無効・ガード付き）。
+ *
+ *  プロトコル（実施25 Step Aで実測確立）：ctrl_reg = host==1 ?
+ *  I2C1_CTRL : I2C0_CTRL（blob自身のhost直接ルーティング），
+ *  ANA_CONF1のRD_MASKはblock固有。書込み後に即読み戻し，結果を
+ *  esp32c5_r36_seed_readback[]（グローバル，JTAGでnm+mdw参照可能）
+ *  へ記録する。
+ *
+ *  呼出し位置の注意（実施36で実測学習）：本関数を`hardware_init_
+ *  hook()`から呼ぶと，readback配列（.bss）がその後のカーネル起動時
+ *  bssクリアで消えて書込み成立確認が不可能になる（1回目の試行で
+ *  実際に発生——配列全ゼロ・マーカー消失）。タスクの点(b)定義も
+ *  「較正前（hardware_init_hook後）」であるため，呼出しはアプリの
+ *  main_task（esp_wifi_init直前，apps/wifi_scan/wifi_scan.c）から
+ *  行う。
+ */
+uint32_t esp32c5_r36_seed_readback[10];
+
+void
+esp32c5_r36_regi2c_seed(void)
+{
+	/*  {block, host, reg, value(handoff実測), ana_conf1_mask}  */
+	static const struct {
+		uint8_t		block;
+		uint8_t		host;
+		uint8_t		reg;
+		uint8_t		value;
+		uint32_t	mask;
+	} seeds[] = {
+		{ 0x66U, 1U, 4U,  0x23U, 0x00FFFF7FU },	/* BBPLL reg4 */
+		{ 0x66U, 1U, 7U,  0x0DU, 0x00FFFF7FU },	/* BBPLL reg7（点(a)でRO判明，記録目的で試行） */
+		{ 0x66U, 1U, 9U,  0x03U, 0x00FFFF7FU },	/* BBPLL reg9 */
+		{ 0x6DU, 0U, 5U,  0x98U, 0x00FFFBFFU },	/* DIG_REG reg5 */
+		{ 0x6DU, 0U, 7U,  0x98U, 0x00FFFBFFU },	/* DIG_REG reg7 */
+		{ 0x6DU, 0U, 13U, 0x42U, 0x00FFFBFFU },	/* DIG_REG reg13 */
+		{ 0x63U, 1U, 3U,  0x68U, 0x00FFFFEFU },	/* UNK_63 reg3 */
+		{ 0x63U, 1U, 4U,  0xC0U, 0x00FFFFEFU },	/* UNK_63 reg4 */
+		{ 0x6BU, 1U, 2U,  0x54U, 0x00FFFFF7U },	/* UNK_6b reg2（txcap，実施16以来追跡） */
+	};
+	uint32_t	orig_conf1;
+	uint32_t	ctrl_reg;
+	uint32_t	v;
+	uint32_t	i;
+
+	orig_conf1 = sil_rew_mem((void *)ESP32C5_R34_I2C_ANA_MST_ANA_CONF1);
+	for (i = 0U; i < (sizeof(seeds) / sizeof(seeds[0])); i++) {
+		sil_wrw_mem((void *)ESP32C5_R34_I2C_ANA_MST_ANA_CONF1,
+					seeds[i].mask);
+		ctrl_reg = (seeds[i].host == 1U)
+					? ESP32C5_R34_I2C_ANA_MST_I2C1_CTRL
+					: ESP32C5_R34_I2C_ANA_MST_I2C0_CTRL;
+		esp32c5_r34_regi2c_wait_idle(ctrl_reg);
+		v = ((uint32_t)seeds[i].block)
+			| (((uint32_t)seeds[i].reg) << 8)
+			| ESP32C5_R34_REGI2C_WR_CNTL
+			| (((uint32_t)seeds[i].value) << 16);
+		sil_wrw_mem((void *)ctrl_reg, v);
+		esp32c5_r34_regi2c_wait_idle(ctrl_reg);
+		/*  読み戻し（WR_CNTL無しの素のread）  */
+		v = ((uint32_t)seeds[i].block) | (((uint32_t)seeds[i].reg) << 8);
+		sil_wrw_mem((void *)ctrl_reg, v);
+		esp32c5_r34_regi2c_wait_idle(ctrl_reg);
+		esp32c5_r36_seed_readback[i] =
+			(sil_rew_mem((void *)ctrl_reg) >> 16) & 0xFFU;
+	}
+	sil_wrw_mem((void *)ESP32C5_R34_I2C_ANA_MST_ANA_CONF1, orig_conf1);
+	esp32c5_r36_seed_readback[9] = 0xC0FFEE00U;	/* 実行済みマーカー */
+}
+#endif /* ESP32C5_R36_REGI2C_SEED */
+
 /*
  *  【実施33で分離・export】全ウォッチドッグ（MWDT0/1・RTC WDT・
  *  スーパーWDT）を無効化する．

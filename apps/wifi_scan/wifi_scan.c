@@ -217,6 +217,32 @@ main_task(EXINF exinf)
 	wifi_regi2c_cfgsnap_reset();
 	wifi_regi2c_cfgsnap_dump_addr();
 #endif /* TOPPERS_ESP32C5_WIFI_REGI2C_TRACE */
+#ifdef ESP32C5_R36_REGI2C_SEED
+	/*
+	 *  DIAGNOSTIC（一時的，実施36・点(b)因果検証）：ハンドオフ(WORKS)
+	 *  実測のregi2c系譜差分8箇所を，PHY較正（esp_wifi_init内）より前に
+	 *  シードする。書込み成立は読み戻し（esp32c5_r36_seed_readback[]）
+	 *  で確認・syslogへ出力。既定ビルドでは未定義（実験時のみ
+	 *  ASP3_EXTRA_COMPILE_DEFSで有効化）。
+	 */
+	{
+		extern void esp32c5_r36_regi2c_seed(void);
+		extern uint32_t esp32c5_r36_seed_readback[10];
+		esp32c5_r36_regi2c_seed();
+		syslog(LOG_NOTICE, "wifi_scan: R36SEED rb0-4 %02x %02x %02x %02x %02x",
+			   (int_t)esp32c5_r36_seed_readback[0],
+			   (int_t)esp32c5_r36_seed_readback[1],
+			   (int_t)esp32c5_r36_seed_readback[2],
+			   (int_t)esp32c5_r36_seed_readback[3],
+			   (int_t)esp32c5_r36_seed_readback[4]);
+		syslog(LOG_NOTICE, "wifi_scan: R36SEED rb5-8 %02x %02x %02x %02x marker=%08x",
+			   (int_t)esp32c5_r36_seed_readback[5],
+			   (int_t)esp32c5_r36_seed_readback[6],
+			   (int_t)esp32c5_r36_seed_readback[7],
+			   (int_t)esp32c5_r36_seed_readback[8],
+			   (int_t)esp32c5_r36_seed_readback[9]);
+	}
+#endif /* ESP32C5_R36_REGI2C_SEED */
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_init");
 	err = esp_wifi_init(&cfg);
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_init -> %d", (int_t)err);
