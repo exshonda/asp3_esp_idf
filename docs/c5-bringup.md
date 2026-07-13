@@ -5539,3 +5539,277 @@ ASP3の`hardware_init_hook()`へ移植しても，冷間Direct Bootは
    だったと判定済み。この判定はadvisor介入によって救われた
    （最初の思考のまま書いていたら「C5でdeaf-RX再現」という誤った
    統合仮説を記録するところだった）——今後も同種の早合点に注意。
+
+---
+
+## 実施31：較正キー(A)候補「bootloader_random_enable/disable()のSAR ADC駆動サイクル」を加算移植＋減算法の両方で検証——**refute確定**（2手法×2/2）。新規JTAG発見（PCR_SARADC_CLKM_CONF_REGのCLKM_ENが実施14-25で見落とされていた恒久差）を伴うが，因果には無関係と判明。次候補は`bootloader_clock_configure()`
+
+### 背景・目的
+
+実施30で較正キー(A)は「2nd-stageブートローダ自体」にほぼ確定した
+（`call_start_cpu0`内の候補は全て消去法で除外済み）。本ラウンドは
+Codexの候補5「ROM/eFuse由来の一回性アナログ転写」・ユーザプロンプトが
+最有力候補として挙げた「`bootloader_random_enable()`系（SAR ADCを
+エントロピー源として駆動→`bootloader_random_disable()`）」を，
+`bootloader_init()`（`~/tools/esp-idf-v6.1/components/bootloader_support/
+src/esp32c5/bootloader_esp32c5.c`）の実行順に机上で列挙した上で検証する。
+
+### 1. (A)候補の机上列挙（`bootloader_init()`実行順）
+
+| 順 | 関数 | アナログ/クロック接触 | 優先度 |
+|---|---|---|---|
+| 1 | `bootloader_hardware_init()` | `axi_icm_ll_reset_with_core_reset`／regi2cマスタクロック有効化・160MHzソース選択 | 中（後述：有効化分は既にASP3に存在） |
+| 2 | `bootloader_ana_reset_config()` | BOD reset enable(mode1)＋`bootloader_power_glitch_reset_config`（PMU_RF_PWC＋I2C_SAR_ADCのglitch検出無効化＋LP_ANAリセット許可設定） | 中〜低（reset**挙動**設定が主・aktive analog touchは無効化のみ） |
+| 3 | `bootloader_super_wdt_auto_feed()` | 非関連 | 低 |
+| 4 | `bootloader_init_mem`/`clear_bss_section` | RAM操作のみ | 対象外 |
+| 5 | `bootloader_clock_configure()` | CPU/APBクロック（PLL）切替 | **高**（実施30 申し送り#3「一つのクロック物語」） |
+| 6 | `bootloader_console_init`/`print_banner` | 非関連 | 対象外 |
+| 7 | `bootloader_init_ext_mem`（cache/mmu） | 非関連（ASP3のDirect Bootは独自にcache/mmu初期化） | 対象外 |
+| 8 | flash ID/XMC/header/validity/spi flash init | flashのみ | 対象外 |
+| 9 | `bootloader_check_reset`/`bootloader_config_wdt` | リセット要因読取り・WDT設定 | 低 |
+| 10 | `bootloader_enable_random()`=`bootloader_random_enable()` | **SAR ADC(ADC_UNIT_1/2)をreset→enable→sampling駆動．`bootloader_utility_load_boot_image()`直前の`bootloader_random_disable()`まで持続** | **最優先**（ユーザプロンプト指定．較正のトーン測定はSAR ADC読出し＝実施20） |
+
+本ラウンドは10番（最優先指定）を検証した。5番（`bootloader_clock_
+configure`）は机上分析のみに留め，次段の最有力候補として申し送る。
+
+### 2. 新規JTAG発見：PCR_SARADC_CLKM_CONF_REGのCLKM_ENが実施14-25で未検査だった恒久差
+
+`bootloader_random_enable()`（`bootloader_random_esp32c5.c`）の内容を
+精査した結果，`adc_ll_enable_func_clock(true)`（PCR_SARADC_CLKM_CONF_REG
+bit22=CLKM_EN）を立てるが，対応する`bootloader_random_disable()`は
+**`BOOTLOADER_BUILD`分岐では`regi2c_saradc_disable()`を呼ばない**設計
+（`ANALOG_CLOCK_ENABLE/DISABLE`もBOOTLOADER_BUILDではno-op——「bootloader
+では常時有効のまま」というコメントが明記）であるため，CLKM_ENは
+disable後も**恒久的に1のまま**app側へ引き継がれる，と判明した。
+
+実機JTAG実測（`r31_regcheck.py`，新規・`halt`→`mdw`→`resume`の単純手法，
+2/2再現）：
+
+- **ASP3較正ハング状態**（現flash `build/c5_idf61_uart`，本ラウンド
+  開始時点）：`PCR_SARADC_CLKM_CONF_REG(0x6009608c)=0x00004000`
+  （CLKM_EN=0，DIV_NUM=4のみ），`PMU_RF_PWC_REG(0x600b0158)=0xff800000`，
+  `PCR_SARADC_CONF_REG(0x60096088)=0x00000005`（2/2一致）。
+- **stock**（実施29 `r29_snapshot_boot1/2.dump.txt`，同一v9 blob era，
+  `app_main`先頭ハンドオフ直前＝2nd-stageブートローダ完了直後）：
+  同レジスタ=`0x00404000`（CLKM_EN=1，DIV_NUM=4，2/2一致）。
+
+**CLKM_EN(bit22)がASP3=0・stock=1で恒久的に異なる**——実施14-25/実施20
+の網羅比較（PCR_SARADC_CONF等）はこの`PCR_SARADC_CLKM_CONF_REG`を対象に
+含んでいなかった（見落とし）。ただし後述のとおり，これは**bootloader_
+random系の因果とは無関係**と判明した（3節）。
+
+### 3. 加算移植：ASP3側へbootloader_randomサイクルを移植——**FAIL**（2/2）
+
+`asp3/target/esp32c5_espidf/target_kernel_impl.c`の`hardware_init_hook()`
+（`esp_rom_set_cpu_ticks_per_us()`呼出し直後）に，
+`esp32c5_r31_bootloader_random_cycle()`を新設・呼出しを追加した
+（`#ifdef TOPPERS_ESP32C5_WIFI`でガード）。移植内容：
+
+- `bootloader_hardware_init()`のうち`regi2c_ctrl_ll_master_configure_clock()`
+  （MODEM_SYSCON.clk_conf.clk_i2c_mst_sel_160m=1）。`_regi2c_ctrl_ll_
+  master_enable_clock(true)`相当は`esp_wifi_adapter.c`の
+  `phy_enable_wrapper()`が`0x600af018=0x7`で既に等価に設定済み（実施09で
+  実機確認済み）のため対象外とした。
+- `bootloader_random_enable()`/`disable()`の**MMIO直叩き部分のみ**を，
+  レジスタ順序・自己クリア型パルスを保持して移植：`adc_ll_reset_
+  register()`（PCR_SARADC_CONF RST_EN/REG_RST_ENパルス×2），
+  `temperature_sensor_ll_reset_module()`パルス，`adc_ll_enable_bus_
+  clock`/`enable_func_clock`（PCR_SARADC_CONF/CLKM_CONF），`adc_ll_digi_
+  clk_sel(XTAL)`+`controller_clk_div(0,0,0)`，`regi2c_ctrl_ll_i2c_sar_
+  periph_enable()`（PMU_RF_PWC RSTB/XPDパルス），パターンテーブル設定
+  （`adc_ll_digi_set_pattern_table`のビット詰め計算を転写）＋
+  `digi_set_clk_div(15)`+`trigger_interval(200)`+`trigger_enable()`，
+  `esp_rom_delay_us(5000)`（実ADC変換を複数回走らせる近似待機），
+  disable側の`trigger_disable`+パターンテーブルクリア+`controller_clk_
+  div(4,0,0)`（stockの最終値`CLKM_CONF=0x00404000`に一致するようCLKM_EN
+  はクリアしない——disable()自体が元々クリアしないため）。
+- **意図的に対象外**：`adc_ll_regi2c_init()`/`adc_ll_set_calibration_
+  param()`等，I2C_SAR_ADCブロック（regi2c host 0x69）経由のbias/較正
+  レジスタ書込み。実施16の8block×reg 0x00-0x1Fフルスイープ・実施25の
+  同スイープ再確認で，**block=0x69（有効host=0）は両platform完全一致**
+  と既に確定しているため（4節でも再確認），最終値としては差が無いと
+  分かっている部分への移植労力を割かなかった。`bootloader_ana_reset_
+  config()`（BOD/glitch reset設定）も本ラウンドでは対象外。
+
+ビルド確認：`cmake --build build/c5_idf61_uart`（rc=0，`target_kernel_
+impl.c`のみ再コンパイル・リンク成功）。
+
+**実機検証**：`esptool write-flash 0x0`でフル4MB書込み，UARTブリッジ
+RTSリセット後キャプチャ（`r31_port1_trial1.log`/`r31_port1_trial2.log`，
+独立2試行）：**両試行とも`raw_adc=0x00000000 done16=0`のまま**——較正
+ハングは解消しなかった（判定基準：raw_adc非ゼロ・done16の0→1遷移を
+PASS，恒久ゼロ持続をFAILと事前固定）。
+
+**移植が実際に効いたことの確認**（`r31_port1_regcheck.log`）：この
+ハング状態のままJTAG実測すると`PCR_SARADC_CLKM_CONF_REG=0x00404000`
+——stockの値と完全一致（CLKM_ENが意図どおり1になった）。**「移植した
+つもりが実は効いていなかった」という機構的疑いを排除した上での，
+確定的なFAIL**。
+
+### 4. 減算法（advisor推奨の決定実験）：stockからSAR ADC状態を明示的に剥ぎ取っても較正は**PASSのまま**——bootloader_random系はload-bearingでないと確定
+
+3節のFAILだけでは「(a)較正キーはbootloader_random系ではない」と
+「(b)ASP3側への移植が何かを取りこぼしている（regi2c媒介部分等）」を
+区別できない（advisor指摘）。これを混同なく判定するため，実施30で
+確立した`stock_earlyjump`のP4ハンドオフ点（`sys_rtc_init`直前，較正は
+PASSする既知の到達点）の直前に，2nd-stageブートローダの
+`bootloader_random_enable()`が残した状態を**明示的に解除する**
+`r31_teardown_sar_adc_state()`を追加した。P4はapp componentとして
+リンクされる（`BOOTLOADER_BUILD`ではない）ため，regi2c媒介のLL関数も
+そのまま使え，`bootloader_random`の全体（regi2c部分含む）を漏れなく
+解除できる：
+
+- `adc_ll_set_dtest_param(0)`／`adc_ll_set_ent_param(0)`／
+  `adc_ll_enable_calibration_ref(ADC_UNIT_1/2, false)`／
+  `adc_ll_set_calibration_param(ADC_UNIT_1/2, 0x0)`
+  （`adc_ll_regi2c_adc_deinit()`相当，I2C_SAR_ADCブロックのbias/較正
+  コードを0へ）
+- `regi2c_ctrl_ll_i2c_sar_periph_disable()`（PMU_RF_PWC の
+  XPD_PERIF_I2Cを解除——bootloader-buildパスが意図的に呼ばないため
+  ハング状態でも`0xff800000`のまま立っていた電源）
+- `REG_CLR_BIT`でPCR_SARADC_CONF/CLKM_CONFのbus/func clockを停止
+- `adc_ll_digi_trigger_disable()`
+
+（`stock_earlyjump/components/esp_system/port/cpu_start.c`，`#include
+"hal/adc_ll.h"`等を追加，`asp3_jump_now()`直前に`r31_teardown_sar_
+adc_state()`を呼ぶ1行を追加。SDK本体は無改造，スクラッチ内override
+のみ。）
+
+ビルド：`idf.py build`（rc=0，`cpu_start.c`のみ再コンパイル）。
+フラッシュ：`bootloader.bin`@0x2000・`partition-table.bin`@0x8000・
+`scan.bin`@0x10000・実施29の`r29_guest_640k.bin`（ASP3ゲスト，本ラウンド
+のASP3側変更を含まない実施29時点のクリーンな資産）@0x200000。
+
+**結果（2/2独立RTSリセット試行，`r31_p4teardown_trial1.log`/
+`r31_p4teardown_trial2.log`）：較正は完走**——`raw_adc`は試行1
+`0x0a660a68`・試行2`0x0a4c0a48`（`esp_wifi_init`前は`0x00000000`，
+実施27/29/30と同型のシグネチャ），`done16`は0→1。（`0 APs found`は
+実施30既知のP4アーティファクト——`esp_clk_init`未実行によるscan/RX-key
+(B)未充足であり，較正=(A)の判定には無関係。）
+
+**SAR ADC/regi2c状態を明示的に全て剥ぎ取っても較正はPASSしたまま**——
+`bootloader_random_enable/disable()`が残す状態（regi2c媒介部分を含む
+全体）は較正キー(A)のload-bearingな構成要素ではないと，3節の加算
+移植（FAIL）とは独立の手法で確定した。
+
+### 5. 事後の安価な追加確認：実施25の記録を再読——regi2cのI2C_SAR_ADCブロックは元々「両platform完全一致」
+
+3節で移植を意図的に見送ったregi2c媒介部分について，実施25の記録
+（`docs/c5-bringup.md`4254行目近辺の表）を再確認したところ，
+`SAR_ADC(0x69) host=1`の行は「無効ルーティングのアーティファクト」
+「**有効なhost=0では両platform完全一致**」と明記されていた——4節の
+減算法の結果は，この既存記録（regi2cレベルでは元々差が無い）とも
+整合する。
+
+### 6. 判定：bootloader_random_enable/disable()系は較正キー(A)としてrefute確定
+
+加算移植（3節，FAIL・機構的に効いたことを確認済み）と減算法（4節，
+PASSのまま）という**独立した2手法**が同じ結論（非load-bearing）を
+指しており，かつ実施25の既存regi2cスイープ結果とも整合するため，
+本ラウンドの候補（ユーザプロンプト最優先指定）は確定的にrefuteできた
+と判断する。2節のCLKM_EN差分自体は実在する新規発見（記録として残す
+価値あり）だが，**較正の成否とは無関係な副次的差分**だったと結論する。
+
+### 7. (A)の次候補：`bootloader_clock_configure()`（未着手・申し送り）
+
+1節の机上列挙どおり，次に高優先度な(A)候補は`bootloader_clock_
+configure()`（`~/tools/esp-idf-v6.1/components/bootloader_support/src/
+bootloader_clock_init.c`）——2nd-stageブートローダが最初にCPU/APBクロック
+（PLL経由）を切替える処理。実施30 申し送り#3「(A)と(B)は無関係な2つの
+謎ではなく，クロックレベルという1つの物語の可能性がある」（advisor
+指摘）とも整合する本命候補。
+
+**未着手の理由・注意点**：
+- CPU周波数変更はASP3の`CORE_CLK_MHZ`固定前提（`s_ticks_per_us`・
+  `SIL_DLY`較正・`hardware_init_hook()`の既存コメントで「ROMが適切に
+  設定している」と仮定して未変更にしている箇所）と直接競合しうる
+  ハザードがあり（advisor指摘），ASP3側への加算移植は
+  `test_porting`回帰・ハング耐性を慎重に確認しながら進める必要がある。
+- 減算法で先に試す方が安全：`stock_earlyjump`のP4はさらに手前
+  （`ext_mem_init()`直後）でハンドオフしており，この時点で既に
+  2nd-stageブートローダの`bootloader_clock_configure()`は実行済み。
+  P4より手前でのハンドオフはcache/mmu HAL未初期化のため使えない
+  （実施30で確認済みの制約）——bootloader_clock_configure単体を
+  P4で切り分けるには，ブートローダのクロック設定を「P4到達後に
+  部分的に巻き戻す」形の減算法が必要になり，4節の手法をそのまま
+  横展開できない可能性がある。次段でこの実装可否を先に検討すること。
+
+### 8. (B)（scan/RX-key）：本ラウンドは未着手
+
+本ラウンドの時間はすべて(A)候補の検証（3〜6節）に充てたため，実施30で
+特定済みの(B)（`esp_clk_init()`の`rtc_clk_cpu_freq_set_config()`）の
+ASP3移植は着手していない。次段でも(A)特定後にまとめて扱う方針は
+実施30の申し送りのまま変更なし。
+
+### 9. 決定実験（task手順4）：未実施
+
+(A)が依然未特定のため，冷間Direct Bootでの較正完売→scan成功という
+最終決定実験は本ラウンドでも見送った（実施30と同じ判断根拠：(A)が
+満たされない状態でASP3側の(B)だけ移植しても，既知の較正ハングを
+再現するだけで新規情報が得られない）。
+
+### 10. 回帰確認：`test_porting` 実機 `# 6/6 passed`
+
+`build/c5_r31_test_porting`（新規構成：`cmake -S asp3/asp3_core -B
+build/c5_r31_test_porting -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/
+toolchain-riscv64.cmake -DRISCV64_TOOLCHAIN_PREFIX=riscv32-esp-elf-
+-DASP3_TARGET=esp32c5_espidf -DASP3_TARGET_DIR=.../esp32c5_espidf
+-DASP3_APPLDIR=asp3/asp3_core/test/porting -DASP3_APPLNAME=test_porting
+-DESP32C5_CONSOLE=uart0 -DASP3_EXTRA_APP_C_FILES=.../test/porting/tap.c`，
+`ESP32C5_WIFI`は指定せずOFF＝本ラウンドの新規コード
+`esp32c5_r31_bootloader_random_cycle()`は`#ifdef TOPPERS_ESP32C5_WIFI`
+によりこのビルドには一切コンパイルされない——構造的に無関係かつ
+実機でも再確認）。実機フラッシュ後，同一8秒キャプチャ内で**3回連続
+起動を観測しすべて`# 6/6 passed`**（`r31_test_porting_trial1.log`）。
+退行なし。
+
+### 11. C5#1最終状態（終了処理）
+
+- `build/c5_idf61_uart/asp_flash.bin`（本ラウンドの加算移植込み，FAIL
+  確定後もコードは残置——`#ifdef TOPPERS_ESP32C5_WIFI`ガード内・害
+  なしと3節で確認済み）をフル4MB@0x0へ再書込み。RTSリセット後15秒
+  キャプチャ（`r31_final_state_console.log`）：`raw_adc=0x00000000
+  done16=0`・`rst:0x12 (RTC_SWDT_SYS)`による数秒周期リセットを確認——
+  実施28/29/30終了時点と同型の既知症状，退行なし。
+- C5#2・C6 board C・UARTブリッジ`125a266b...`：完全未接触
+  （前ラウンドから変更なし）。DUTは常に`b04e3bcf...`（ttyUSB0）を
+  by-id照合のうえ使用。
+
+### 変更ファイル
+
+- `asp3/target/esp32c5_espidf/target_kernel_impl.c`：
+  `esp32c5_r31_bootloader_random_cycle()`（新設）＋`hardware_init_hook()`
+  からの呼出し追加（`#ifdef TOPPERS_ESP32C5_WIFI`ガード）。FAIL確定
+  済みだが，2節の新規JTAG発見の再現手順・3節の「移植が機構的に効いた
+  ことの確認」の記録として残置（git commitはしない）。
+- `docs/c5-bringup.md`：本節（実施31）追加。
+- スクラッチ（リポジトリ外，`/tmp/.../scratchpad/`）：`r31_regcheck.py`
+  （新規，PMU_RF_PWC/PCR_SARADC_CONF/CLKM_CONFの単純JTAG読取り）・
+  `r31_asp3_boot1/2.log`（新規JTAG発見の初回確認）・
+  `r31_port1_trial1/2.log`（3節加算移植の実機結果）・
+  `r31_port1_regcheck.log`（移植が効いたことの確認）・
+  `stock_earlyjump/components/esp_system/port/cpu_start.c`
+  （`r31_teardown_sar_adc_state()`追加・`asp3_jump_now()`直前で呼出し，
+  4節の減算法）・`r31_p4teardown_trial1/2.log`（減算法の実機結果）・
+  `build/c5_r31_test_porting/`（新規，test_porting C5ビルド）・
+  `r31_test_porting_trial1.log`（回帰確認）・
+  `r31_final_state_console.log`（終了処理の最終確認）。
+- git commitは行っていない（指示どおり）。
+
+### 次段への申し送り
+
+1. **(A)の次候補＝`bootloader_clock_configure()`**（7節）。CPU周波数
+   変更のハザードに注意し，まず減算法での切り分け実装可否を検討する
+   こと（P4の「クロック設定済み状態からの部分巻き戻し」が必要になる
+   可能性がある，4節参照）。
+2. `bootloader_ana_reset_config()`（BOD/glitch reset設定）は本ラウンド
+   で優先度を下げた（advisor評価：アナログ接触は「既に存在するビット」
+   か「glitch検出の無効化」のみで，較正のload-bearing候補としては
+   弱い）——`bootloader_clock_configure()`がFAILに終わった場合の次点
+   候補として残す。
+3. (B)（`esp_clk_init()`のASP3移植）は未着手のまま。(A)特定後に
+   まとめて着手する実施30の方針を継続する。
+4. 2節のCLKM_EN差分自体は「実施14-25の網羅比較から漏れていた新規の
+   静的差分」という事実として記録に残すが，**較正には無関係と確定
+   済み**——今後このレジスタを再度「有力候補」として持ち出さないこと
+   （厳密性基準：一度refuteした指標の再浮上を防ぐ）。
