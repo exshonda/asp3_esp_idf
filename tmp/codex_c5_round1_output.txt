@@ -1,0 +1,358 @@
+Reading additional input from stdin...
+OpenAI Codex v0.142.5
+--------
+workdir: /home/honda/TOPPERS/ASP3CORE/asp3_esp_idf
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: none
+reasoning summaries: none
+session id: 019f4c96-d72b-7850-a5fe-36af7062a189
+--------
+user
+非対話（一回きり）の相談です。コードの編集や実装は不要——**分析と次の一手の提案だけ**をお願いします。
+回答は日本語で。根拠となるESP-IDF/blob/ROM/HALの該当箇所があれば `file:line` や関数名で示してください。
+
+このリポジトリは `/home/honda/TOPPERS/ASP3CORE/asp3_esp_idf`（branch `claude/c6-wifi-c5-dev-5vc6x9`）。
+全経緯は `docs/c5-bringup.md`（実施1〜13）。C6側の長期調査は `docs/wifi-shim-c6.md`（実施1〜85）。
+ESP-IDF v6.1-beta1 は `/home/honda/tools/esp-idf-v6.1`、HALは `hal/`（esp-hal-3rdparty submodule）。
+
+# 文脈：なぜC5をやっているのか
+
+ESP32-C6で85ラウンドかけても解けなかった **deaf-RX**（MAC/BB割込みは約140/s発火するが
+`lmacRxDone`が一度も立たない＝正当な802.11 RX_DONEがHWから上がらない。至近距離の既知強ビーコン
+にも無反応。TXも電波として放射されていない疑い）がある。C6調査は「ソフト/JTAG＋物理RF刺激の層では
+出尽くした」として凍結（`memory/project_c6_agc_investigation.md`）。
+
+**ESP32-C5は同世代モデム**なので、C5で同種の症状が再現するか否か自体が
+「C6固有 vs 同世代共通」の判別指標になる、という理由でC5移植を主軸に切り替えた。
+
+ASP3はTOPPERS/ASP3（μITRON系RTOS）で、**Direct Boot**（ESP-IDFのブートローダもFreeRTOSも使わない）。
+Wi-Fi blobはos_adapter shim経由で駆動している。
+
+# C5でこれまでに解決したこと（実施11〜13）
+
+1. **実施11**：`esp_wifi_init_internal`の0x3001失敗 → `sdkconfig_stub/sdkconfig.h`に
+   `CONFIG_SOC_*`ミラー（`CONFIG_SOC_WIFI_HE_SUPPORT`等）が欠落し、`wifi_osi_funcs_t`のサイズが
+   4バイト小さく`_magic`がずれていた。`nm -S`で0x1f8→0x1fcを実測して確認・修正。
+2. **実施12**：修正後に露見したハング → JTAGで`core_exc_entry_1`→`_kernel_exc_table`→`T_EXCINF`と辿り、
+   `mepc=0`のInstruction access fault＝**NULL関数ポインタ呼出し**と特定。blobの`wifi_hw_start()`が
+   `g_wifi_osi_funcs`のoffset 0xC8を無条件に呼ぶ。v9で`_wifi_apb80m_request/release`が削除された
+   **同じスロットに置換された後継フィールド** `_wifi_pm_sleep_lock_acquire/release` の追加漏れ。no-opスタブで修正。
+3. **実施13（直前のラウンド）**：さらに先の`phy_iq_est_enable_new`の無限ループを追跡。
+   - `MODEM0`(`0x600A0000`)＝Wi-Fi BBのレジスタ書込みが**CPU起点でも一切効かない**ことを、
+     陽性対照（`MODEM_LPCON`/`MODEM_SYSCON`への書込みは成立）付きで確認＝JTAG/APM由来のアーティファクトではない。
+   - 原因は**WIFIBBクロックのICGゲート**：`MODEM_SYSCON_CLK_CONF_POWER_ST`(`0x600A9C0C`)の
+     `CLK_WIFI_ST_MAP`=`BIT(1)|BIT(2)` に対し、`PMU_HP_ACTIVE_ICG_MODEM_REG`(`0x600B000C`)の
+     `code`(bit31:30)が**0**のまま（Direct Bootで`pmu_init()`が走らないため）。
+     `CLK_CONF1`(`0x600A9C14`)の`CLK_WIFIBB_*_EN`は全て1なのに、上位のICGで閉じていた。
+   - `FORCE_ON=0`・ST_MAP不変のまま**`icg_modem.code`だけを0↔2でトグルするA/B/A/B反証実験**で因果確認
+     （code=0→BB書込み無視／code=2→成立）。適用にはPMU即時反映パルス2本
+     （`0x600B00DC` bit31 = `update_dig_icg_modem_en`、`0x600B00D0` bit28 = `update_dig_icg_switch`）の
+     **両方**が必要（片方だけでは反映されないことも実測）。
+   - 「C6ではICG初期化は冗長」というC6実測を**C5に未検証のまま踏襲**して無効化されていた
+     `esp_shim_modem_icg_init()`（コード上も`【実機確認待ち】`と明記）を有効化＝修正。
+   - 実機効果：`MODEM0+0x450`が**永久`0x00000000` → `0x00102003`**に変化＝blobのBB書込みが到達するようになった。
+
+# 現在の未解決症状（ここを相談したい）
+
+`esp_wifi_init`は進むが、**PHY較正の`phy_iq_est_enable_new`が無限ループのまま**。
+
+blobの当該ループ（逆アセンブル、アドレスはビルドで変動）：
+```
+loop: lw   a5,[0x600A047C]    ; BB done/status レジスタ
+      slli a4,a5,0xf          ; a4の符号ビット = a5のbit16
+      bgez a4, body           ; bit16==0 → ループ本体へ（＝0で回り続ける）
+      <epilogue> ret          ; bit16==1 で脱出
+body: jal  phy_get_pkdet_data ; [0x600A0C50] を読む
+      jal  phy_abs_temp
+      ... 閾値比較・カウンタ++ ...
+      j    loop               ; **全経路がloopへ戻る＝bit16以外に脱出路が無い**
+```
+- `MODEM0+0x450` bit1 … IQ推定の**起動(start)**ビット（blobがclear→delay→setとパルス）。
+  ICG修正後は`0x00102003`（bit0,1,13,20が立っている）＝**起動ビットは立っている**。
+- `MODEM0+0x47C` bit16 … 対応する**完了(done)**ビット。**修正後も永久に0**。
+- ループ脱出の`ret`にHWブレークポイントを置き100秒resumeしても**一度も着火せず**（PCサンプリングだけでなく構造的にも無限ループ確認）。
+
+## ICG修正後の実測レジスタ値（ハング中、halt状態、C5#1 DUT）
+
+| レジスタ | アドレス | 値 |
+|---|---|---|
+| PMU hp_active icg_modem | `0x600B000C` | `0x80000000`（code=2、FWが適用済み） |
+| MODEM_SYSCON CLK_CONF_FORCE_ON | `0x600A9C08` | `0x00000000`（強制ONに頼っていない） |
+| MODEM_SYSCON CLK_CONF | `0x600A9C04` | `0x00201002` |
+| MODEM_SYSCON CLK_CONF_POWER_ST | `0x600A9C0C` | `0x64646400` |
+| MODEM_SYSCON CLK_CONF1 | `0x600A9C14` | `0x003BE7FF` |
+| MODEM_SYSCON WIFI_BB_CFG | `0x600A9C18` | `0x10003802` |
+| MODEM_SYSCON FE_CFG | `0x600A9C1C` | `0x00000000` |
+| MODEM_LPCON CLK_CONF | `0x600AF018` | `0x00000007`（WIFIPWR/COEX/I2C_MST） |
+| MODEM_LPCON +0x08 | `0x600AF008` | `0x00000310` |
+| MODEM0 BB start | `0x600A0450` | `0x00102003` |
+| MODEM0 BB done | `0x600A047C` | `0x00000000` |
+| MODEM0 pkdet | `0x600A0C50` | `0x00000000` |
+| MODEM0 (0x8D0) | `0x600A08D0` | `0x00000000` |
+
+`CLK_CONF1`=`0x003BE7FF`のデコード：`WIFIBB_22M/40M/44M/80M/40X/80X/40X1/80X1/160X1`(bit0-8)=1、
+`WIFIMAC`(9)=1、`WIFI_APB`(10)=1、**`FE_20M`(11)=0、`FE_40M`(12)=0**、`FE_80M`(13)=1、`FE_160M`(14)=1、
+`FE_APB`(15)=1、`BT_APB`(16)=1、`BTBB`(17)=1、`BTMAC`(18)=0、`FE_PWDET_ADC`(19)=1、`FE_ADC`(20)=1、`FE_DAC`(21)=1。
+
+## 本ラウンドで**棄却済み**の候補（同じ提案は不要）
+
+- **FE_20M/FE_40Mクロック欠落**：実行中にJTAGで`CLK_CONF1`を`0x003BFFFF`（両bit ON）にしてresume
+  → **ループから脱出せず、done bitも0のまま**。棄却。
+- **ICG初期化のタイミングが遅すぎる（前倒しすべき）**：ハング中もBBは書込み可能
+  （実行中のJTAG書込みが成立、`0x450`=`0x00102003`）＝**IQ推定ループが回っている最中にBBクロックは生きている**。
+  よって呼出し位置の前倒しでは何も変わらない。自己棄却。
+- **`modem_syscon_ll_set_modem_apb_icg_bitmap`が効いていない疑い**：構造体オフセット・ビットフィールド・
+  C5のsyscon基底(`0x600A9C00`、C6から+0x400)は全て正しいと確認。`POWER_ST`が元値のままなのは
+  `esp_shim_modem_icg_init()`の後に走る`modem_clock`側が上書きしているだけ。A/B実験でこの書換えは
+  不要と確認済み＝実害なし。
+
+# 現時点の最有力仮説（検証方法も含めて評価してほしい）
+
+**regi2c経由のRF/PLL較正が未完了**。IQ不均衡推定はアナログRF鎖（LO/ミキサ/ADC）が実際に動作して
+テストトーンを注入・測定できて初めてdoneが立つはず。RF PLLがロックしていない、あるいは
+regi2c越しのRF較正が完了していないなら、起動ビットを立てても有効な測定結果が得られず
+doneは永久に立たない。C6の根本原因修正（regi2cのI2C_MSTクロック）とも、上表の`FE_CFG`=0 とも整合する。
+
+# 相談したいこと
+
+1. **`MODEM0+0x47C` bit16 と `MODEM0+0x450` の正体**について、ESP-IDF/HAL/blob/ROM/TRMから
+   根拠のある同定はできるか（`phy_iq_est_enable_new`はblob内なのでソースが無い）。
+   `pkdet`(`0x600A0C50`)と`0x600A08D0`が両方0なのは何を意味するか。
+
+2. **doneが立たないための必要条件として、C5のDirect Bootで欠けていそうな初期化**は何か。
+   特に以下を評価してほしい：
+   - RF PLL（BBPLL/RFPLL）のロック状態はどのレジスタ／regi2cアドレスで確認できるか
+   - `FE_CFG`(`0x600A9C1C`)=0 は正常か。ESP-IDFでは誰がいつ書くか
+   - `WIFI_BB_CFG`(`0x600A9C18`)=`0x10003802` は妥当か
+   - `esp_phy_enable`→`register_chipv7_phy`の呼出し前提（PHY較正データ、`phy_init_data`、
+     `esp_phy_load_cal_and_init`相当）でDirect Bootが飛ばしているものはあるか
+   - PMUのMODEM電源ドメイン（`PMU_HP_ACTIVE_*`の他フィールド、`pmu_init()`が本来行う設定）で
+     ICG code以外に**アナログ側**に効くものはあるか
+
+3. **次にやるべき実験を、費用対効果順に3つ以内**で。JTAG（OpenOCD、read/write可）と実機2台
+   （C5#1=DUT・書込み可、C5#2=stock参照機・**読み取り専用/書換え厳禁**）が使える。
+   「これを見れば仮説が判別できる」という**判別実験**の形で。
+
+4. **打ち切り基準の妥当性**：私は「regi2c/RF較正が正常に動いていると確認できた上でIQ推定が完了しない
+   なら、それはC6と同種のアナログ壁を較正時点で再現したということであり、それ自体が答え
+   （C6-genericと結論して停止、85ラウンド級のレジスタ総当りには入らない）」と決めている。
+   この基準は妥当か。もっと早く/遅く打ち切るべきか。**C5でRF較正が正常でIQ推定だけ失敗する**という
+   結果は、本当にC6のdeaf-RXと同一原因を示唆すると言えるか（それとも別物と考えるべきか）。
+
+なお、C6のdeaf-RXでは`esp_wifi_init`自体は完走しscanまで到達していた（PHY較正は通っていた）。
+**C5はそれより手前のPHY較正時点で止まっている**——この非対称性をどう解釈すべきかも含めて意見が欲しい。
+warning: Codex's Linux sandbox uses bubblewrap and needs access to create user namespaces.
+codex
+まずローカルの実装・メモ・ESP-IDFのレジスタ定義を横断して、アドレス名と初期化経路を同定します。編集はしません。
+codex
+実行環境のサンドボックス初期化が `bwrap` のネットワーク名前空間設定で失敗しています。権限昇格は使えない条件なので、まずはログインシェルを切って同じ読み取りコマンドを試します。
+web search: 
+web search: site:github.com/espressif/esp-idf esp32c5 MODEM_SYSCON_WIFI_BB_CFG_REG
+web search: 
+web search: github espressif esp-idf esp32c5 modem_syscon_reg.h
+web search: 
+web search: https://github.com/espressif/esp-idf/tree/v6.1-beta1/components/soc/esp32c5/register/soc
+web search: 
+web search: github.com/espressif/esp-idf v6.1-beta1
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/v6.1-beta1/components/soc/esp32c5/register/soc/modem_syscon_reg.h
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/components/soc/esp32c5/register/soc/modem_syscon_reg.h
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/README.md
+web search: 
+web search: https://api.github.com/repos/espressif/esp-idf/contents/components/soc/esp32c5/register/soc?ref=master
+web search: 
+web search: https://api.github.com/repos/espressif/esp-idf/contents/components/soc/esp32c5/register/soc
+web search: 
+web search: https://github.com/espressif/esp-idf/raw/master/components/soc/esp32c5/register/soc/modem_syscon_reg.h
+web search: 
+web search: "components/soc/esp32c5" "modem_syscon"
+web search: 
+web search: "ESP32-C5" "MODEM_SYSCON"
+codex
+通常のシェル呼び出しは同じ箇所で失敗しています。もう一つだけPTY経由で確認し、だめなら公開ESP-IDFソースと提示済みログを根拠に切り替えます。
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/components/soc/esp32c6/register/soc/modem_syscon_reg.h
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/soc/esp32c6/register/soc/modem_syscon_reg.h
+web search: 
+web search: "modem_syscon_reg.h" "esp32c6" "github.com/espressif/esp-idf"
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/release/v5.5/components/soc/esp32c6/register/soc/modem_syscon_reg.h
+web search: 
+web search: https://cdn.jsdelivr.net/gh/espressif/esp-idf@master/components/soc/esp32c6/register/soc/modem_syscon_reg.h
+web search: 
+web search: cdn.jsdelivr.net gh espressif esp-idf modem_syscon_reg.h
+web search: 
+web search: 
+codex
+PTYでも同じサンドボックス障害でした。以降はローカルを直接読めない制約を明示したうえで、公開済みESP-IDF構造と提示された実測値から、判別に使える仮説に絞ります。
+web search: 
+web search: "WIFI_BB_CFG" "ESP32-C5"
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/soc/esp32h2/register/soc/pmu_reg.h
+web search: 
+web search: docs.espressif.com esp-idf esp_phy_enable register_chipv7_phy
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/components/esp_phy/src/phy_init.c
+web search: 
+web search: 'void esp_phy_enable' in https://raw.githubusercontent.com/espressif/esp-idf/master/components/esp_phy/src/phy_init.c
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/esp_phy/src/phy_init.c
+web search: 
+web search: 'void esp_phy_enable' in https://github.com/espressif/esp-idf/blob/master/components/esp_phy/src/phy_init.c
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/esp_phy/src/phy_init.c
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/esp_hw_support/port/esp32c5/esp_modem_clock.c
+web search: 
+web search: "PHY_INIT_MODEM_CLOCK_REQUIRED_BITS" "esp-idf"
+web search: 
+web search: https://github.com/espressif/esp-idf/search?q=PHY_INIT_MODEM_CLOCK_REQUIRED_BITS&type=code
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/components/esp_hw_support/include/esp_private/esp_modem_clock.h
+web search: 
+web search: https://github.com/espressif/esp-idf/tree/master/components/esp_hw_support/include/esp_private
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/components/esp_hw_support/include/esp_private/periph_ctrl.h
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/esp_phy/include/esp_private/phy.h
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/components/soc/esp32c5/register/soc/soc.h
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/components/soc/esp32c5/include/soc/soc.h
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/components/soc/esp32c5/include/soc/reg_base.h
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/components/soc/esp32c5/register/soc/reg_base.h
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/components/soc/esp32c5/register/soc/modem_syscon_reg.h
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/soc/esp32c5/register/soc/modem_syscon_reg.h
+web search: 
+web search: https://github.com/espressif/esp-idf/tree/master/components/soc/esp32c5/register/soc
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/components/soc/esp32c5/register/soc/pmu_reg.h
+web search: 
+web search: https://github.com/espressif/esp-idf/raw/master/components/soc/esp32c5/register/soc/modem_syscon_reg.h
+web search: 
+web search: "DR_REG_MODEM0_BASE" "0x600A0000" "ESP32-C5"
+web search: 
+web search: "modem_syscon_ll_set_modem_apb_icg_bitmap"
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/release/v5.5/components/soc/esp32c5/register/soc/modem_syscon_reg.h
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/esp_hw_support/port/esp32c5/pmu_init.c
+web search: 
+web search: "ESP32C5" "pmu_init" "icg_modem"
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/esp_hw_support/regi2c_ctrl.c
+web search: 
+web search: "regi2c_ctrl" "esp-idf" "master"
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/esp_hw_support/port/esp32c5/rtc_clk.c
+web search: 
+web search: 'void IRAM_ATTR esp_wifi_bt_power_domain_on' in https://github.com/espressif/esp-idf/blob/master/components/esp_phy/src/phy_init.c
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/components/soc/esp32c5/include/soc/soc_caps.h
+web search: 
+web search: 'SOC_PHY_CALIBRATION_CLOCK_IS_INDEPENDENT' in https://raw.githubusercontent.com/espressif/esp-idf/master/components/soc/esp32c5/include/soc/soc_caps.h
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/components/soc/esp32c5/include/soc/soc_caps_eval.h
+codex
+前提として、この実行環境ではローカルファイル読み取りが sandbox 初期化で失敗したため、提示済みログと公開 ESP-IDF ソースで照合しています。v6.1-beta1 ローカルとの差分はあり得ます。
+
+**結論**
+最有力仮説は妥当です。ただし「regi2c の I2C_MST クロック欠落」そのものではなく、より広く **RF/FE アナログ経路が IQ 推定時点で有効測定できる状態になっていない**、と表現するのが安全です。`MODEM_LPCON CLK_CONF=0x7` で I2C_MST clock 自体は立っているので、次は「regi2c transaction が発生し、readback が正常で、RF/FE 電源・ISO・PLL 状態が stock と一致するか」を切るべきです。
+
+**1. 0x450 / 0x47C / pkdet**
+`MODEM0` base は C5 の `DR_REG_MODEM0_BASE=0x600A0000` で、同じ base map に `PWDET_CONF_REG=0x600A0810` もあります。根拠: `components/soc/esp32c5/register/soc/reg_base.h`。
+
+ただし `MODEM0+0x450` と `MODEM0+0x47C bit16` は公開 HAL/TRM レベルでは名前付き同定できません。ここは blob の `phy_iq_est_enable_new` の振る舞いからの同定が最も強いです。
+
+- `0x450 bit1`: IQ 推定エンジンの start/control bit と見るのが妥当。
+- `0x47C bit16`: IQ 推定 done/status bit。提示の逆アセンブルではこの bit 以外に脱出路がないので、少なくとも blob にとっての完了条件です。
+- `0xC50` を `phy_get_pkdet_data` が読むなら、peak/power detector 系の測定値と見るのが自然です。`0` 固定は「BB clock は生きているが、測定対象のトーン/ADC/FE/RF ループが見えていない」方向の証拠です。
+- `0x8D0=0` は公開名がない限り補助証拠に留めるべきです。`pkdet=0` と同方向ですが、単体では原因を決められません。
+
+**2. 欠けていそうな初期化**
+ESP-IDF の標準経路では `esp_phy_enable()` が common clock enable、`phy_module_enable()`、初回のみ `esp_phy_load_cal_and_init()` を呼びます。根拠: [`phy_init.c#L2772-L2800`](https://github.com/espressif/esp-idf/blob/master/components/esp_phy/src/phy_init.c#L2772-L2800)。
+
+さらに C5 では Wi-Fi/BT power domain on 経路が重要です。`esp_wifi_bt_power_domain_on()` は `RTC_CNTL_WIFI_FORCE_PD` を clear、modem reset を pulse、`RTC_CNTL_WIFI_FORCE_ISO` を clear します。根拠: [`phy_init.c#L3004-L3046`](https://github.com/espressif/esp-idf/blob/master/components/esp_phy/src/phy_init.c#L3004-L3046)。BB register write が通ることは digital 側の十分条件に近いですが、RF/FE 側の ISO/analog power が stock と同じとは限りません。ここは未確認なら最優先です。
+
+`esp_phy_load_cal_and_init()` は init data を取り、cal data を確保し、NVS 失敗時は full calibration に落として `register_chipv7_phy()` を呼びます。根拠: [`phy_init.c#L3777-L3901`](https://github.com/espressif/esp-idf/blob/master/components/esp_phy/src/phy_init.c#L3777-L3901)。したがって NVS 未初期化それ自体は今回の無限ループの第一容疑ではありません。むしろ疑うべきは、Direct Boot で `phy_module_enable()` 相当、power domain on、PMU active policy、regi2c read/write の有効化が stock と同じ状態に達しているかです。
+
+`FE_CFG=0` と `WIFI_BB_CFG=0x10003802` は、現時点では smoking gun ではありません。`FE_20M/40M` を強制しても変化なしという反証があるので、単独追跡は優先度低です。stock C5 で同じ値なら棄却してよいです。
+
+RFPLL lock の公開レジスタ/regi2c アドレスは、少なくとも公開 IDF/HAL からは安全に断定しない方がよいです。Wi-Fi RFPLL は blob 内の `register_chipv7_phy()` 配下で扱われるはずなので、regi2c call trace か stock との差分で見るのが現実的です。
+
+**3. 次の判別実験**
+1. **stock C5#2 の読み取り専用スナップショットと DUT 差分**
+   stock で Wi-Fi init/scan 到達後に halt して、DUT のハング中と同じ範囲を読む。追加で `RTC_CNTL_DIG_PWC/ISO`、`SYSCON_WIFI_RST_EN`、`PMU 0x600B0000..0x600B00E0`、`MODEM_SYSCON 0x600A9C00..`、`MODEM_LPCON 0x600AF000..`、`LP_I2C_ANA_MST 0x600B2400..` を比較。  
+   判別: stock と一致するなら `FE_CFG/WIFI_BB_CFG/PMU ICG` 追跡を打ち切れる。差があれば Direct Boot 欠落初期化。
+
+2. **DUT で power-domain-on 系だけを前倒し A/B**
+   Wi-Fi init 前に IDF の `esp_wifi_bt_power_domain_on()` 相当、つまり WIFI_FORCE_PD clear、modem reset pulse、WIFI_FORCE_ISO clear を再現してから同じ場所まで走らせる。  
+   判別: `0x47C bit16` が立つなら、原因は RF/FE analog wall ではなく power/ISO/reset sequence 欠落。
+
+3. **regi2c liveness trace**
+   `register_chipv7_phy()` から `phy_iq_est_enable_new` までの間で `regi2c_read/write` か LP analog master register へのアクセスを break/watch する。  
+   判別: transaction なしなら PHY 初期化経路欠落。transaction が timeout/all-zero なら bus/clock/power。stock 相当の readback なのに IQ done だけ立たないなら、初めて IQ estimator/analog measurement wall と見てよいです。
+
+**4. 打ち切り基準**
+基準は概ね妥当ですが、結論名は少し弱めるべきです。
+
+「regi2c/RF 較正が stock 相当に正常、power/ISO/PMU も stock 相当、かつ IQ done だけ立たない」なら、C5 調査を止める判断は妥当です。ただしそれは **C5 でも同世代 modem の analog/BB 完了条件で Direct Boot が壁に当たった** という結論であって、C6 の deaf-RX と同一原因とまでは言い切れません。
+
+C6 は PHY 較正を通過して scan まで到達している一方、C5 は較正中に止まっています。この非対称性は重要です。共通するのは「RF/FE/BB の実測系が Direct Boot 下で正しく成立していない疑い」ですが、C6 の RX_DONE 不在と C5 の IQ done 不在は階層が違います。したがって、C5 は “C6-generic の強い示唆” にはなりますが、“同一 root cause の証明” には stock 差分と regi2c 正常性の確認が必要です。
+tokens used
+117,543
+前提として、この実行環境ではローカルファイル読み取りが sandbox 初期化で失敗したため、提示済みログと公開 ESP-IDF ソースで照合しています。v6.1-beta1 ローカルとの差分はあり得ます。
+
+**結論**
+最有力仮説は妥当です。ただし「regi2c の I2C_MST クロック欠落」そのものではなく、より広く **RF/FE アナログ経路が IQ 推定時点で有効測定できる状態になっていない**、と表現するのが安全です。`MODEM_LPCON CLK_CONF=0x7` で I2C_MST clock 自体は立っているので、次は「regi2c transaction が発生し、readback が正常で、RF/FE 電源・ISO・PLL 状態が stock と一致するか」を切るべきです。
+
+**1. 0x450 / 0x47C / pkdet**
+`MODEM0` base は C5 の `DR_REG_MODEM0_BASE=0x600A0000` で、同じ base map に `PWDET_CONF_REG=0x600A0810` もあります。根拠: `components/soc/esp32c5/register/soc/reg_base.h`。
+
+ただし `MODEM0+0x450` と `MODEM0+0x47C bit16` は公開 HAL/TRM レベルでは名前付き同定できません。ここは blob の `phy_iq_est_enable_new` の振る舞いからの同定が最も強いです。
+
+- `0x450 bit1`: IQ 推定エンジンの start/control bit と見るのが妥当。
+- `0x47C bit16`: IQ 推定 done/status bit。提示の逆アセンブルではこの bit 以外に脱出路がないので、少なくとも blob にとっての完了条件です。
+- `0xC50` を `phy_get_pkdet_data` が読むなら、peak/power detector 系の測定値と見るのが自然です。`0` 固定は「BB clock は生きているが、測定対象のトーン/ADC/FE/RF ループが見えていない」方向の証拠です。
+- `0x8D0=0` は公開名がない限り補助証拠に留めるべきです。`pkdet=0` と同方向ですが、単体では原因を決められません。
+
+**2. 欠けていそうな初期化**
+ESP-IDF の標準経路では `esp_phy_enable()` が common clock enable、`phy_module_enable()`、初回のみ `esp_phy_load_cal_and_init()` を呼びます。根拠: [`phy_init.c#L2772-L2800`](https://github.com/espressif/esp-idf/blob/master/components/esp_phy/src/phy_init.c#L2772-L2800)。
+
+さらに C5 では Wi-Fi/BT power domain on 経路が重要です。`esp_wifi_bt_power_domain_on()` は `RTC_CNTL_WIFI_FORCE_PD` を clear、modem reset を pulse、`RTC_CNTL_WIFI_FORCE_ISO` を clear します。根拠: [`phy_init.c#L3004-L3046`](https://github.com/espressif/esp-idf/blob/master/components/esp_phy/src/phy_init.c#L3004-L3046)。BB register write が通ることは digital 側の十分条件に近いですが、RF/FE 側の ISO/analog power が stock と同じとは限りません。ここは未確認なら最優先です。
+
+`esp_phy_load_cal_and_init()` は init data を取り、cal data を確保し、NVS 失敗時は full calibration に落として `register_chipv7_phy()` を呼びます。根拠: [`phy_init.c#L3777-L3901`](https://github.com/espressif/esp-idf/blob/master/components/esp_phy/src/phy_init.c#L3777-L3901)。したがって NVS 未初期化それ自体は今回の無限ループの第一容疑ではありません。むしろ疑うべきは、Direct Boot で `phy_module_enable()` 相当、power domain on、PMU active policy、regi2c read/write の有効化が stock と同じ状態に達しているかです。
+
+`FE_CFG=0` と `WIFI_BB_CFG=0x10003802` は、現時点では smoking gun ではありません。`FE_20M/40M` を強制しても変化なしという反証があるので、単独追跡は優先度低です。stock C5 で同じ値なら棄却してよいです。
+
+RFPLL lock の公開レジスタ/regi2c アドレスは、少なくとも公開 IDF/HAL からは安全に断定しない方がよいです。Wi-Fi RFPLL は blob 内の `register_chipv7_phy()` 配下で扱われるはずなので、regi2c call trace か stock との差分で見るのが現実的です。
+
+**3. 次の判別実験**
+1. **stock C5#2 の読み取り専用スナップショットと DUT 差分**
+   stock で Wi-Fi init/scan 到達後に halt して、DUT のハング中と同じ範囲を読む。追加で `RTC_CNTL_DIG_PWC/ISO`、`SYSCON_WIFI_RST_EN`、`PMU 0x600B0000..0x600B00E0`、`MODEM_SYSCON 0x600A9C00..`、`MODEM_LPCON 0x600AF000..`、`LP_I2C_ANA_MST 0x600B2400..` を比較。  
+   判別: stock と一致するなら `FE_CFG/WIFI_BB_CFG/PMU ICG` 追跡を打ち切れる。差があれば Direct Boot 欠落初期化。
+
+2. **DUT で power-domain-on 系だけを前倒し A/B**
+   Wi-Fi init 前に IDF の `esp_wifi_bt_power_domain_on()` 相当、つまり WIFI_FORCE_PD clear、modem reset pulse、WIFI_FORCE_ISO clear を再現してから同じ場所まで走らせる。  
+   判別: `0x47C bit16` が立つなら、原因は RF/FE analog wall ではなく power/ISO/reset sequence 欠落。
+
+3. **regi2c liveness trace**
+   `register_chipv7_phy()` から `phy_iq_est_enable_new` までの間で `regi2c_read/write` か LP analog master register へのアクセスを break/watch する。  
+   判別: transaction なしなら PHY 初期化経路欠落。transaction が timeout/all-zero なら bus/clock/power。stock 相当の readback なのに IQ done だけ立たないなら、初めて IQ estimator/analog measurement wall と見てよいです。
+
+**4. 打ち切り基準**
+基準は概ね妥当ですが、結論名は少し弱めるべきです。
+
+「regi2c/RF 較正が stock 相当に正常、power/ISO/PMU も stock 相当、かつ IQ done だけ立たない」なら、C5 調査を止める判断は妥当です。ただしそれは **C5 でも同世代 modem の analog/BB 完了条件で Direct Boot が壁に当たった** という結論であって、C6 の deaf-RX と同一原因とまでは言い切れません。
+
+C6 は PHY 較正を通過して scan まで到達している一方、C5 は較正中に止まっています。この非対称性は重要です。共通するのは「RF/FE/BB の実測系が Direct Boot 下で正しく成立していない疑い」ですが、C6 の RX_DONE 不在と C5 の IQ done 不在は階層が違います。したがって、C5 は “C6-generic の強い示唆” にはなりますが、“同一 root cause の証明” には stock 差分と regi2c 正常性の確認が必要です。

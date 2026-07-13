@@ -1,0 +1,640 @@
+OpenAI Codex v0.142.5
+--------
+workdir: /home/honda/TOPPERS/ASP3CORE/asp3_esp_idf
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: none
+reasoning summaries: none
+session id: 019f59da-10cc-7d02-a30f-1264cdd20963
+--------
+user
+非対話（一回きり）の相談です。コードの編集や実装は不要——**分析と次の一手の提案だけ**をお願いします。
+回答は日本語で。根拠となるESP-IDF/blob/ROM/HALの該当箇所は `file:line` や関数名・ROMシンボル名で示してください。
+
+このリポジトリは `/home/honda/TOPPERS/ASP3CORE/asp3_esp_idf`（branch `claude/c6-wifi-c5-dev-5vc6x9`）。
+過去の相談＝`tmp/codex_c5_round1_prompt.md`/`_output.txt`（実施13時点）、`tmp/codex_c5_round2_prompt.md`/`_output.txt`（実施26時点）。
+その後の全経緯は `docs/c5-bringup.md` の実施27〜36。ESP-IDF v6.1-beta1は`/home/honda/tools/esp-idf-v6.1`、HALは`hal/`。
+
+# 現状（round2以降の激変——実施27〜35で確定した事実）
+
+TOPPERS/ASP3（Direct Boot）のESP32-C5で、以下を**すべて解決済み**：
+1. CLIC割込み出口バグ（mret非経由出口でmintstatus.mil固着→全割込み凍結）→synthetic mretで根治（実施28）
+2. Super WDTアンロックキー誤り→修正（実施33）
+3. **CPUルートクロックがXTAL(48MHz)のまま**だった→bootloader相当の切替を移植（実施32）→PHY較正（トーン自己ループバック）が完走するようになった
+4. **ROMのBBPLLが「XTAL=40MHzプロファイル」で較正されていた**（実XTAL=48MHz→480×1.2=576MHzで誤ロック。OC_DIV=12/DR1=DR3=0を実測）→48MHzプロファイルで再較正（実施34）→CPU実測80.00/240.00MHz（理論一致）
+5. regi2cマスタ(I2C_ANA_MST)自体のICGゲート→解除（実施34）
+
+現在の状態：**冷間Direct Bootで較正完走・esp_wifi_init完走・scan完走（約11秒・WDTリセット無し）・CPU=240MHz（ESP-IDF標準）・BBPLL=正確な480MHz——しかしAP数=0（deaf）**。
+一方、**同一のASP3バイナリ**を「stockのapp_main先頭で即ハンドオフ」（stock標準ブート列のみ実行、WiFi/PHY/NVS未実行）で起動すると**AP 20-25検出**（実施29、再現多数）。
+
+差分探索の消尽状況：
+- 同一ソフトウェア（冷間 vs ハンドオフ後）で広域11ブロックMMIO差分→19語まで縮小→全て既知の非因果カテゴリに帰属（実施35）。esp_clk_init/esp_clk_tree_initializeの静的効果4候補（RTC_FAST源・RTC_SLOW較正値LP_AON_STORE1・PMU HP_MODEM/HP_SLEEPバンク）は全て移植・JTAG適用確認の上で因果棄却。
+- 実施36（実行中）：同じ同一ソフトウェア差分をregi2c全block（未公開0x63/0x68/0x6b含む）へ拡張中。
+- 実施30の二分探索：RXキーは「stock appの`esp_clk_tree_initialize()`+`esp_clk_init()`実行」を境に確立される（P1=前:RX死/P2=後:RX生存）——だが上記のとおり静的効果は全部移植しても冷間は0APのまま。
+
+# 相談したいこと（仮説の評価と判別設計）
+
+## H1（本命候補）：「XTAL周波数の信念」の残存
+実施34の発見はROMが**XTAL=40MHzと信じて**BBPLLを較正していたことを意味する。C5は40/48MHz両対応でXTAL周波数はランタイム値（`rtc_clk_xtal_freq_get()`、`esp_hw_support/port/esp32c5/rtc_clk.c:505`）。
+**PHY/WiFi blobはRFシンセサイザのチャンネルLO周波数計算・TSF/タイミング換算にXTAL周波数を使うはず**——blobが参照する「XTAL周波数の信念」が冷間ASP3では40MHzのまま（stockブート列は48MHzへ更新済み）なら、LOが約20%ずれて全チャンネルでdeaf（TXも周波数外＝内部的には正常動作に見える）という現症状を完全に説明できる。
+質問：
+- C5でXTAL周波数の「信念」はどこに保存されるか（レジスタ？LP_AON/RTC store？ROM .dataのグローバル？`clk_ll_xtal_load_freq_mhz`系？）。`rtc_clk_xtal_freq_get`/`_update`の実体とブート列での更新箇所を`file:line`で。
+- **PHY blobがXTAL周波数をどう取得するか**（`phy_get_xtal_freq`類のシンボル、ROM関数`ets_get_xtal_freq`、g_phyFuns経由等）。libphy.aのundefinedシンボルから特定できるか。
+- 冷間ASP3でこの値が40のままかを確認する最小のJTAG読み方。
+
+## H2（一般化）：ROM .data/.bssグローバルの系譜依存
+C6調査で実証済みの前例がある：ROMの`s_ticks_per_us`をASP3が更新し忘れ、blob内の全遅延が1/3になっていた（C6実施48）。同じクラス——**stockブート列がROM/SRAMグローバルを更新し、blobがそれを消費する**——は、MMIOにもregi2cにも映らず、ハンドオフでは（stockの値がSRAMに残るので）正しく動く。現症状の不可視性と完全に整合する。
+質問：`esp32c5.rom.ld`とlibphy.a/libpp.aのundefinedシンボルから、**blobが消費しstockブート列が更新するROMグローバル**の候補を列挙してほしい（xtal freq・ticks_per_us・RTC較正値・dbias系・その他）。
+また、判別実験として「**冷間 vs ハンドオフ後で、ROM .data/.bss相当のSRAM領域（例：0x4085f000〜0x40860000等、正確な範囲はrom.ldから）を丸ごとダンプ・diff**」は筋が良いか？（我々の同一ソフトウェア差分はMMIOブロックのみでSRAMは未比較——盲点だった可能性）
+
+## H3：それでも残る候補
+H1/H2で説明できない場合に残る候補（esp_clk_init内の過渡効果等）があれば。
+
+## 批判
+実施30の「RXキー=esp_clk_tree_initialize+esp_clk_init」と実施35の「その静的効果は全部移植しても駄目」の間の矛盾の解き方——H1/H2なら「これらの関数がグローバル/信念を更新する」ことで整合するか、それとも別の見落としがあるか。
+
+回答は「H1の評価と具体的な保存場所・消費経路（file:line）」「H2の候補列挙とSRAM diff実験の設計」「H3」「批判と最小判別実験の優先順位」の構成で。
+
+warning: Codex's Linux sandbox uses bubblewrap and needs access to create user namespaces.
+codex
+まず既存ログとローカルのリンカ/IDF参照を読み、H1/H2の「保存場所」「参照経路」「見えない差分」を切り分けます。編集は行わず、根拠になる行番号とシンボルだけ拾います。
+codex
+この環境では通常のシェル起動が `bwrap` のネットワーク名前空間初期化で失敗しています。権限昇格は使えない設定なので、まず `login=false` の最小コマンドで読めるか確認します。
+codex
+シェルが起動できないため、MCP側にワークスペース資源が公開されているかだけ確認します。なければ、公開ESP-IDFソースと既知のローカルパス名から推論したうえで、読み取り不能だった点を明示します。
+mcp: codex/list_mcp_resources started
+mcp: codex/list_mcp_resources (completed)
+web search: 
+web search: site:github.com/espressif/esp-idf esp32c5 rtc_clk_xtal_freq_get rtc_clk.c
+web search: 
+web search: github espressif esp-idf components esp_hw_support port esp32c5 rtc_clk.c rtc_clk_xtal_freq_get
+web search: 
+web search: https://raw.githubusercontent.com/espressif/esp-idf/master/components/esp_hw_support/port/esp32c5/rtc_clk.c
+web search: 
+web search: https://github.com/espressif/esp-idf/blob/master/components/esp_hw_support/port/esp32c5/rtc_clk.c
+web search: 
+web search: "rtc_clk_xtal_freq_get" "esp32c5"
+web search: 
+web search: "rtc_clk_xtal_freq_get" "esp-idf"
+web search: 
+web search: Espressif ESP-IDF rtc_clk_xtal_freq_get
+web search: 
+web search: https://api.github.com/repos/espressif/esp-idf/contents/components/esp_hw_support/port/esp32c5/rtc_clk.c?ref=master
+web search: 
+web search: api.github.com/repos/espressif/esp-idf/contents/components/esp_hw_support/port/esp32c5/rtc_clk.c
+web search: 
+web search: "components/esp_hw_support/port/esp32c5/rtc_clk.c"
+codex
+ワークスペースファイルを直接読む経路が塞がっているため、GitHub系コネクタでESP-IDFの該当ソースを読めるか確認します。目的は一般検索ではなく、公式リポジトリの行番号を取ることです。
+codex
+公式 `espressif/esp-idf` から `v6.1-beta1` ref で該当ファイルを取得します。ローカルの分岐差分は見られないため、回答ではこの制約を明記します。
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (failed)
+web search: 
+web search: https://github.com/espressif/esp-idf/tree/v6.1-beta1/components/hal/esp32c5/include/hal
+codex
+ファイル単体取得は使えますが、ディレクトリ列挙・コード検索系のGitHubツールがまだ出ていません。`esp_clk_tree_initialize` と HAL の実体を行番号付きで追うため、検索用ツールを追加で探します。
+mcp: codex_apps/github.fetch started
+mcp: codex_apps/github.fetch (failed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+codex
+ここまでで、C5では「XTAL周波数」はROMグローバルではなく `PCR.sysclk_conf.clk_xtal_freq` を読む経路が強いことが見えています。次に、そのレジスタの実アドレス/ビットとROM/PHY未定義シンボル候補を絞ります。
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (failed)
+web search: 
+web search: "phy_get_xtal_freq" "libphy.a"
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+codex
+`libphy.a`/`libpp.a` の `nm -u` はこの実行環境では直接走らせられません。代わりにESP-IDF公開ソースの `esp_private/phy.h` とROM linker scriptから、実際にblob/API境界に出ているシンボルを拾って候補化します。
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (failed)
+codex
+次はboot列です。`esp_clk_tree_initialize()` と `esp_clk_init()` がどこから呼ばれるか、`startup.c`/`startup_funcs.c` の順序を確認します。
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+codex
+`cpu_start.c` に実際の呼び出し順がありそうなので、後半も確認します。
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+codex
+SRAM diffの対象範囲は、ROM linker scriptだけでなくIDFのmemory layoutで「アプリが使う/予約する」境界を見る必要があります。C5の `memory.ld.in` とROMスタック定義を確認します。
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (completed)
+codex
+bootloader側は `bootloader_clock_configure()` から `rtc_clk_init()` に入っています。BBPLL設定で `rtc_clk_xtal_freq_get()` を使う経路を確認します。
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (failed)
+mcp: codex_apps/github.fetch_file (failed)
+codex
+`rtc_clk_init()` の定義ファイルがターゲット別CMake側に分かれているため、portサブディレクトリのCMakeから実体名を確認します。
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+mcp: codex_apps/github.fetch_file started
+mcp: codex_apps/github.fetch_file (completed)
+context compacted
+codex
+前提として、この環境ではローカルファイル読み取り用の shell が `bwrap` エラーで起動できなかったため、根拠は主に公式 `espressif/esp-idf@v6.1-beta1` の該当箇所です。ローカル branch の差分は直接確認できていません。
+
+**H1の評価**
+H1はかなり有力です。ただし C5 では「XTAL周波数の信念」は、通常の IDF が RAM へ書く値ではなく、PCR の RO フィールドを読む設計に見えます。
+
+根拠:
+
+- `esp_hw_support/port/esp32c5/rtc_clk.c:504` `rtc_clk_xtal_freq_get()` は `clk_ll_xtal_get_freq_mhz()` を読むだけです。
+- `esp_hal_clock/esp32c5/include/hal/clk_tree_ll.h:217` 付近で、`PCR_CLK_XTAL_FREQ` は `EFUSE_XTAL_48M_SEL` に基づく値、とコメントされています。
+- 同 `clk_tree_ll.h:224` 付近で `clk_ll_xtal_get_freq_mhz()` は `PCR.sysclk_conf.clk_xtal_freq` を返します。
+- `soc/esp32c5/register/soc/pcr_reg.h:1900` 付近: `PCR_SYSCLK_CONF_REG = DR_REG_PCR_BASE + 0x110`
+- `pcr_reg.h:1929` 付近: `PCR_CLK_XTAL_FREQ` は bits `[30:24]`、reset/default は `40`
+- `soc/esp32c5/register/soc/reg_base.h:50` 付近: `DR_REG_PCR_BASE = 0x60096000`
+
+したがって最小 JTAG 確認はこれです。
+
+```text
+mdw 0x60096110 1
+xtal_mhz = (word >> 24) & 0x7f
+期待値: 48なら 0x30、40なら 0x28
+```
+
+eFuse 側も同時に見てください。
+
+- `soc/esp32c5/register/soc/efuse_reg.h:720` 付近: `EFUSE_RD_REPEAT_DATA4_REG = DR_REG_EFUSE_BASE + 0x40`
+- `efuse_reg.h:751` 付近: `EFUSE_XTAL_48M_SEL` は bits `[11:9]`
+- `soc/esp32c5/register/soc/reg_base.h` より `DR_REG_EFUSE_BASE = 0x600B4800`
+
+```text
+mdw 0x600B4840 1
+xtal_48m_sel = (word >> 9) & 7
+popcount(xtal_48m_sel) が奇数なら 48MHz、偶数なら 40MHz
+```
+
+もし冷間 Direct Boot で `PCR_CLK_XTAL_FREQ=40`、stock handoff 後で `48` なら、H1はほぼ本命です。BBPLLだけを48MHzプロファイルで直しても、PHY/blob が `rtc_clk_xtal_freq_get()` 系を読んでいれば、RF LO計算はまだ40MHz前提になり得ます。
+
+消費経路はソースだけでは確定できませんが、候補は以下です。
+
+- ROM: `esp_rom/esp32c5/ld/esp32c5.rom.ld:244` 付近  
+  `ets_clk_get_xtal_freq = 0x40000700`
+- HAL/IDF: `rtc_clk_xtal_freq_get()` → `clk_ll_xtal_get_freq_mhz()`
+- PHY blob 境界: `esp_phy/src/phy_init.c:940` 付近で `register_chipv7_phy(init_data, cal_data, calibration_mode)` を呼び、以後 blob 内
+
+未確認なので、次は `libphy.a` / `libpp.a` の undefined を見るのが最短です。
+
+```sh
+riscv32-esp-elf-nm -u -A \
+  /home/honda/tools/esp-idf-v6.1/components/esp_phy/lib/esp32c5/libphy.a \
+  /home/honda/tools/esp-idf-v6.1/components/esp_wifi/lib/esp32c5/libpp.a |
+  egrep -i 'xtal|clk|freq|tick|delay|ets_|rom|rtc'
+```
+
+ここに `rtc_clk_xtal_freq_get`、`ets_clk_get_xtal_freq`、`clk_hal_xtal_get_freq_mhz` などが出れば消費経路が固まります。
+
+**H2の候補とSRAM diff**
+H2も筋が良いです。C6の `s_ticks_per_us` 前例と同じく、「MMIO/regi2cには出ないが handoff ではSRAMに残る」系です。
+
+候補:
+
+- ROM CPU ticks  
+  `esp_rom/esp32c5/ld/esp32c5.rom.ld:18` 付近  
+  `ets_delay_us = 0x4000003c`  
+  `ets_get_cpu_frequency = 0x40000040`  
+  `ets_update_cpu_frequency = 0x40000044`  
+  `esp_rom/esp32c5/ld/esp32c5.rom.api.ld:61` 付近で `esp_rom_get_cpu_ticks_per_us` / `esp_rom_set_cpu_ticks_per_us` に対応。  
+  `esp_hw_support/port/esp32c5/rtc_clk.c:170`、`:181`、`:210`、`:235` 付近で CPU clock 切替時に `esp_rom_set_cpu_ticks_per_us()` が呼ばれます。
+- ROM xtal 関数  
+  `esp32c5.rom.ld:244` 付近の `ets_clk_get_xtal_freq = 0x40000700`
+- ROM top SRAM data  
+  `esp32c5.rom.ld:55` 付近: `ets_ops_table_ptr = 0x4085fff8`, `g_saved_pc = 0x4085fffc`  
+  `esp32c5.rom.ld:230` 付近: `rom_cache_internal_table_ptr = 0x4085ffc8`, `rom_cache_op_cb = 0x4085ffcc`  
+  `esp32c5.rom.ld:165` 付近: `rom_spiflash_legacy_data = 0x4085ffec`, `rom_spiflash_legacy_funcs = 0x4085fff0`, `g_flash_guard_ops = 0x4085fff4`
+- IDF側の通常 `.bss` グローバル  
+  `esp_hw_support/port/esp32c5/esp_clk_tree.c:80` 付近: `s_pll_src_cg_ref_cnt[]`, `esp_clk_tree_initialized`  
+  `esp_hw_support/port/esp32c5/rtc_clk.c:29` 付近: `s_cur_pll_freq`, `s_bbpll_digi_consumers_ref_count`
+
+SRAM丸ごと diff は有効です。おすすめ範囲は段階的に:
+
+```text
+最小: 0x4085f000..0x40860000
+推奨: 0x4085c000..0x40860000
+広め: 0x4084e000..0x40860000
+```
+
+根拠:
+
+- `soc/esp32c5/include/soc/soc.h:165` 付近: DRAM/SRAM は `0x40800000..0x40860000`
+- `soc.h:199` 付近: ROM boot stack top `0x4085e5a0`、size `0x2000`
+- `esp_system/ld/esp32c5/ld.hp_mem_defs:8` 付近: app 側 SRAM end は `0x4084E5A0`
+
+比較点は「同一バイナリ・同一停止点」が重要です。まず `esp_wifi_init` 直前、次に可能なら `register_chipv7_phy()` 直前。diff結果をそのまま全部移植するのではなく、ROM/clock/PHYに関係する安定差分だけを個別書き込みで検証するのが安全です。
+
+**H3**
+H1/H2で外れるなら、残る候補は「最終MMIO値ではなく過渡順序・ソフト状態」です。
+
+特に:
+
+- `esp_clk_tree_initialize()` の refcount / initialized 状態  
+  `esp_clk_tree.c:85` 付近で現在のPLLソースに応じて refcount を立て、未使用PLL分周クロックを止めます。`esp_clk_tree.c:135` 付近では未初期化なら clock source enable が early return します。
+- PMU/ICGの force-update 系  
+  `esp_hw_support/port/esp32c5/rtc_clk_init.c:27` 付近で MODEM_APB / I2C_MST / LP_APB の ICG map を触り、update をトリガします。
+- dbias/PMU state  
+  `rtc_clk_init.c:73` 付近で HP/LP dbias を PMU に渡します。
+- eFuse cache/latch  
+  eFuseの実値は48でも、Direct Bootで PCR 側へ反映されていないなら、これはH1の下位原因です。
+
+RTC slow calibration だけで全チャンネル 0 AP は説明しにくいです。LOが20%ずれるH1の方が症状との整合性は高いです。
+
+**批判と優先順位**
+実施30と実施35は矛盾しません。`esp_clk_tree_initialize()+esp_clk_init()` はMMIO最終値だけでなく、ROM ticks、IDF private statics、PCR/eFuse由来の読み値、clock tree refcount を成立させます。実施35がMMIO静的効果だけを移植したなら、SRAM上の「信念」はまだ抜けています。
+
+最小判別の優先順位は次です。
+
+1. 冷間/handoffで `0x60096110` の `PCR_CLK_XTAL_FREQ` を比較  
+2. 同時に `0x600B4840` の `EFUSE_XTAL_48M_SEL` を比較  
+3. `libphy.a` / `libpp.a` の undefined symbol から xtal/tick 消費経路を確認  
+4. `esp_wifi_init` 直前で `0x4085c000..0x40860000` を冷間/handoff diff  
+5. app ELF/map で `esp_clk_tree_initialized`, `s_pll_src_cg_ref_cnt`, `s_cur_pll_freq` の実アドレスを特定して個別比較
+
+まずは `PCR_CLK_XTAL_FREQ` が40か48かです。ここが40なら、BBPLL修正後も PHY が40MHz XTAL前提で動いている、という一本筋で説明できます。
+tokens used
+291,475
+前提として、この環境ではローカルファイル読み取り用の shell が `bwrap` エラーで起動できなかったため、根拠は主に公式 `espressif/esp-idf@v6.1-beta1` の該当箇所です。ローカル branch の差分は直接確認できていません。
+
+**H1の評価**
+H1はかなり有力です。ただし C5 では「XTAL周波数の信念」は、通常の IDF が RAM へ書く値ではなく、PCR の RO フィールドを読む設計に見えます。
+
+根拠:
+
+- `esp_hw_support/port/esp32c5/rtc_clk.c:504` `rtc_clk_xtal_freq_get()` は `clk_ll_xtal_get_freq_mhz()` を読むだけです。
+- `esp_hal_clock/esp32c5/include/hal/clk_tree_ll.h:217` 付近で、`PCR_CLK_XTAL_FREQ` は `EFUSE_XTAL_48M_SEL` に基づく値、とコメントされています。
+- 同 `clk_tree_ll.h:224` 付近で `clk_ll_xtal_get_freq_mhz()` は `PCR.sysclk_conf.clk_xtal_freq` を返します。
+- `soc/esp32c5/register/soc/pcr_reg.h:1900` 付近: `PCR_SYSCLK_CONF_REG = DR_REG_PCR_BASE + 0x110`
+- `pcr_reg.h:1929` 付近: `PCR_CLK_XTAL_FREQ` は bits `[30:24]`、reset/default は `40`
+- `soc/esp32c5/register/soc/reg_base.h:50` 付近: `DR_REG_PCR_BASE = 0x60096000`
+
+したがって最小 JTAG 確認はこれです。
+
+```text
+mdw 0x60096110 1
+xtal_mhz = (word >> 24) & 0x7f
+期待値: 48なら 0x30、40なら 0x28
+```
+
+eFuse 側も同時に見てください。
+
+- `soc/esp32c5/register/soc/efuse_reg.h:720` 付近: `EFUSE_RD_REPEAT_DATA4_REG = DR_REG_EFUSE_BASE + 0x40`
+- `efuse_reg.h:751` 付近: `EFUSE_XTAL_48M_SEL` は bits `[11:9]`
+- `soc/esp32c5/register/soc/reg_base.h` より `DR_REG_EFUSE_BASE = 0x600B4800`
+
+```text
+mdw 0x600B4840 1
+xtal_48m_sel = (word >> 9) & 7
+popcount(xtal_48m_sel) が奇数なら 48MHz、偶数なら 40MHz
+```
+
+もし冷間 Direct Boot で `PCR_CLK_XTAL_FREQ=40`、stock handoff 後で `48` なら、H1はほぼ本命です。BBPLLだけを48MHzプロファイルで直しても、PHY/blob が `rtc_clk_xtal_freq_get()` 系を読んでいれば、RF LO計算はまだ40MHz前提になり得ます。
+
+消費経路はソースだけでは確定できませんが、候補は以下です。
+
+- ROM: `esp_rom/esp32c5/ld/esp32c5.rom.ld:244` 付近  
+  `ets_clk_get_xtal_freq = 0x40000700`
+- HAL/IDF: `rtc_clk_xtal_freq_get()` → `clk_ll_xtal_get_freq_mhz()`
+- PHY blob 境界: `esp_phy/src/phy_init.c:940` 付近で `register_chipv7_phy(init_data, cal_data, calibration_mode)` を呼び、以後 blob 内
+
+未確認なので、次は `libphy.a` / `libpp.a` の undefined を見るのが最短です。
+
+```sh
+riscv32-esp-elf-nm -u -A \
+  /home/honda/tools/esp-idf-v6.1/components/esp_phy/lib/esp32c5/libphy.a \
+  /home/honda/tools/esp-idf-v6.1/components/esp_wifi/lib/esp32c5/libpp.a |
+  egrep -i 'xtal|clk|freq|tick|delay|ets_|rom|rtc'
+```
+
+ここに `rtc_clk_xtal_freq_get`、`ets_clk_get_xtal_freq`、`clk_hal_xtal_get_freq_mhz` などが出れば消費経路が固まります。
+
+**H2の候補とSRAM diff**
+H2も筋が良いです。C6の `s_ticks_per_us` 前例と同じく、「MMIO/regi2cには出ないが handoff ではSRAMに残る」系です。
+
+候補:
+
+- ROM CPU ticks  
+  `esp_rom/esp32c5/ld/esp32c5.rom.ld:18` 付近  
+  `ets_delay_us = 0x4000003c`  
+  `ets_get_cpu_frequency = 0x40000040`  
+  `ets_update_cpu_frequency = 0x40000044`  
+  `esp_rom/esp32c5/ld/esp32c5.rom.api.ld:61` 付近で `esp_rom_get_cpu_ticks_per_us` / `esp_rom_set_cpu_ticks_per_us` に対応。  
+  `esp_hw_support/port/esp32c5/rtc_clk.c:170`、`:181`、`:210`、`:235` 付近で CPU clock 切替時に `esp_rom_set_cpu_ticks_per_us()` が呼ばれます。
+- ROM xtal 関数  
+  `esp32c5.rom.ld:244` 付近の `ets_clk_get_xtal_freq = 0x40000700`
+- ROM top SRAM data  
+  `esp32c5.rom.ld:55` 付近: `ets_ops_table_ptr = 0x4085fff8`, `g_saved_pc = 0x4085fffc`  
+  `esp32c5.rom.ld:230` 付近: `rom_cache_internal_table_ptr = 0x4085ffc8`, `rom_cache_op_cb = 0x4085ffcc`  
+  `esp32c5.rom.ld:165` 付近: `rom_spiflash_legacy_data = 0x4085ffec`, `rom_spiflash_legacy_funcs = 0x4085fff0`, `g_flash_guard_ops = 0x4085fff4`
+- IDF側の通常 `.bss` グローバル  
+  `esp_hw_support/port/esp32c5/esp_clk_tree.c:80` 付近: `s_pll_src_cg_ref_cnt[]`, `esp_clk_tree_initialized`  
+  `esp_hw_support/port/esp32c5/rtc_clk.c:29` 付近: `s_cur_pll_freq`, `s_bbpll_digi_consumers_ref_count`
+
+SRAM丸ごと diff は有効です。おすすめ範囲は段階的に:
+
+```text
+最小: 0x4085f000..0x40860000
+推奨: 0x4085c000..0x40860000
+広め: 0x4084e000..0x40860000
+```
+
+根拠:
+
+- `soc/esp32c5/include/soc/soc.h:165` 付近: DRAM/SRAM は `0x40800000..0x40860000`
+- `soc.h:199` 付近: ROM boot stack top `0x4085e5a0`、size `0x2000`
+- `esp_system/ld/esp32c5/ld.hp_mem_defs:8` 付近: app 側 SRAM end は `0x4084E5A0`
+
+比較点は「同一バイナリ・同一停止点」が重要です。まず `esp_wifi_init` 直前、次に可能なら `register_chipv7_phy()` 直前。diff結果をそのまま全部移植するのではなく、ROM/clock/PHYに関係する安定差分だけを個別書き込みで検証するのが安全です。
+
+**H3**
+H1/H2で外れるなら、残る候補は「最終MMIO値ではなく過渡順序・ソフト状態」です。
+
+特に:
+
+- `esp_clk_tree_initialize()` の refcount / initialized 状態  
+  `esp_clk_tree.c:85` 付近で現在のPLLソースに応じて refcount を立て、未使用PLL分周クロックを止めます。`esp_clk_tree.c:135` 付近では未初期化なら clock source enable が early return します。
+- PMU/ICGの force-update 系  
+  `esp_hw_support/port/esp32c5/rtc_clk_init.c:27` 付近で MODEM_APB / I2C_MST / LP_APB の ICG map を触り、update をトリガします。
+- dbias/PMU state  
+  `rtc_clk_init.c:73` 付近で HP/LP dbias を PMU に渡します。
+- eFuse cache/latch  
+  eFuseの実値は48でも、Direct Bootで PCR 側へ反映されていないなら、これはH1の下位原因です。
+
+RTC slow calibration だけで全チャンネル 0 AP は説明しにくいです。LOが20%ずれるH1の方が症状との整合性は高いです。
+
+**批判と優先順位**
+実施30と実施35は矛盾しません。`esp_clk_tree_initialize()+esp_clk_init()` はMMIO最終値だけでなく、ROM ticks、IDF private statics、PCR/eFuse由来の読み値、clock tree refcount を成立させます。実施35がMMIO静的効果だけを移植したなら、SRAM上の「信念」はまだ抜けています。
+
+最小判別の優先順位は次です。
+
+1. 冷間/handoffで `0x60096110` の `PCR_CLK_XTAL_FREQ` を比較  
+2. 同時に `0x600B4840` の `EFUSE_XTAL_48M_SEL` を比較  
+3. `libphy.a` / `libpp.a` の undefined symbol から xtal/tick 消費経路を確認  
+4. `esp_wifi_init` 直前で `0x4085c000..0x40860000` を冷間/handoff diff  
+5. app ELF/map で `esp_clk_tree_initialized`, `s_pll_src_cg_ref_cnt`, `s_cur_pll_freq` の実アドレスを特定して個別比較
+
+まずは `PCR_CLK_XTAL_FREQ` が40か48かです。ここが40なら、BBPLL修正後も PHY が40MHz XTAL前提で動いている、という一本筋で説明できます。
