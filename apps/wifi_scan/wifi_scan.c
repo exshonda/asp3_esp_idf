@@ -141,6 +141,192 @@ r38_rxinstr_cyclic_handler(EXINF exinf)
 }
 #endif /* ESP32C5_R38_RXINSTR */
 
+#ifdef ESP32C5_R39_SELFHANDOFF
+/*
+ *  【実施39】ASP3→ASP3セルフハンドオフ（外部AI回答Q3判別＋候補1前哨）。
+ *
+ *  stockコードを一切経由せず，冷間Direct BootしたASP3自身から，
+ *  flashオフセット0x200000に置いたASP3ゲスト（実施38のハンドオフ
+ *  ゲストと同一バイナリ＝HANDOFF_SKIP_CLOCK_INIT+RXINSTR）へ，
+ *  実施26/27/29のstockホスト版と同一の機構（割込み全マスク→
+ *  ROMインターフェースWiFiポインタ域[0x4085fb80,0x4085ffc8)の
+ *  ゼロクリア→MMU全unmap→0x42000000→0x200000の再マップ→cache
+ *  invalidate→0x42000008へ直接ジャンプ）で制御を渡す。
+ *
+ *  判別（事前固定）：2周目ASP3のscanでAP>0なら「stockブート列は
+ *  無関係＝POR後2回目のソフト起動（遷移の履歴）が鍵」（候補1=過渡
+ *  ラッチ仮説を強く支持）。0APのままなら「stockブート列固有の何か」。
+ *
+ *  stockホスト版（スクラッチstock_scan/main/asp3_jump.c）との唯一の
+ *  機構差分：ASP3はXIP（全コードがflash 0x42000000域で実行）のため，
+ *  MMU unmap後に踏むコードをflashに置けない。そこでMMU操作＋cache
+ *  invalidate＋ジャンプの最終段だけを.dataセクション（RAM常駐，
+ *  start.Sが起動時にコピー済み）の自己完結スタブに置く。スタブは
+ *  ROM常駐関数（Cache_Invalidate_Addr=0x40000650）とMMIOしか参照
+ *  しない（文字列リテラル等のflash .rodata参照を持たない）。
+ *
+ *  ビルド時 ESP32C5_R39_SELFHANDOFF=1：起動直後（wifi完全未実行）に
+ *  ジャンプ＝実施29のstock app_main先頭ジャンプと対照が揃う変種。
+ *  =2：1周目でフルwifi初期化＋初回scan完走後にジャンプ＝実施26の
+ *  stock scan完走後ジャンプと対照が揃う変種。既定（未定義）では
+ *  完全に不活性。
+ */
+#define R39_GUEST_PADDR    0x00200000U
+#define R39_GUEST_VADDR    0x42000000U
+#define R39_GUEST_PAGES    16U            /* 16×64KB＝1MB（640KBゲストに十分） */
+#define R39_ENTRY_VADDR    0x42000008U    /* Direct Bootエントリ（実施26と同一） */
+
+/*
+ *  C5のflash MMU：SPIMEM0（DR_REG_SPIMEM0_BASE=0x60002000）の
+ *  ITEM_INDEX(+0x380)/ITEM_CONTENT(+0x37C)ペア経由の間接アクセス。
+ *  512エントリ×64KBページ・VALID=bit10・FLASHターゲット=0
+ *  （hal/components/hal/esp32c5/include/hal/mmu_ll.h・
+ *  soc/ext_mem_defs.h・spi_mem_c_reg.hより。値はstockホスト版が
+ *  実機で使ったmmu_hal_unmap_all/map_regionの実体と同一）。
+ */
+#define R39_MMU_ITEM_INDEX_REG    (*(volatile uint32_t *)0x60002380U)
+#define R39_MMU_ITEM_CONTENT_REG  (*(volatile uint32_t *)0x6000237CU)
+#define R39_MMU_ENTRY_NUM  512U
+#define R39_MMU_VALID      0x00000400U    /* SOC_MMU_VALID=BIT(10) */
+
+/*
+ *  実施27で確立したROMインターフェースWiFiポインタ域（stale登録
+ *  ポインタのゼロクリア範囲）。上限0x4085ffc8はcache/ets_ops等の
+ *  ROM OSポインタ（ホスト自身が使用中）を保持するため（実施27）。
+ */
+#define R39_ROMIF_WIFI_PTRS_START  0x4085fb80U
+#define R39_ROMIF_WIFI_PTRS_END    0x4085ffc8U   /* exclusive */
+
+extern int Cache_Invalidate_Addr(uint32_t vaddr, uint32_t size);  /* ROM 0x40000650 */
+
+typedef void (*r39_entry_fn)(void);
+
+/*
+ *  ジャンプ呼出しをこのvolatileフラグでガードする（実行時は常に1）。
+ *  ガード無しだとGCCがr39_jump_stub末尾の無限ループからnoreturnを
+ *  推論し，main_taskのジャンプ呼出し以降（esp_wifi_init〜scan一式）を
+ *  デッドコード除去→wifi blob全体がGCされ，ホストイメージが
+ *  実施38冷間ビルドと別物になってしまう（実測：FLASH 0.43%まで縮小）。
+ *  ホストは「r38冷間ビルド＋ジャンプパス」の最小差分に保つ。
+ */
+static volatile uint_t r39_arm = 1U;
+
+static void __attribute__((section(".data.r39_jump_stub"), noinline, aligned(4)))
+r39_jump_stub(void)
+{
+	uint32_t	i;
+
+	/* mmu_ll_unmap_all相当：全512エントリを無効化 */
+	for (i = 0U; i < R39_MMU_ENTRY_NUM; i++) {
+		R39_MMU_ITEM_INDEX_REG = i;
+		R39_MMU_ITEM_CONTENT_REG = 0U;        /* SOC_MMU_INVALID */
+	}
+	/*
+	 *  mmu_hal_map_region相当：vaddr 0x42000000〜（laddr=0→entry 0〜）
+	 *  にpaddr 0x200000〜を16ページマップ。
+	 */
+	for (i = 0U; i < R39_GUEST_PAGES; i++) {
+		R39_MMU_ITEM_INDEX_REG = i;
+		R39_MMU_ITEM_CONTENT_REG = ((R39_GUEST_PADDR >> 16) + i) | R39_MMU_VALID;
+	}
+	(void) Cache_Invalidate_Addr(R39_GUEST_VADDR, R39_GUEST_PAGES << 16);
+	((r39_entry_fn)R39_ENTRY_VADDR)();
+	/* 戻ってくるはずがない */
+	for (;;) {
+	}
+}
+
+/*
+ *  【実施39・診断】Espressif PMA CSR（0xBC0〜/0xBD0〜）のダンプ。
+ *  Direct BootではROMが設定したPMAエントリが残り，SRAM(0x40800000〜)
+ *  からの命令フェッチがInstruction access faultになることが実機で
+ *  判明（r39_jump_stub先頭pc=0x40800004でフォルト）——どのエントリが
+ *  阻んでいるかの特定用。
+ */
+static void
+r39_pma_dump(void)
+{
+	uint32_t	cfg[16], addr[16];
+
+	/* CSR番号は即値必須のため個別展開 */
+	Asm("csrr %0, 0xBC0" : "=r"(cfg[0]));  Asm("csrr %0, 0xBD0" : "=r"(addr[0]));
+	Asm("csrr %0, 0xBC1" : "=r"(cfg[1]));  Asm("csrr %0, 0xBD1" : "=r"(addr[1]));
+	Asm("csrr %0, 0xBC2" : "=r"(cfg[2]));  Asm("csrr %0, 0xBD2" : "=r"(addr[2]));
+	Asm("csrr %0, 0xBC3" : "=r"(cfg[3]));  Asm("csrr %0, 0xBD3" : "=r"(addr[3]));
+	Asm("csrr %0, 0xBC4" : "=r"(cfg[4]));  Asm("csrr %0, 0xBD4" : "=r"(addr[4]));
+	Asm("csrr %0, 0xBC5" : "=r"(cfg[5]));  Asm("csrr %0, 0xBD5" : "=r"(addr[5]));
+	Asm("csrr %0, 0xBC6" : "=r"(cfg[6]));  Asm("csrr %0, 0xBD6" : "=r"(addr[6]));
+	Asm("csrr %0, 0xBC7" : "=r"(cfg[7]));  Asm("csrr %0, 0xBD7" : "=r"(addr[7]));
+	Asm("csrr %0, 0xBC8" : "=r"(cfg[8]));  Asm("csrr %0, 0xBD8" : "=r"(addr[8]));
+	Asm("csrr %0, 0xBC9" : "=r"(cfg[9]));  Asm("csrr %0, 0xBD9" : "=r"(addr[9]));
+	Asm("csrr %0, 0xBCA" : "=r"(cfg[10])); Asm("csrr %0, 0xBDA" : "=r"(addr[10]));
+	Asm("csrr %0, 0xBCB" : "=r"(cfg[11])); Asm("csrr %0, 0xBDB" : "=r"(addr[11]));
+	Asm("csrr %0, 0xBCC" : "=r"(cfg[12])); Asm("csrr %0, 0xBDC" : "=r"(addr[12]));
+	Asm("csrr %0, 0xBCD" : "=r"(cfg[13])); Asm("csrr %0, 0xBDD" : "=r"(addr[13]));
+	Asm("csrr %0, 0xBCE" : "=r"(cfg[14])); Asm("csrr %0, 0xBDE" : "=r"(addr[14]));
+	Asm("csrr %0, 0xBCF" : "=r"(cfg[15])); Asm("csrr %0, 0xBDF" : "=r"(addr[15]));
+	{
+		int_t	i;
+		for (i = 0; i < 16; i += 2) {
+			syslog(LOG_NOTICE,
+				   "R39PMA[%d]: cfg=%08x addr=%08x / cfg=%08x addr=%08x",
+				   i, cfg[i], addr[i], cfg[i + 1], addr[i + 1]);
+			(void) tslp_tsk(150000);	/* logtaskバースト取りこぼし回避 */
+		}
+	}
+}
+
+static void
+r39_selfhandoff_now(const char *tag)
+{
+	volatile uint32_t	*p;
+
+	/*
+	 *  証拠プリント：ジャンプ直前のg_osi_funcs_p(0x4085ff60)／
+	 *  g_coa_funcs_p(0x4085ffb4)の生値（stockホスト版と同一の観測点。
+	 *  =2変種では1周目ASP3自身の登録値＝非ゼロ，=1変種ではゼロの
+	 *  はず）。
+	 */
+	r39_pma_dump();
+
+	/*
+	 *  【実機実測（本ラウンド）】Direct BootではROMが残したPMAエントリ14
+	 *  （NAPOT, 0x40800000/512KB＝HP SRAM全域, cfg=0xC0000019＝R+W+EN,
+	 *  Xなし, L=0）がSRAMからの命令フェッチを禁じており，RAM常駐スタブの
+	 *  実行が最初の1命令（pc=0x40800004）でInstruction access faultに
+	 *  なる。L=0（非ロック）なのでX付与で解除できる（cfg=0xC000001D）。
+	 *  stockブート列もcall_start_cpu0の region protection 設定でROMの
+	 *  PMAを自前の設定へ上書きしてIRAM実行を可能にしている——本書換えは
+	 *  その最小等価物（エントリ14へのX付与のみ，範囲・他属性は不変）。
+	 */
+	Asm("csrw 0xBCE, %0" : : "r"(0xC000001DUL));
+	{
+		uint32_t	chk;
+		Asm("csrr %0, 0xBCE" : "=r"(chk));
+		syslog(LOG_NOTICE, "R39: pmacfg14 X-enable -> %08x", chk);
+	}
+
+	syslog(LOG_NOTICE, "R39: self-handoff (%s): g_osi=%08x g_coa=%08x",
+		   tag,
+		   (uint_t)*(volatile uint32_t *)0x4085ff60U,
+		   (uint_t)*(volatile uint32_t *)0x4085ffb4U);
+	syslog(LOG_NOTICE, "R39: jumping to ASP3 guest @0x200000 now");
+	(void) tslp_tsk(500000);	/* logtask→UART FIFOのドレイン待ち */
+
+	/* 割込み全マスク（stockホスト版asp3_jump_now()と同一手順） */
+	Asm("csrw mie, zero");
+	Asm("csrci mstatus, 0x8");
+
+	/* stale登録ポインタ域のゼロクリア（実施27。2周目の再登録を保証） */
+	for (p = (volatile uint32_t *)R39_ROMIF_WIFI_PTRS_START;
+		 p < (volatile uint32_t *)R39_ROMIF_WIFI_PTRS_END; p++) {
+		*p = 0U;
+	}
+
+	r39_jump_stub();
+}
+#endif /* ESP32C5_R39_SELFHANDOFF */
+
 static void
 wifi_event_handler(void *arg, const char *base, int32_t id, void *data)
 {
@@ -162,6 +348,20 @@ main_task(EXINF exinf)
 
 	(void) exinf;
 	(void) get_tid(&main_tskid);
+
+#if defined(ESP32C5_R39_SELFHANDOFF) && (ESP32C5_R39_SELFHANDOFF == 1)
+	/*
+	 *  【実施39・変種1】起動直後（wifi完全未実行）セルフハンドオフ。
+	 *  ASP3のブート列相当（hardware_init_hook＋カーネル起動）のみを
+	 *  1周目として2周目へジャンプする＝実施29のstock app_main先頭
+	 *  ジャンプと対照が揃う。3秒待つのはバナー・R38RX計装数行を
+	 *  1周目ベースラインとしてUARTに出させるため。
+	 */
+	(void) tslp_tsk(3000000);
+	if (r39_arm != 0U) {
+		r39_selfhandoff_now("at-boot");
+	}
+#endif /* ESP32C5_R39_SELFHANDOFF == 1 */
 
 #ifdef TOPPERS_ESP32C6_WIFI
 	/*
@@ -501,6 +701,21 @@ main_task(EXINF exinf)
 	}
 	esp_shim_free(recs);
 	syslog(LOG_NOTICE, "wifi_scan: done");
+
+#if defined(ESP32C5_R39_SELFHANDOFF) && (ESP32C5_R39_SELFHANDOFF == 2)
+	/*
+	 *  【実施39・変種2】フルwifi初期化＋初回scan完走後のセルフ
+	 *  ハンドオフ＝実施26のstock scan完走後ジャンプと対照が揃う。
+	 *  ジャンプ前にpromiscuousを止め（RXINSTRでALL維持中のため），
+	 *  遷移中のWiFi RX DMA書込みが2周目ゲストのRAMを汚す可能性を
+	 *  下げる（冷間は実測RX皆無だが安全側）。
+	 */
+	(void) esp_wifi_set_promiscuous(false);
+	(void) tslp_tsk(2000000);
+	if (r39_arm != 0U) {
+		r39_selfhandoff_now("post-scan");
+	}
+#endif /* ESP32C5_R39_SELFHANDOFF == 2 */
 
 	/*  DIAGNOSTIC（追記19・一時）：因果検証用の再scanループ．
 	 *  JTAGでRFシンセ(0x6b)のreg2/4/11/13/14をnative値に上書きした後，
