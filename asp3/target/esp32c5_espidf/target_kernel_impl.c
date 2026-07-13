@@ -330,9 +330,7 @@ static void esp32c5_r34_bbpll_configure_480mhz(void);
 static void esp32c5_r34_modem_icg_enable_min(void);
 static void esp32c5_r40_modem_icg_disable_bracket(void);
 #endif /* ESP32C5_R40_CLKREORDER */
-#ifdef ESP32C5_R42_APMFIX
 static void esp32c5_r42_apm_unblock(void);
-#endif /* ESP32C5_R42_APMFIX */
 
 /*
  *  【実施35】esp_clk_init()／esp_clk_tree_initialize()の残余効果の移植
@@ -1008,9 +1006,8 @@ esp32c5_r40_modem_icg_disable_bracket(void)
 }
 #endif /* ESP32C5_R40_CLKREORDER */
 
-#ifdef ESP32C5_R42_APMFIX
 /*
- *  【実施42・候補3の派生発見】APM (Access Permission Management) /
+ *  【実施42で発見・実施43で恒久化】APM (Access Permission Management) /
  *  HP-TEEブロックの因果注入：ソース監査（esp-idf-v6.1
  *  components/bootloader_support/src/bootloader_mem.c の
  *  bootloader_init_mem()）で，stockのAPPスタートアップ（
@@ -1024,7 +1021,7 @@ esp32c5_r40_modem_icg_disable_bracket(void)
  *  を実行することを確認した。ASP3のDirect Bootはstockのスタートアップを
  *  一切経由しないため，これが一度も呼ばれない。
  *
- *  JTAG実測（本ラウンド，2/2冷間ブート再現・handoffと対照）：
+ *  JTAG実測（実施42，2/2冷間ブート再現・handoffと対照）：
  *    冷間：HP_APM_FUNC_CTRL_REG=0x1F（全経路フィルタ有効=ROM/POR既定）,
  *          TEE_M4_MODE_CTRL_REG（マスタ4=MODEM）=3（REE2）,
  *          HP_APM_M1_STATUS_REG=1（許可違反ラッチ），
@@ -1041,42 +1038,79 @@ esp32c5_r40_modem_icg_disable_bracket(void)
  *  レジスタ診断をすり抜けていたが，MODEM自身のDMA的アクセスだけが
  *  ブロックされる，という本症状（TX無・RX無だが完走報告）と整合する。
  *
- *  本関数はbootloader_init_mem()の等価処理をASP3側で再現する（診断用・
- *  既定無効）。hardware_init_hook()末尾（実施41のBOOTHOOKと同じ位置，
- *  esp_wifi_init/PHY較正より前）から呼ぶ。
+ *  本関数はbootloader_init_mem()の等価処理をASP3側で再現する。
+ *  hardware_init_hook()末尾（実施41のBOOTHOOKと同じ位置，esp_wifi_init/
+ *  PHY較正より前）から**無条件に**（診断ガードなしで）呼ぶ——実施43で
+ *  恒久化済み（旧`ESP32C5_R42_APMFIX`ガードは撤去）。詳細は
+ *  docs/c5-bringup.md 実施43。
  */
 #define ESP32C5_R42_TEE_MASTER_BASE     0x60098000U   /* TEE_M0..M31_MODE_CTRL_REG */
 #define ESP32C5_R42_TEE_MASTER_COUNT    32U
+#define ESP32C5_R42_TEE_MASTER_MODEM    4U            /* APM_MASTER_MODEM */
 #define ESP32C5_R42_HP_APM_FUNC_CTRL    0x600990C4U
 #define ESP32C5_R42_HP_APM_M1_STATCLR   0x600990DCU
 #define ESP32C5_R42_LP_APM0_FUNC_CTRL   0x600998C4U
 #define ESP32C5_R42_LP_APM_FUNC_CTRL    0x600B38C4U
 #define ESP32C5_R42_CPU_APM_FUNC_CTRL   0x6009A0C4U
 
+/*
+ *  【実施43・最小サブセット判別実験の結果】実施42のesp32c5_r42_apm_
+ *  unblock()はstockのbootloader_init_mem()が行う2処理――(1)4コント
+ *  ローラ全ての経路フィルタ解除，(2)全32バスマスタのTEEモード昇格――を
+ *  丸ごと再現していた。実機2/2×2変種で判別した結果，**(1)単独でも
+ *  (2)相当（master 4=MODEMのみTEE化）単独でも，それぞれ独立に症状を
+ *  解消するのに十分**（AP検出16-23件・スニファTX検出とも両変種で再現，
+ *  JTAG実測でHP_APM_M1_STATUS=0＝新規例外なしを確認）と判明した。
+ *  機序：HP_APMの許可判定は「経路フィルタが有効」かつ「マスタが非TEE」
+ *  の**論理積**で例外を出す一枚ゲートであり，どちらか一方を外すだけで
+ *  ゲートが開く（両方同時に必要な直列ゲートではない）。恒久実装は
+ *  「stock同等（両方）」を採用する――stockが両方行うのは（コメントに
+ *  ある通り）TEE初期化コードが後段でマスタ単位のセキュリティモードを
+ *  使い分ける前提のためであり，ASP3側でその使い分けを将来使う可能性を
+ *  閉じないための保守的選択。詳細はdocs/c5-bringup.md 実施43。
+ *
+ *  ESP32C5_R43_APM_VARIANT はこの判別実験用の診断フックとして残す
+ *  （既定=3=stock相当，恒久ビルドは常にこの値）。1/2を指定すれば
+ *  当時の判別実験を再現できる。
+ */
+#ifndef ESP32C5_R43_APM_VARIANT
+#define ESP32C5_R43_APM_VARIANT  3
+#endif
+
 static void
 esp32c5_r42_apm_unblock(void)
 {
+#if (ESP32C5_R43_APM_VARIANT == 3)
 	uint32_t	i;
+#endif
 
+#if (ESP32C5_R43_APM_VARIANT == 1) || (ESP32C5_R43_APM_VARIANT == 3)
 	/*  (1) 4コントローラ全ての経路フィルタを解除（stockのapm_hal_
 	 *  enable_ctrl_filter_all(false)相当）  */
 	sil_wrw_mem((void *)ESP32C5_R42_HP_APM_FUNC_CTRL, 0U);
 	sil_wrw_mem((void *)ESP32C5_R42_LP_APM0_FUNC_CTRL, 0U);
 	sil_wrw_mem((void *)ESP32C5_R42_LP_APM_FUNC_CTRL, 0U);
 	sil_wrw_mem((void *)ESP32C5_R42_CPU_APM_FUNC_CTRL, 0U);
+#endif
 
+#if (ESP32C5_R43_APM_VARIANT == 2)
+	/*  (2') master 4 (MODEM) のみをTEEモード(0)へ（最小サブセット候補
+	 *  (b)：フィルタは既定のまま有効,全32マスタではなくMODEMのみ昇格）  */
+	sil_wrw_mem((void *)(ESP32C5_R42_TEE_MASTER_BASE
+			     + ESP32C5_R42_TEE_MASTER_MODEM * 4U), 0U);
+#elif (ESP32C5_R43_APM_VARIANT == 3)
 	/*  (2) 全マスタをTEEモード(0)へ（stockのapm_hal_set_master_sec_
 	 *  mode_all(APM_SEC_MODE_TEE)相当。未実装マスタ番号への書込みは
 	 *  無害と仮定——読み戻しで確認する）  */
 	for (i = 0U; i < ESP32C5_R42_TEE_MASTER_COUNT; i++) {
 		sil_wrw_mem((void *)(ESP32C5_R42_TEE_MASTER_BASE + i * 4U), 0U);
 	}
+#endif
 
 	/*  ラッチ済み例外ステータスをクリア（本注入以降に新規の違反が
 	 *  起きていないことを事後確認できるようにする）  */
 	sil_wrw_mem((void *)ESP32C5_R42_HP_APM_M1_STATCLR, 1U);
 }
-#endif /* ESP32C5_R42_APMFIX */
 
 static uint32_t
 esp32c5_r34_regi2c_select_ctrl(void)
@@ -1589,14 +1623,26 @@ hardware_init_hook(void)
 	esp32c5_r41_combined_seed();
 #endif /* ESP32C5_R41_CALL_BOOTHOOK */
 
-#ifdef ESP32C5_R42_APMFIX
 	/*
-	 *  【実施42】APM/HP-TEEのアクセス制御をstock相当へ解除する
-	 *  （因果検証の主注入。詳細は esp32c5_r42_apm_unblock() 直上の
+	 *  【実施42で発見・実施43で恒久化】APM/HP-TEEのアクセス制御を
+	 *  stock相当へ解除する（詳細は esp32c5_r42_apm_unblock() 直上の
 	 *  コメント参照）。esp_wifi_init/PHY較正より前で実行する。
+	 *
+	 *  ASP3のDirect Bootはstockのアプリスタートアップ
+	 *  （`call_start_cpu0` -> `bootloader_init_mem()`相当）を一切経由
+	 *  しないため，これを実行しないとWiFi/BTモデム（APM master id=4）
+	 *  がPOR既定のREE2モードのままHP_APMのctrl filterに遮断され，
+	 *  HP SRAM上のTX/RXパケットバッファへ恒常的にアクセス不能になる
+	 *  （CPU自身のMMIO/regi2cアクセスはmaster 0=HPCOREが常にTEEモード
+	 *  でフィルタ対象外のため無影響——だから35ラウンドの静的レジスタ
+	 *  診断をすり抜けていた）。**WiFi専用の処理ではない**――
+	 *  `hardware_init_hook()`は全C5アプリで実行されるため，本呼出しも
+	 *  WiFi無効ビルド（test_porting等）を含め常時無条件で実行する。
+	 *  APM/TEEのアクセス許可を緩める処理であり，セキュア/非セキュア
+	 *  分離やLPコア分離をASP3側で使う予定は無いため副作用は無い
+	 *  （実施43でソース監査済み，docs/c5-bringup.md 実施43参照）。
 	 */
 	esp32c5_r42_apm_unblock();
-#endif /* ESP32C5_R42_APMFIX */
 }
 
 void
