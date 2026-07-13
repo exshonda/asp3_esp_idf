@@ -611,6 +611,52 @@ wifi_reset_mac_wrapper(void)
  *  クロックがゲートオフ（LPCON=0x7にしても受信できなかった理由の候補）．
  *  NuttXは2段ブート，nativeはesp_perip_clk_init/bootloaderでこれをやるが，
  *  ASP3のDirect Bootは飛ばす．JTAG+Zephyrソース比較で判明．
+ *
+ *  【実施91で再評価・有効化】追記13直後の「JTAG実測で冗長」という
+ *  判定（下記，旧`wifi_clock_enable_wrapper`の無効化コメント）は，
+ *  実施90が発見した「NuttX直後のwarm handoffに暗黙依存」問題そのものの
+ *  被害者だったと判明した：PMU HP_ACTIVE ICG_MODEM_REG
+ *  (0x600B000C，dig_icg_modem_code，bits[31:30])はesptoolの
+ *  usb-reset／JTAG CPU resetを跨いで値が保持される（chip-reset＝
+ *  digital coreのみの再初期化で，PMU HP domainのこのレジスタは
+ *  クリアされない——実施91でJTAG実測：`reset halt`直後のPC=ROMベクタの
+ *  時点でも本レジスタは直前のNuttX実行由来の値0x80000000(code=2)を
+ *  維持していた）．一方，MODEM_SYSCON/MODEM_LPCONの
+ *  CLK_CONF_POWER_STビットマップ（下記4語）は，起動の過程で
+ *  （regi2c/PHYブロブ自身の較正シーケンスと思われる経路で）code=1,2の
+ *  ビットだけが自動的に埋まる（実測値=MODEM_SYSCON
+ *  0x64646400／MODEM_LPCON 0x66660000，いずれもbit0(code=0)は
+ *  常に0のまま）．つまり「clk_conf_power_st＝native一致」という
+ *  当時の観測は，PMU側のcodeフィールドがwarm残留で既に2になっていた
+ *  （＝本関数を呼ばなくても事実上effectがすでに適用済みだった）ことの
+ *  結果であり，「本関数が不要」を意味しない．
+ *
+ *  ★実施91のJTAG A/B実験（board C，14:C1:9F:E0:5A:9C）で直接反証：
+ *  1. `reset halt`直後（PC=0x40000000，ROM実行前）でPMU
+ *     ICG_MODEM_REGを強制的にcode=0（POR既定値）へ書き戻し
+ *     （真の電源断で得られる状態を模擬——warm残留の可能性がある
+ *     唯一のレジスタをPOR既定へ戻す単一変数操作）．
+ *  2. `resume`させたところ，実施53-56/89-90が文書化した冷間ハングと
+ *     **完全一致する症状**が再現した：PC が`ram_get_i2c_hostid`
+ *     （`0x4203cd12`）近傍とROM regi2c読出しルーチン
+ *     （`0x40003dxx`）の間を往復し続け，タイムアウト用フリーラン
+ *     カウンタ`0x600ad000`（MODEM_PWR0）が**恒久的に0x00000000へ
+ *     凍結**（`wait_i2c_sdm_stable`＝`0x420727b8`が呼ぶ
+ *     `ram_get_i2c_hostid`の無限ループ）．
+ *  3. ハング中に本関数と同一の書込み列（code=2書込み＋
+ *     ICG bitmap書込み＋update-latchパルス）をJTAGで直接注入した
+ *     ところ，**即座に**`0x600ad000`がフリーラン化し
+ *     （`0x004366a7`→`0x00854231`），ハングループから抜けた
+ *     （その後別のIllegal Instructionで停止したが，これは手動注入が
+ *     ROM/blobの正規シーケンスの一部をスキップしたことによる副作用と
+ *     考えられ，正規のソースツリー経由の呼出し（本関数を起動シーケンス
+ *     中の正しい位置で呼ぶ）では再現しない前提——後段の決定実験で
+ *     ソースツリービルドによる確認を行う）．
+ *  この0→ハング／2→解消の双方向の直接注入結果は，「code=0のまま
+ *  regi2cマスタ/modem APBクロックがICGでゲートされ続けることが
+ *  cold-boot phy-initハングの直接因果である」ことを一次証拠として
+ *  示す（C5実施34「regi2cマスタ自体のICGゲート」と同一機構のC6版）．
+ *  詳細はdocs/wifi-shim-c6.md 実施91参照．
  */
 static void
 esp_shim_modem_icg_init(void)
@@ -633,10 +679,12 @@ wifi_clock_enable_wrapper(void)
 {
 	static bool_t	lpclk_selected = false;
 
-	/*  追記13：esp_shim_modem_icg_init()はJTAG実測で冗長と判明
-	 *  （clk_conf_power_st=0x66660000は既にnative一致＝modem_clockが設定）
-	 *  ．無効化。RXブロッカーはICGでもクロックでもなくRF/regi2c較正層． */
-	(void) esp_shim_modem_icg_init;
+	/*  【実施91で再有効化】追記13の無効化判断は実施90発見の
+	 *  warm-handoff汚染下での誤判定だったと判明（本関数直上コメント
+	 *  参照）．regi2c/modem APBクロックのICGゲートをcold boot時にも
+	 *  確実に開けるため，wifi_module_enable()の直後・PHY較正
+	 *  （phy_enable_wrapper）より確実に前のこの位置で呼ぶ． */
+	esp_shim_modem_icg_init();
 
 	/*
 	 *  esp_perip_clk_init()（esp_system/port/soc/esp32c6/clk.c）が

@@ -14021,3 +14021,247 @@ nuttx.bin`，md5=`f6295bd3…`）を書込み→NSHで`ifconfig wlan0 up`＋
 3. 単発Guru Meditation（PC=データ領域0x40864e90）の再発監視。
 4. `no time event is processed in hrt interrupt.`はC6でも通信中
    多発（C5実施45と同じ．実害は未観測——600秒負荷でも問題なし）。
+
+## 実施91：★cold-boot phy-initハングの根治★ 真因＝PMU HP_ACTIVE ICG_MODEM_REG（regi2cマスタ/modem APBクロックのICGゲート）が「冗長」と誤判定されて無効化されていた（C5実施13/34と同一機構）。JTAG双方向注入で確定，ソースツリー修正で自然コールドブート2/2完走（connect/DHCP/TCP・UDPサーバ/ping）。副次発見＝JTAG CPUリセット限定の別クラッシュ（本修正とは無関係，既知の単発クラッシュと同一系統）
+
+### 背景・目的
+
+実施90の最優先申し送り：ASP3-C6は実施88以来一度もcold状態から自力で
+phy-initを完走できておらず，タイムアウトカウンタ`0x600ad000`
+（MODEM_PWR0）が0で持続凍結し，NuttXが直前に動いた後の残留状態
+（warm handoff）に暗黙依存していた。本ラウンドは`0x600ad000`を
+coldで駆動する欠落初期化を特定し，ASP3のcold bootを自立させる。
+DUT＝board C（`14:C1:9F:E0:5A:9C`，UARTブリッジ`125a266b…`＝
+ttyUSB1，JTAGはネイティブUSB`/dev/ttyACM0`）。
+
+### 1. 机上調査：0x600ad000の正体とC6側の「冗長」判定コメントの発見
+
+- `0x600ad000`は`hal/components/soc/esp32c5/register/soc/reg_base.h`の
+  `DR_REG_MODEM_PWR0_BASE`と同一（C6用ヘッダには対応する命名済み定義が
+  存在しないが，物理番地は同一ブロック）。
+- C5側の同族修正（`docs/c5c6-lessons-for-s31.md`§1）：実施13
+  「PMU icg_modem.code=0によるWiFi BBクロックのICGゲート」，実施34
+  「regi2cマスタ自体のICGゲート」——C5では両方とも実機で確定・恒久化
+  済みの真因ファミリー。
+- **C6側のコード監査で即座に核心を発見**：`asp3/target/esp32c6_espidf/
+  wifi/esp_wifi_adapter.c`に，C5の`esp_shim_modem_icg_init()`と
+  **一字一句同じ実装**の関数が既に存在していたが，呼出し元
+  `wifi_clock_enable_wrapper()`で**「追記13：JTAG実測で冗長と判明
+  （clk_conf_power_st=0x66660000は既にnative一致）．無効化」**という
+  コメントとともに`(void) esp_shim_modem_icg_init;`（呼ばずキャストで
+  警告封じ）に格下げされていた。これはタスク冒頭の設計入力
+  「C6は歴史的にICG初期化を『冗長』としてスキップした経緯がある」
+  そのものであり，実施90が発見したwarm-handoff汚染の被害者だった
+  可能性が高いと直ちに仮説化した：この「冗長」判定はwarm状態
+  （NuttX直前実行済みでPMU ICG_MODEM_REGが既にcode=2へ残留していた
+  状態）で行われたため，「本関数を呼ばなくても実質的に既に適用済み」
+  だったことを「不要」と取り違えた誤判定だったのではないか。
+
+### 2. JTAG双方向注入によるA/B（board C，実施90ビルドそのまま，無変更）
+
+事前予測を固定：PMU HP_ACTIVE ICG_MODEM_REG（`0x600B000C`，
+`dig_icg_modem_code`，bits[31:30]）をPOR既定値0へ強制すれば
+実施53-56/89-90が文書化した冷間ハング（block=0x63・`0x600ad000`凍結）
+が再現するはず，2（＋関連ICGビットマップ／latchパルス）へ戻せば
+即座に解消するはず。
+
+1. `reset halt`直後（PC=0x40000000，ROM実行前）でPMU ICG_MODEM_REGを
+   読むと**warm残留の`0x80000000`（code=2）がJTAG CPU resetを跨いで
+   保持されている**ことを確認——esptoolのRTSリセット（実施89以来
+   「warm」と分類されてきたもの）と同様，PMU HP domainのこの
+   レジスタはCPUのみのリセットではクリアされない一次証拠。
+2. `0x600B000C`を`0x00000000`へ強制書換え（＋`0x600B00DC`
+   bit31／`0x600B00D0`bit28のlatchパルス）してから`resume`：
+   **即座に，実施53-56/89-90と完全一致する症状が再現した**——PC
+   が`ram_get_i2c_hostid`（`0x4203cd12`，`nm`実測，
+   `wait_i2c_sdm_stable`＝`0x420727b8`が呼ぶROM regi2c読出し
+   ループ）近傍を往復し続け，`0x600ad000`が恒久的に0x00000000へ
+   凍結（`resume`を挟んだ複数回サンプルで確認）。
+3. 停止中に読んだ`MODEM_SYSCON_CLK_CONF_POWER_ST_REG`
+   （`0x600A980C`）＝`0x64646400`，`MODEM_LPCON_CLK_CONF_POWER_ST_REG`
+   （`0x600AF020`）＝`0x66660000`——**いずれもcode=1,2のビットのみが
+   立ち，code=0のビットは常に0**（ICGビットマップの4bitフィールド，
+   1bit/code値）。これがC6側「冗長」コメントが引用した
+   `0x66660000`の実体で，**「native一致」に見えたのはPMU側の
+   codeフィールドがwarm残留で既に2になっていたことの帰結**であり，
+   本関数が不要なことを意味しない，という仮説を直接裏付けた。
+4. ハング中に，`esp_shim_modem_icg_init()`と同一の書込み列
+   （code=2書込み＋ICGビットマップ書込み＋update-latchパルス）を
+   JTAGで直接注入したところ，**即座に**`0x600ad000`がフリーラン化
+   （`0x004366a7`→`0x00854231`）し，ハングループから脱出した
+   （3回の独立試行で全て同一の即時解消，読み戻しで着弾も都度確認）。
+
+この0→ハング／2→解消の双方向直接注入は，「PMU ICG_MODEM_REGが
+POR既定のcode=0のままだとregi2cマスタ／modem APBクロックがICGで
+ゲートされ続け，`wait_i2c_sdm_stable`が永久に脱出できない」ことを
+一次証拠として示す。C5実施34「regi2cマスタ自体のICGゲート」と
+同一機構のC6版であり，実施90の「NuttX残留状態への暗黙依存」の
+具体的な正体が確定した。
+
+### 3. 恒久化：esp_shim_modem_icg_init()の再有効化
+
+`asp3/target/esp32c6_espidf/wifi/esp_wifi_adapter.c`の
+`wifi_clock_enable_wrapper()`内，従来`(void) esp_shim_modem_icg_init;`
+だった行を`esp_shim_modem_icg_init();`（実呼出し）へ変更。関数自体は
+無変更（C5と同一実装が既にC6にも存在していたため，新規実装は不要）。
+呼出し位置は`wifi_module_enable()`直後・PHY較正（`phy_enable_wrapper`）
+より確実に前で，従来から意図されていた位置のまま（＝C5と同型の
+タイミング制約を満たす）。「冗長」判定コメントは実施91の再評価内容へ
+書き換え，判断の経緯（誤判定の機構）を保存した。
+
+`asp3/target/esp32c6_espidf/target_kernel_impl.c`には**診断専用**
+（既定無効，`#ifdef ESP32C6_R91_FORCE_COLD_ICG`でガード）の
+`hardware_init_hook()`冒頭フックを追加——PMU ICG_MODEM_REGを
+無条件でPOR既定値0へ強制する1行。目的は下記§4の決定実験で，物理的な
+電源断が本セッションでは実行できない制約の下，**JTAG CPUリセットを
+経由せずに**（後述の理由で経由すると別の無関係クラッシュを誘発する
+ため）「本物の起動系列（esptool RTSリセット）のまま冷間状態を模擬する」
+ため。恒久ビルド（マクロ未定義）には一切影響しない。
+
+### 4. ★決定実験その1：JTAG冷間模擬での自然起動（診断マクロ有効）★
+
+`ESP32C6_R91_FORCE_COLD_ICG=1`でビルドした`load_test_c6`
+（`build/c6_r91_cold_diag/asp_flash.bin`）をboard Cへ書込み，
+esptoolのRTSリセット（`--before usb-reset --after watchdog-reset`，
+JTAG不使用）で自然起動させ，UART（ttyUSB1）で全経過を記録。
+**2回独立に実行**：
+
+| run | 結果 |
+|---|---|
+| 1回目 | `esp_wifi_init`→`WIFI_EVENT id=43`→`esp_wifi_connect -> 0`→`CONNECTED`→`DHCP bound`→`IP acquired: 192.168.1.69`→TCP echo server起動→UDP echo server起動→`ping gateway -> OK`連続。ハングなし・クラッシュなし |
+| 2回目（再書込み後） | 同一シーケンスを再現，uptime=35s以上まで`ping gateway -> OK`が安定継続。ハングなし・クラッシュなし |
+
+いずれもPMU ICG_MODEM_REGを起動最初期に強制的にPOR既定へ戻した
+状態（regi2cマスタ／modem APBクロックがICGゲートされた「真の冷間」
+と等価な単一変数操作）から，`esp_shim_modem_icg_init()`（本ラウンドで
+再有効化）が自力でcode=2を再確立し，phy-init・WiFi接続・DHCP・
+TCP/UDPサーバ起動・ping応答まで**完全に自立完走**した。§2の直接注入
+実験と合わせ，根治を実機ソースツリービルドで二重に確認。
+
+### 5. 副次発見：JTAG CPUリセット限定の別クラッシュ（本修正と無関係）
+
+§2〜4の過程で，`reset halt`（JTAG経由のCPUリセット，reset cause
+`0x18 (JTAG_CPU)`）を経由した起動でのみ，`esp_shim: set_isr intno=1
+handler=42073d96`の直後に`Illegal instruction`
+（`pc=0x00000000`，ra=`0x400172c0`，動的ISR登録直後のNULL
+ポインタ跳躍様の例外）が**決定的に**（3/3，うちPMUレジスタ書換えを
+一切行わない対照実験1/1を含む）再現することを発見した。§4の
+「esptool RTSリセットのみ（JTAG不使用）」の自然起動では**同じ
+`ESP32C6_R91_FORCE_COLD_ICG`ビルドで2/2ともこのクラッシュが
+一切発生しなかった**ため，本クラッシュは§2-3のICG修正やcold/warm
+状態そのものとは無関係で，**reset causeがJTAG_CPUであること自体**
+に起因する別の予存バグと判定した（恐らくROMがreset causeにより
+初期化/較正タイミングの一部を分岐させ，動的ISR登録のタイミング
+前提が崩れる）。SP（`0x40864e40`〜`0x40864e50`）が実施90の
+「単発の未帰属クラッシュ（PC=SP=`0x40864e90`）」と同一領域で
+あることから，実施90が「観測外のため帰属不能」としていた事象と
+同系統である可能性が高い——ただし本ラウンドで初めて**JTAG_CPU
+リセット限定で決定的に再現する**という判別条件を特定できた。
+**本ラウンドの主目的（cold-boot phy-initハング）とは別の問題であり，
+修正は行っていない**。今後JTAGベースの計装実験を行う際は，
+reset causeがJTAG_CPUになる`reset halt`／`reset run`を避け，
+esptoolのRTSリセット（USB_UART_HPSYS等）ベースの手法を優先する
+ことを申し送る。
+
+### 6. ★決定実験その2：真の恒久ビルド（診断マクロ無し）での自然起動確認★
+
+診断マクロを含まない最終恒久ビルド`build/c6_r90_load_test/
+asp_flash.bin`（実施90のAPM恒久化＋g_misc_nvs修正＋キュー固定
+プール化＋本ラウンドのesp_shim_modem_icg_init再有効化，全修正込み，
+MD5=`34de8833c645c66a8d4b257472733de1`）を書込み・自然起動（esptool
+RTSリセット，JTAG不使用）：
+
+- 1回目：`esp_wifi_init`→`connect -> 0`→`CONNECTED`→
+  `IP acquired: 192.168.1.69`→TCP/UDPサーバ起動→
+  `ping gateway -> OK`連続。**完全成功**（実施90の検証マトリクスの
+  再現）。
+- 2回目（`flash_id`コマンドでRTSリセットのみ再実行，再書込みなし）：
+  起動直後に1回だけ`Guru Meditation Error: Illegal instruction`
+  （`PC=0x00000000`，`RA=0x4203e84c`，`SP=0x40864e40`）が発生。
+  **これは実施90が「単発の未帰属クラッシュ（PC=SP=`0x40864e90`）
+  ・再ブートで再現せず」として記録済みの既知の予存事象と同一系統
+  （SP番地が同一領域，フォーマットもROM Guru Meditationハンドラ
+  そのもの）**——本ラウンドの修正が引き起こした新規事象ではない
+  ことを，直後の追加リセットで確認した：**同一バイナリを再書込みせず
+  RTSリセットのみで再起動したところ即座に正常完走**
+  （`DHCP bound`→`IP acquired`→`ping gateway -> OK`をuptime=25s以上
+  安定継続）。実施90の記載通り「初回ブートでまれに1回」というプロファイル
+  に一致し，§5のJTAG_CPU限定クラッシュとも別の（第三の）予存事象と
+  みられる。本ラウンドでは深追いせず，既知事項として記録に留める。
+
+### 7. 回帰確認
+
+- **test_porting_c6**：`build/test_porting_c6`（`ESP32C6_WIFI=ON`
+  だが本ラウンドの修正ファイルをリンクに含む構成，MD5=
+  `28bc524e5b3554615fe009d71b332dc9`）を`scripts/ci/
+  run_board_esp32c6.py`で実機board C，**独立2回とも6/6 passed**
+  （syslog_output/tick_timer_basic/task_create_activate/
+  semaphore_signal_wait/eventflag_set_wait/alarm_handler）。
+- C3/C5への影響なし：本ラウンドで編集したのは
+  `asp3/target/esp32c6_espidf/target_kernel_impl.c`と
+  `asp3/target/esp32c6_espidf/wifi/esp_wifi_adapter.c`の2ファイルのみ
+  （`git diff --stat`で確認）。並行稼働中のC5エージェントによる
+  `apps/load_test_c5/load_test_c5.c`・
+  `asp3/target/esp32c3_espidf/net/netif_esp32c3.c`の変更は本ラウンドの
+  対象外として無変更のまま維持（読み取りのみ，指示通り非接触）。
+  C5#1/#2・C3両ボード・board B・C6のC5専用ガード対象には本ラウンド
+  一切接触していない（操作対象は終始board Cのみ）。
+
+### 8. board C最終状態
+
+`build/c6_r90_load_test/asp_flash.bin`（実施90の全修正＋本ラウンドの
+`esp_shim_modem_icg_init()`再有効化，MD5=
+`34de8833c645c66a8d4b257472733de1`）を書込み済み。§6の2回目確認の
+とおり，起動後は`CONNECTED`→`DHCP bound: 192.168.1.69`→TCP echo
+（port 8）／UDP echo（port 9）サーバ稼働→`ping gateway -> OK`定期
+成功の健全な稼働状態。**実施90と異なり，本ビルドはNuttX直前実行
+（warm handoff）に依存しない**——§4・§6で実証した通り，PMU
+ICG_MODEM_REGがPOR既定のcode=0から始まっても`esp_shim_modem_icg_init()`
+が自力でcode=2を再確立するため，真の電源断を経ても（未実機確認だが
+§4の単一変数の強制注入テストと機構的に等価）phy-initが完走する
+設計になっている。
+
+### 9. 制約と申し送り
+
+1. **物理的な電源断（真のPOR）による最終確認は本セッションでは
+   実行できなかった**（USB電源の物理的な抜き差しを行う手段が
+   なかった）。代わりに(a) JTAG直接注入によるPMU
+   ICG_MODEM_REGの単一変数A/B（§2，双方向・3回）と(b)
+   診断マクロによる「esptool RTSリセットのみ（JTAG不使用）の
+   自然起動でPMU ICG_MODEM_REGを起動最初期に強制的にPOR既定へ
+   戻す」という，reset causeを汚染しない形の冷間模擬（§4，2回）で
+   代替した。両手法は独立した機構（直接注入 vs
+   ソースツリー経由の自然実行）で一致した結果を示しており，
+   このリポジトリの厳密性基準（1実験1機構・事前予測固定・
+   読み戻し確認・複数回反復）は満たしていると判断するが，
+   **可能であればユーザーによる1回の物理電源断（30秒以上）後の
+   起動確認を推奨する**（board Cは現在§8の状態で稼働中）。
+2. §5のJTAG_CPUリセット限定クラッシュは，今後C6のJTAGベース
+   実機調査で`reset halt`／`reset run`を使う際に混入しうる交絡因子
+   として要注意（esptool RTSリセットベースの検証を優先するか，
+   JTAG_CPUリセット後は必ずUART全ログで正常性を確認すること）。
+   原因（reset cause分岐によるROM初期化差）は本ラウンドでは
+   未特定・未修正。
+3. §6の「単発Guru Meditation（PC=0固定，SPが実施90記載と近傍）」も
+   引き続き未特定・未修正（実施90から持ち越しの既知事象，本ラウンドの
+   修正とは無関係と判定）。再発時はSP番地（`0x40864e4x`〜
+   `0x40864e9x`帯）とRA（今回`0x4203e84c`）を照合キーとして使えるよう
+   記録した。
+
+### 変更ファイル（実施91）
+
+- `asp3/target/esp32c6_espidf/wifi/esp_wifi_adapter.c`：
+  `esp_shim_modem_icg_init()`の呼出しを再有効化（`wifi_clock_enable_
+  wrapper()`内），コメントを実施91の再評価内容へ更新。
+- `asp3/target/esp32c6_espidf/target_kernel_impl.c`：診断専用
+  （`#ifdef ESP32C6_R91_FORCE_COLD_ICG`，既定無効）の
+  cold状態模擬フックを`hardware_init_hook()`冒頭に追加。
+- git commitは行っていない（コーディネータのレビュー後commit&push
+  運用）。
+- スクラッチ（`260d98fa…/scratchpad/`）：`r91_nm.txt`（`asp.elf`の
+  ソート済みシンボル表），`r91_cold_run1.log`・`r91_cold_run2.log`
+  （JTAG冷間模擬・PC/レジスタ・重複検証），`r91_natcold_run1.log`・
+  `r91_natcold_run2.log`（決定実験その1のUART全ログ），
+  `r91_final_state3.log`（決定実験その2・単発クラッシュの記録と
+  再起動後の正常完走ログ），`r91_ctrl2.log`（JTAG_CPUリセット限定
+  クラッシュの対照実験ログ），`r91_openocd*.log`（JTAG接続ログ）。

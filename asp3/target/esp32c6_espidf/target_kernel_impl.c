@@ -166,6 +166,22 @@ void
 hardware_init_hook(void)
 {
 
+#ifdef ESP32C6_R91_FORCE_COLD_ICG
+	/*
+	 *  【実施91・診断専用（既定無効）】真の電源断（POR）が本セッションでは
+	 *  物理的に実行できないため，PMU HP_ACTIVE ICG_MODEM_REG
+	 *  (0x600B000C)をhardware_init_hookの最初期（他の何にも触れる前）で
+	 *  強制的にPOR既定値0へ戻し，「esptoolのRTSピン経由リセット
+	 *  （非JTAG，自然な起動系列）」のまま冷間状態を模擬する決定実験用。
+	 *  JTAG `reset halt`経由の冷間模擬は実施91で別の（本修正とは無関係の
+	 *  ）Illegal Instructionクラッシュ（reset cause=JTAG_CPUで決定的に
+	 *  再現，PMU書換えの有無に関わらず発生）を誘発することが判明した
+	 *  ため，その交絡を避ける目的でこちらを使う。本マクロは診断専用，
+	 *  既定では無効（未定義）で恒久ビルドには影響しない。
+	 */
+	*(volatile uint32_t *)0x600B000CU = 0x00000000U;
+#endif /* ESP32C6_R91_FORCE_COLD_ICG */
+
 	/*
 	 *  DIAGNOSTIC（仮説検証）：ESP-IDFハンドオフ後，最初のTIMG0レジスタ
 	 *  アクセスでハングする（cp1で停止＝GPIO値1）．C6では未クロックの
