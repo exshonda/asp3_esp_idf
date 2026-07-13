@@ -327,6 +327,148 @@ r39_selfhandoff_now(const char *tag)
 }
 #endif /* ESP32C5_R39_SELFHANDOFF */
 
+#if defined(ESP32C5_R40_MODEMRST) || defined(ESP32C5_R40_PMUPULSE)
+/*  段階(i)/(ii)共通の観測用レジスタ（両方から参照するためifdef外に置く）。 */
+#define R40_MODEM_CLK_CONF_REG          (*(volatile uint32_t *)0x600A9C04U)
+#define R40_ANA_CONF0_REG               (*(volatile uint32_t *)0x600AF818U)
+
+extern void esp_rom_delay_us(uint32_t us);
+#endif /* ESP32C5_R40_MODEMRST || ESP32C5_R40_PMUPULSE */
+
+#ifdef ESP32C5_R40_MODEMRST
+/*
+ *  【実施40】候補1（外部AI回答・過渡ラッチ仮説）段階(i)：
+ *  MODEM_SYSCONの全modemリセット一括パルス（set→短delay→clear）。
+ *
+ *  実施38が「TX無・RX無＝TX/RX共通のフロントエンド/シンセ段で死亡」と
+ *  絞り込んだ症状に対し，MODEM_SYSCON_MODEM_RST_CONF_REG（0x600A9C10）の
+ *  定義済み全ビット（RST_WIFIBB，RST_WIFIMAC，RST_FE，RST_FE_AHB，
+ *  RST_FE_ADC，RST_FE_DAC，RST_FE_PWDET_ADC，RST_BTBB系，RST_ZBMAC系，
+ *  RST_MODEM_ECB/CCM/BAH/SEC，RST_ETM，RST_BLE_TIMER，RST_DATA_DUMP，
+ *  実施36調査済みのRST_WIFIMAC含む）を
+ *  esp_wifi_init直前で一括アサート→短delay→デアサートする。
+ *  読み出し・単発値注入では原理的に触れない「ハードウェアリセットのみが
+ *  クリアできるラッチ/同期状態」が実在するかを判別する（値の移植では
+ *  なく操作そのものを試す）。
+ *
+ *  マスクはビルド時定義で上書き可能（既定＝全定義済みビット，bisection
+ *  実験用にASP3_EXTRA_COMPILE_DEFSでFE系のみ等へ絞り込める）。
+ */
+#define R40_MODEM_RST_CONF_REG          (*(volatile uint32_t *)0x600A9C10U)
+#define R40_MODEM_CLK_CONF_POWER_ST_REG (*(volatile uint32_t *)0x600A9C0CU)
+#define R40_MODEM_CLK_CONF1_REG         (*(volatile uint32_t *)0x600A9C14U)
+
+#ifndef R40_MODEM_RST_MASK
+/*  全定義済みRST_*ビット（bit8-18,22-27,29-31。19-21/28は未定義=予約と
+ *  推定し対象外，0-7も同様）。 */
+#define R40_MODEM_RST_MASK  0xEFC7FF00UL
+#endif /* R40_MODEM_RST_MASK */
+
+static void
+r40_modemrst_pulse(void)
+{
+	uint32_t	pre_rst, pre_clk, pre_pst, pre_c1, pre_ana;
+	uint32_t	mid_rst;
+	uint32_t	post_rst, post_clk, post_pst, post_c1, post_ana;
+
+	pre_rst = R40_MODEM_RST_CONF_REG;
+	pre_clk = R40_MODEM_CLK_CONF_REG;
+	pre_pst = R40_MODEM_CLK_CONF_POWER_ST_REG;
+	pre_c1  = R40_MODEM_CLK_CONF1_REG;
+	pre_ana = R40_ANA_CONF0_REG;
+	syslog(LOG_NOTICE, "R40i: pre rst=%08x clk=%08x pst=%08x",
+		   (unsigned int)pre_rst, (unsigned int)pre_clk, (unsigned int)pre_pst);
+	(void) tslp_tsk(20000);	/* syslogバースト取りこぼし回避（実施39流儀） */
+	syslog(LOG_NOTICE, "R40i: pre c1=%08x ana0=%08x mask=%08x",
+		   (unsigned int)pre_c1, (unsigned int)pre_ana,
+		   (unsigned int)R40_MODEM_RST_MASK);
+	(void) tslp_tsk(20000);
+
+	R40_MODEM_RST_CONF_REG = R40_MODEM_RST_MASK;
+	esp_rom_delay_us(50U);
+	mid_rst = R40_MODEM_RST_CONF_REG;	/* パルス成立の読み戻し確認 */
+	R40_MODEM_RST_CONF_REG = 0U;
+	esp_rom_delay_us(50U);
+
+	post_rst = R40_MODEM_RST_CONF_REG;
+	post_clk = R40_MODEM_CLK_CONF_REG;
+	post_pst = R40_MODEM_CLK_CONF_POWER_ST_REG;
+	post_c1  = R40_MODEM_CLK_CONF1_REG;
+	post_ana = R40_ANA_CONF0_REG;
+	syslog(LOG_NOTICE, "R40i: mid(during-pulse) rst=%08x", (unsigned int)mid_rst);
+	(void) tslp_tsk(20000);
+	syslog(LOG_NOTICE, "R40i: post rst=%08x clk=%08x pst=%08x",
+		   (unsigned int)post_rst, (unsigned int)post_clk, (unsigned int)post_pst);
+	(void) tslp_tsk(20000);
+	syslog(LOG_NOTICE, "R40i: post c1=%08x ana0=%08x (CAL_DONE bit24 sentinel)",
+		   (unsigned int)post_c1, (unsigned int)post_ana);
+	(void) tslp_tsk(20000);
+}
+#endif /* ESP32C5_R40_MODEMRST */
+
+#ifdef ESP32C5_R40_PMUPULSE
+/*
+ *  【実施40】候補1段階(ii)：PMU HP_WIFI電源ドメインのoff→on過渡パルス
+ *  （段階(i)が空振りの場合のみ実施）。
+ *
+ *  対象＝`PMU_POWER_PD_HPWIFI_CNTL_REG`（0x600B0108）。実施22は本
+ *  レジスタの**静的終値**（stock実測=0x0＝force全解除）をmid-hang注入・
+ *  before-PHY移植の両方で因果棄却済み——本段の新規性は終値ではなく
+ *  **遷移そのもの**（force power-down→短delay→復帰）であり，実施22が
+ *  触れていない変数を狙う。復帰先はASP3の元の値（POR既定0x1C＝
+ *  FORCE_PU/NO_RESET/NO_ISO=1のまま）とし，終値を変えることによる
+ *  実施22との交絡を避ける（変えるのは「経由したか」だけ）。
+ *
+ *  実施23の前例（PD系force書込みをWiFi init時点で行うとJTAG捕捉の
+ *  ブート到達性が悪化した）に鑑み，タイムアウト付き読み戻しで異常を
+ *  即検知できるようにし，「悪化したら即revert」を徹底する。
+ */
+#define R40_PMU_PD_HPWIFI_CNTL_REG  (*(volatile uint32_t *)0x600B0108U)
+#define R40_PMU_FORCE_HP_WIFI_RESET   0x01U  /* bit0 */
+#define R40_PMU_FORCE_HP_WIFI_ISO     0x02U  /* bit1 */
+#define R40_PMU_FORCE_HP_WIFI_PU      0x04U  /* bit2 */
+#define R40_PMU_FORCE_HP_WIFI_NORESET 0x08U  /* bit3 */
+#define R40_PMU_FORCE_HP_WIFI_NOISO   0x10U  /* bit4 */
+#define R40_PMU_FORCE_HP_WIFI_PD      0x20U  /* bit5 */
+
+static void
+r40_pmupulse_cycle(void)
+{
+	uint32_t	pre, down, restored;
+	uint32_t	pre_clk, pre_ana;
+	uint32_t	post_clk, post_ana;
+
+	pre = R40_PMU_PD_HPWIFI_CNTL_REG;
+	pre_clk = R40_MODEM_CLK_CONF_REG;
+	pre_ana = R40_ANA_CONF0_REG;
+	syslog(LOG_NOTICE, "R40ii: pre pd_hpwifi=%08x clk=%08x ana0=%08x",
+		   (unsigned int)pre, (unsigned int)pre_clk, (unsigned int)pre_ana);
+	(void) tslp_tsk(20000);
+
+	/*  power down: FORCE_RESET=1,FORCE_ISO=1,FORCE_PD=1，PU/NORESET/NOISOは
+	 *  クリア（force保持を外して実際にpower-down状態へ入れる）。 */
+	R40_PMU_PD_HPWIFI_CNTL_REG =
+		R40_PMU_FORCE_HP_WIFI_RESET | R40_PMU_FORCE_HP_WIFI_ISO |
+		R40_PMU_FORCE_HP_WIFI_PD;
+	esp_rom_delay_us(100U);
+	down = R40_PMU_PD_HPWIFI_CNTL_REG;
+	syslog(LOG_NOTICE, "R40ii: during-down pd_hpwifi=%08x", (unsigned int)down);
+	(void) tslp_tsk(20000);
+
+	/*  power up: ASP3の元の値（0x1C＝FORCE_PU/NO_RESET/NO_ISO=1）へ復帰。
+	 *  実施22が既に因果棄却した「終値0x0（force全解除）」とは別条件に
+	 *  留める（変数を遷移の有無だけに絞る）。 */
+	R40_PMU_PD_HPWIFI_CNTL_REG = pre;
+	esp_rom_delay_us(100U);
+	restored = R40_PMU_PD_HPWIFI_CNTL_REG;
+	post_clk = R40_MODEM_CLK_CONF_REG;
+	post_ana = R40_ANA_CONF0_REG;
+	syslog(LOG_NOTICE, "R40ii: post pd_hpwifi=%08x clk=%08x ana0=%08x",
+		   (unsigned int)restored, (unsigned int)post_clk, (unsigned int)post_ana);
+	(void) tslp_tsk(20000);
+}
+#endif /* ESP32C5_R40_PMUPULSE */
+
 static void
 wifi_event_handler(void *arg, const char *base, int32_t id, void *data)
 {
@@ -483,6 +625,20 @@ main_task(EXINF exinf)
 			   (int_t)esp32c5_r36_seed_readback[9]);
 	}
 #endif /* ESP32C5_R36_REGI2C_SEED */
+#ifdef ESP32C5_R40_MODEMRST
+	/*
+	 *  【実施40】候補1段階(i)：esp_wifi_init直前でMODEM_SYSCON全modem
+	 *  リセットを一括パルス。
+	 */
+	r40_modemrst_pulse();
+#endif /* ESP32C5_R40_MODEMRST */
+#ifdef ESP32C5_R40_PMUPULSE
+	/*
+	 *  【実施40】候補1段階(ii)：esp_wifi_init直前でPMU HP_WIFI電源
+	 *  ドメインのoff→on過渡パルス（段階(i)が空振りの場合のみ）。
+	 */
+	r40_pmupulse_cycle();
+#endif /* ESP32C5_R40_PMUPULSE */
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_init");
 	err = esp_wifi_init(&cfg);
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_init -> %d", (int_t)err);

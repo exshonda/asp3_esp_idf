@@ -314,6 +314,10 @@ esp32c5_disable_mwdt(uint32_t timg_base)
 #define ESP32C5_R34_AHB_DIVIDER   6U
 
 static void esp32c5_r34_bbpll_configure_480mhz(void);
+#ifdef ESP32C5_R40_CLKREORDER
+static void esp32c5_r34_modem_icg_enable_min(void);
+static void esp32c5_r40_modem_icg_disable_bracket(void);
+#endif /* ESP32C5_R40_CLKREORDER */
 
 /*
  *  【実施35】esp_clk_init()／esp_clk_tree_initialize()の残余効果の移植
@@ -621,6 +625,15 @@ esp32c5_r32_cpu_clock_switch(void)
 	 */
 	esp32c5_r34_bbpll_configure_480mhz();
 
+#ifdef ESP32C5_R40_CLKREORDER
+	/*
+	 *  【実施40】候補1段階(iii)：PCRのソース切替えパルスを打つ直前で
+	 *  modem ICGを一旦無効化する（切替え瞬間だけmodem系クロックを
+	 *  止めた状態にする）。
+	 */
+	esp32c5_r40_modem_icg_disable_bracket();
+#endif /* ESP32C5_R40_CLKREORDER */
+
 	/*
 	 *  ディバイダ設定（rtc_clk_cpu_freq_to_pll_240_mhz(freq)相当）：
 	 *  ソース切替え前に設定する（rtc_clk.cと同じ順序）。
@@ -647,6 +660,13 @@ esp32c5_r32_cpu_clock_switch(void)
 			break;
 		}
 	}
+
+#ifdef ESP32C5_R40_CLKREORDER
+	/*  ソース切替え完了後，modem ICGを再有効化（enable_minと同じ状態へ
+	 *  戻す——esp_wifi_init経路でこの後さらに広いICGへ拡張される，
+	 *  実施34/13と同型）。  */
+	esp32c5_r34_modem_icg_enable_min();
+#endif /* ESP32C5_R40_CLKREORDER */
 }
 
 /*
@@ -772,6 +792,50 @@ esp32c5_r34_modem_icg_enable_min(void)
 	sil_wrw_mem((void *)ESP32C5_R34_PMU_IMM_MODEM_ICG, (1U << 31));
 	sil_wrw_mem((void *)ESP32C5_R34_PMU_IMM_SLEEP_SYSCLK, (1U << 28));
 }
+
+#ifdef ESP32C5_R40_CLKREORDER
+/*
+ *  【実施40】候補1段階(iii)：クロック切替え順序入替（段階(i)/(ii)が
+ *  ともに空振りの場合のみ）。
+ *
+ *  esp32c5_r34_modem_icg_enable_min()（本関数の直前）でI2C_MASTER/
+ *  MODEM_APB/LP_APB ICGを最小有効化し，esp32c5_r34_bbpll_configure_
+ *  480mhz()（regi2c経由のBBPLL較正）を実行する——このICG有効化は
+ *  regi2cマスタ自体を動かすための前提条件であり，「BBPLL較正中も
+ *  modem系クロックを全停止する」という文字どおりの実装は不可能
+ *  （実施34の発見：regi2cマスタ自体がこのICGでゲートされている）。
+ *
+ *  そこで本段は，机上先行が示した「stockが唯一経験する構造的な違い＝
+ *  CPUルートクロック切替え（PCR_SYSCLK_CONF等）の瞬間」に絞り，
+ *  **BBPLL較正が完了した後・PCRのソース切替えパルスを打つ直前**で
+ *  modem ICGを一旦無効化→PCR切替え→再度有効化する，という順序を試す
+ *  （「切替えの瞬間だけmodem系クロックを止める」という，候補1が
+ *  想定するIDF-11064型の自動ゲーティング状態を模した最小のブラケット）。
+ */
+static void
+esp32c5_r40_modem_icg_disable_bracket(void)
+{
+	uint32_t	v;
+
+	/*  icg_modem.code = 0（enable_minの2から差し戻し＝いずれのICG
+	 *  ドメインもコード0はビットマップに含まれないため事実上ゲート）  */
+	v = sil_rew_mem((void *)ESP32C5_R34_PMU_HP_ACTIVE_ICG_MODEM);
+	v = (v & ~(0x3U << 30));
+	sil_wrw_mem((void *)ESP32C5_R34_PMU_HP_ACTIVE_ICG_MODEM, v);
+
+	v = sil_rew_mem((void *)ESP32C5_R34_MODEM_SYSCON_CLK_CONF_POWER_ST);
+	v = (v & ~(0xFU << 28));
+	sil_wrw_mem((void *)ESP32C5_R34_MODEM_SYSCON_CLK_CONF_POWER_ST, v);
+
+	v = sil_rew_mem((void *)ESP32C5_R34_MODEM_LPCON_CLK_CONF_POWER_ST);
+	v = (v & ~(0xFU << 28));
+	v = (v & ~(0xFU << 24));
+	sil_wrw_mem((void *)ESP32C5_R34_MODEM_LPCON_CLK_CONF_POWER_ST, v);
+
+	sil_wrw_mem((void *)ESP32C5_R34_PMU_IMM_MODEM_ICG, (1U << 31));
+	sil_wrw_mem((void *)ESP32C5_R34_PMU_IMM_SLEEP_SYSCLK, (1U << 28));
+}
+#endif /* ESP32C5_R40_CLKREORDER */
 
 static uint32_t
 esp32c5_r34_regi2c_select_ctrl(void)

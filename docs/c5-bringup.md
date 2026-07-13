@@ -8187,3 +8187,239 @@ BBPLL較正遷移を実行しており，V2では2周分の遷移履歴がある
   スニファDUT検出0）。スニファ環境陽性対照は4/4成立。
 - 事前固定の判定表に照らし「0APのまま」側に確定——考察・次段推奨まで
   本節に記載。
+
+---
+
+## 実施40：外部AI候補1（過渡ラッチ仮説）の3段判別実験——段階(i)MODEM_SYSCON全modemリセット一括パルス／段階(ii)PMU HP_WIFI電源off→on過渡／段階(iii)クロック切替え順序入替，**3段すべて空振り（各2/2再現）＝候補1を実験的に棄却確定**。段階(ii)で「終値には現れない再現性のある副作用」（MODEM_SYSCON_CLK_CONFのCLK_I2C_MST_SEL_160Mビットが電源サイクルで1→0に恒久変化）を発見したが，較正・TX/RX判定には無関係と判定。次段＝候補3（MACブロック実行時diff）・候補4（regi2c 0x20以降）へ
+
+コーディネータ指示＝`tmp/external_ai_c5_answer_fable.md`候補1の3段最小判別実験。
+実施39が「stockブート列固有の内容」を確定させ候補1の優先度を下げていたが，
+advisorレビューにより「実施39が反証したのは"遷移の履歴"（同じ遷移を2回経験する
+こと自体）」であり，本ラウンドが対象とする3操作（ドメインリセット・電源
+off/on・クロック順序入替）そのものは実施39・実施36とも一度も試していない
+ことを確認した上で，事前確率を低く見積もったまま実施した（低確度でも
+「読み出し・単発値注入では原理的に触れない領域」を塞ぐ意味はある）。
+
+### 0. 机上先行（実験前に固定）
+
+v6.1実ソース（`~/tools/esp-idf-v6.1/components/esp_hw_support/port/esp32c5/rtc_clk.c`）で
+stockのCPUクロック遷移列を精査した：
+
+- stockの実遷移は**2段**だが，実体は「PLLソース切替え」ではなく「同一
+  PLL_F240Mソース内でのdivider変更」——stage A（bootloader）：
+  XTAL→PLL_F240M(div=3,80MHz)（`old_src≠new_src`につき
+  `rtc_clk_update_pll_state_on_cpu_src_switching_start/end()`が実行され，
+  BBPLL enable+480MHz較正がここで発生）。stage B（app，`esp_clk_init`）：
+  PLL_F240M(div=3)→PLL_F240M(div=1,240MHz)は`old_src==new_src`（共に
+  PLL_F240M）のため`rtc_clk_cpu_freq_set_config()`362-384行の分岐で
+  switching_start/endが**呼ばれない**——ソース切替えではなくdivider書換え
+  のみ。
+- `rtc_clk_root_clk_switch_protect()`（IDF-11064対策，root clock自動
+  ゲーティングのbypass）は**PLL_F160M⇔PLL_F240M間のソース切替えにのみ
+  適用される**条件式（353-359行）——stockの実遷移はこの条件に一度も
+  該当しない。IDF-11064の自動ゲーティング機構はstockの実行パス上で
+  一度も発火していないことをv6.1本流の制御フローから確認した（実施21が
+  「hal＝別世代コードとv6.1を混同」として棄却したPCR_FPGA_DEBUG bit31
+  仮説を独立に裏付ける新規の机上確認）。
+- ASP3（実施32/34）はXTAL→PLL_F240M÷1へ1段で直接切替え，BBPLL enable+
+  較正はhardware_init_hook最初期でstockのstage Aとほぼ同時にカバー済み。
+  実施36の監査（唯一の真のパルス=rst_wifimacはblob経由で両者同一）と
+  合わせ，「stockが持っていてASP3が欠いている特定のパルス／順序」は
+  机上では特定できなかった。
+
+**結論（机上）**：候補1が原理として想定するIDF-11064型の機序は，stockの
+実行パス自体に存在しない。3段実験は「stockを模倣する」のではなく「読み
+出し・単発値注入では原理的に触れない領域を虱潰しに叩く」性質の実験であり，
+事前確率は低いまま実施する（advisor指摘のとおり）——机上先行・各段の
+事前予測全文は`tmp/.../scratchpad/r40_desk_prediction.md`（本ラウンド
+成果物，非リポジトリ）に保存。
+
+### 1. 段階(i)：MODEM_SYSCON全modemリセット一括パルス
+
+**事前予測**：変化なし（iq_done16=1のまま，raw_adc非ゼロだが両系譜とも
+「一発較正値が固まる」実施38型，AP=0のまま）。3段中もっとも機序的に妥当
+（実施38が特定した「TX/RX共通のFE/シンセ段」に直接対応する`RST_FE`／
+`RST_FE_ADC`／`RST_FE_DAC`／`RST_FE_PWDET_ADC`を含む）。
+
+**実装**：`apps/wifi_scan/wifi_scan.c`に`ESP32C5_R40_MODEMRST`ガードで
+`r40_modemrst_pulse()`を新設し，`esp_wifi_init()`直前（実施38/39と同じ
+挿入点）で呼び出す。`MODEM_SYSCON_MODEM_RST_CONF_REG`（`0x600A9C10`）の
+定義済み全ビット（`RST_WIFIBB`/`RST_WIFIMAC`/`RST_FE`系/`RST_BTBB`系/
+`RST_ZBMAC`系/`RST_MODEM_ECB`/`CCM`/`BAH`/`SEC`/`RST_ETM`/`RST_BLE_TIMER`/
+`RST_DATA_DUMP`，マスク`0xEFC7FF00`）へ書込み→`esp_rom_delay_us(50)`→
+0クリア→読み戻し確認。
+
+**実測（`build/c5_r40_i1`，2/2独立RTSリセット，DUT/スニファ同時二重
+キャプチャ`r40_i1_boot1/2_*.log`）**：
+- パルス成立を実測確認：`pre rst=00000000`→`mid(during-pulse)
+  rst=efc7ff00`→`post rst=00000000`（2/2）。
+- センチネル（`MODEM_SYSCON_CLK_CONF`/`CLK_CONF_POWER_ST`/`CLK_CONF1`/
+  `I2C_ANA_MST_ANA_CONF0`のCAL_DONE bit24）はパルス前後で完全不変
+  （`clk=00201002`/`pst=40000000`/`c1=00000000`/`ana0=2100e404`，2/2）
+  ——リセットパルスがBBPLL較正状態・modem ICG設定を破壊しないことを確認。
+- 較正：`iq_done16=1`到達（2/2），`0 APs found`→`RESCAN 0 APs`（2/2）。
+  スニファ側`DUTtotal=0`・`DUTprobereq=0`（2/2，環境陽性対照は
+  probereq 50〜89件で両ブートとも成立）——**TX/RX無・0APのまま，変化
+  なし**。
+
+**判定**：予測どおり**空振り**。
+
+### 2. 段階(ii)：PMU HP_WIFI電源ドメインoff→on過渡パルス
+
+**事前予測**：段階(i)よりさらに低い事前確率。実施22は`PMU_POWER_PD_
+HPWIFI_CNTL`の**静的終値**（stock実測=`0x0`＝force全解除）をmid-hang
+注入・before-PHY移植の両方で既に因果棄却済み——本段の新規性は終値では
+なく**遷移そのもの**（force power-down→短delay→復帰）であり，実施22が
+触れていない変数を狙う点を明記する（実施22の再実験ではない）。実施23の
+前例（PD系force書込みをWiFi init時点で行うとJTAG捕捉の到達性が悪化した）
+を踏まえ，UART単独観測でも悪化兆候が出たら即revertする方針とした。
+
+**実装**：`ESP32C5_R40_PMUPULSE`ガードで`r40_pmupulse_cycle()`を新設。
+`PMU_POWER_PD_HPWIFI_CNTL_REG`（`0x600B0108`）を`FORCE_RESET|FORCE_ISO|
+FORCE_PD`（`0x23`，実際にpower-down状態へ入れる）→`esp_rom_delay_us(100)`
+→ASP3の元の値（`0x1C`＝`FORCE_PU`/`NO_RESET`/`NO_ISO`=1，実施22の終値
+`0x0`とは別条件に留めて変数を遷移の有無だけに絞る）へ復帰。
+
+**実測（`build/c5_r40_ii1`）**：
+- 初回sanityキャプチャで捕捉バイト数が異常に少なく（1042B）一見ハングに
+  見えたが，追加キャプチャ（`r40_ii1_check2_dut.log`）で正常に
+  `esp_wifi_init -> 0`〜`scan完走`まで到達することを確認——RTSリセット
+  タイミングと読取り窓の競合による取りこぼしであり，真のハングでは
+  なかった（悪化ではないと判定した上で先へ進んだ）。
+- **新規の再現性ある副作用を発見**：`MODEM_SYSCON_CLK_CONF`のbit12
+  （`CLK_I2C_MST_SEL_160M`）が電源off→on経由で`1→0`へ恒久的に変化した
+  （`pre clk=00201002`→`post clk=00200002`，2/2独立ブートで完全一致）。
+  段階(i)では同レジスタは不変だったため，これは電源ドメイン遷移固有の
+  副作用である——ただし較正（`iq_done16=1`到達，2/2）・AP検出（`0 APs
+  found`→`RESCAN 0 APs`，2/2）・スニファTX検出（`DUTtotal=0`，
+  `DUTprobereq=0`，2/2，環境陽性対照probereq 50〜65件）はいずれも
+  段階(i)と同型で不変——**副作用は実在するが症状には無関係**と判定。
+- WDTリブートループ等の明白な退行は一度も観測しなかった（2/2とも
+  クリーンな`rst:0x1 (POWERON)`のみ）。
+
+**正直な限定事項（advisorレビュー指摘）**：段階(ii)は単一変数の実験
+ではない——`PD_HPWIFI_CNTL`は元の値（`0x1C`）へ復帰させたが，副作用で
+落ちた`CLK_I2C_MST_SEL_160M`（bit12）はその後の`esp_wifi_init`／scan
+全体を通じて`0`のまま残った（意図した「電源遷移」に加え「クロック
+セレクト低下」も同時に混入した）。それでも本段の空振りという結論は
+揺るがないと判断する理由：(a) 較正（`iq_done16=1`）はBBPLL較正と同じ
+`I2C_ANA_MST` regi2cマスタをより厳しく使う消費者であり，もしbit12=0が
+このマスタを実用上劣化させるほどの意味を持つなら較正が先に壊れるはず
+だが壊れなかった——bit12=0はここでは無害な速度セレクトであり，イネーブル
+そのものではないと解釈できる。(b) 結果は基準ブートとも，bit12を一切
+変更していない段階(i)/(iii)とも同一（0AP・TX無・RX無）——「遷移がRXを
+救うがbit12=0が相殺的に壊す」という打ち消し合いのシナリオは，較正が
+無傷である以上考えにくい。この交絡は再実験のコストに見合わない
+（結果はすでに収束的証拠で裏付けられている）と判断し，本ラウンドでは
+再実行しない。
+
+**判定**：予測どおり**空振り**（ただし実施22が触れなかった「遷移」変数を
+初めて塞いだ点で判別力は保たれている。同一ラウンド内でのTX検出陽性対照は
+用意していないが，環境probereq 50〜89件が毎ブート安定検出されている＝
+スニファのDUT-MACフィルタが載る解析パス自体が毎回生きていることの実質的な
+確認になっている——実施38のTX検出陽性対照に依拠）。
+
+### 3. 段階(iii)：クロック切替え順序入替
+
+**事前予測**：3段中もっとも事前確率が低い（0節の机上調査で「stockが
+modemクロックを全停止してから切替える」という具体的な順序要件は確認
+できなかった）。
+
+**実装**：`asp3/target/esp32c5_espidf/target_kernel_impl.c`に
+`ESP32C5_R40_CLKREORDER`ガードで`esp32c5_r40_modem_icg_disable_bracket()`
+を新設し，`esp32c5_r32_cpu_clock_switch()`内・`esp32c5_r34_bbpll_
+configure_480mhz()`完了後～PCRのソース切替え（`PCR_SYSCLK_CONF`他）の
+直前でmodem ICGを一旦無効化（`icg_modem.code=0`＋`MODEM_SYSCON`/
+`MODEM_LPCON`のST_MAPを0クリア＋即時反映パルス）→PCR切替え実行→
+`esp32c5_r34_modem_icg_enable_min()`で再有効化，という順序に組み替えた。
+
+なお机上先行（0節）で判明したとおり，`esp32c5_r34_bbpll_configure_
+480mhz()`自体がregi2c経由の較正であり，そのregi2cマスタ自体が
+`esp32c5_r34_modem_icg_enable_min()`のICGでゲートされている（実施34の
+発見）——「BBPLL較正中もmodem系クロックを全停止する」という文字どおりの
+実装は不可能であり，本段は「CPUルートクロック切替えの瞬間だけmodem系を
+止める」という，候補1が想定するIDF-11064型状態を模した最小のブラケット
+として実装したことを正直に記録する。
+
+**実測（`build/c5_r40_iii1`）**：
+- 起動退行なし（2/2ともバナー・`esp_wifi_init -> 0`まで正常到達，
+  `rst:0x1 (POWERON)`のみ）。
+- `iq_done16=1`到達（2/2），`0 APs found`→`RESCAN 0 APs`（2/2），
+  スニファ`DUTtotal=0`・`DUTprobereq=0`（2/2，環境陽性対照probereq
+  60〜67件）——**変化なし**。
+
+**判定**：予測どおり**空振り**。
+
+### 4. 総合判定：候補1（過渡ラッチ仮説）を実験的に棄却確定
+
+3段すべて空振り（各2/2，計6回の独立ブートで一貫して0AP・TX無・RX無・
+較正は完走）。事前予測どおりの結果であり，「読み出し・単発値注入では
+原理的に触れない領域」（ドメインリセット・電源遷移・クロック順序）を
+虱潰しに塞いだ上での棄却のため，候補1は本ラウンドで**実験的に閉じた**
+と判断する。実施39（stockブート列固有の内容が鍵）との整合性：本ラウンド
+は実施39が反証しなかった「操作そのもの」を追加で塞いだだけであり，
+両ラウンドは矛盾しない——「過渡・履歴・操作」という切り口全体が尽きた。
+
+段階(ii)で発見した「電源サイクルがMODEM_SYSCON_CLK_CONF bit12を書き換える」
+という副作用自体は，症状への因果はないものの，**PMUドメイン間に静的
+レジスタ比較では見えない相互作用が実在する**という一次証拠であり，将来
+候補3/4の実験で「なぜこの値なのか」を考える際の参考情報として記録する
+（本ラウンドでは追跡しない）。
+
+### 5. 変更ファイル
+
+- `apps/wifi_scan/wifi_scan.c`：`ESP32C5_R40_MODEMRST`（段階(i)，
+  `r40_modemrst_pulse()`）・`ESP32C5_R40_PMUPULSE`（段階(ii)，
+  `r40_pmupulse_cycle()`）を新設，いずれも`esp_wifi_init()`直前の
+  同一挿入点から択一的に呼出し。共通の観測用レジスタ定義
+  （`R40_MODEM_CLK_CONF_REG`/`R40_ANA_CONF0_REG`）は両ガードで共有できる
+  よう独立ブロックへ切り出した。既定（いずれも未定義）ビルドは
+  nm symbol table完全一致（0行diff，`/tmp/r40_regress2.nm`対
+  `/tmp/r34_wifi80.nm`）で無影響を確認済み。
+- `asp3/target/esp32c5_espidf/target_kernel_impl.c`：
+  `ESP32C5_R40_CLKREORDER`ガードで`esp32c5_r40_modem_icg_disable_
+  bracket()`を新設し，`esp32c5_r32_cpu_clock_switch()`のPCRソース
+  切替え前後にブラケット。既定ビルドは同上のnm diffで無影響を確認済み。
+- 本doc：実施40節追加。
+- スクラッチ（`260d98fa…/scratchpad/`）：`r40_desk_prediction.md`
+  （0節，机上先行・各段事前予測の全文）・`r40_i1_*`（段階(i)，
+  sanity+boot1/2のDUT/スニファログ）・`r40_ii1_*`（段階(ii)，
+  sanity+check2+boot1/2）・`r40_iii1_*`（段階(iii)，sanity+boot1/2）・
+  `r40_final_state_*`（5節，終了処理確認）。ビルド：
+  `build/c5_r40_i1`（段階(i)，`ESP32C5_R38_RXINSTR=1;ESP32C5_R40_
+  MODEMRST=1`）・`build/c5_r40_ii1`（段階(ii)，`...;ESP32C5_R40_
+  PMUPULSE=1`）・`build/c5_r40_iii1`（段階(iii)，`...;ESP32C5_R40_
+  CLKREORDER=1`）・`build/c5_r40_regress`（既定フラグ無し，nm比較用）。
+- git commitは行っていない（コーディネータのレビュー後のcommit&push運用）。
+
+### 6. 検証（実施40）
+
+- ビルド：4構成（i/ii/iii/regress）すべて成功。regressはnm symbol
+  table完全一致（既定ビルド無影響）を確認。
+- 各段2/2独立RTSリセット，DUT/スニファ同時二重キャプチャで再現性確認
+  （`r39_dualcap.py`のDTR修正版をそのまま再利用）。スニファ環境陽性
+  対照は全6ブートで成立（probereq 50〜89件，beacon増加継続）。
+- 段階(ii)着手時の1回だけ短時間キャプチャ（1042B）で見た目上の異常を
+  検知したが，追加キャプチャで正常完走を確認し「悪化ではない」と判定
+  してから先へ進んだ（rigor doc「recurrence」型の誤判定を避けた）。
+- 終了処理：C5#1を`build/c5_r34_wifi80`（240MHz出荷構成，実験パス無し）
+  でフル4MB `write_flash 0x0` 書き戻し。RTSリセット後45秒キャプチャ
+  （`r40_final_state_dut.log`）：`0 APs found`→`RESCAN 0 APs`×3・
+  WDTリセット0件——冷間症状の回帰を確認。C5#2はスニファ（2.4GHz ch6版）
+  のまま未書換え・維持。接触禁止2台（C6 board C `14:C1:9F:E0:5A:9C`／
+  UARTブリッジ`125a266b…`）は全工程で無接触（by-id照合徹底）。
+
+### 次段への申し送り
+
+外部AI回答の残候補（実施39の推奨順のまま，本ラウンドで候補1が確定的に
+閉じたことにより優先度がさらに明確化）：
+
+1. **候補3（MACブロックの「scan実行中」系譜diff＋LP RAM全域）**：
+   セルフハンドオフ機構（実施39資産）を使い，同一ゲストバイナリで
+   WORKS（stockハンドオフ）/FAILS（冷間・セルフハンドオフ）を切替えた
+   scan中の同一チャネルdwellでWiFi MAC制御ブロック全域＋LP RAM 16KB＋
+   LP_AON STOREをdiffする。
+2. **候補4（regi2c 0x20以降＝RF-synth残存穴）**：blob逆アセンブルで
+   reg引数最大値を確認→0x20以上が実在すれば追加スイープ。
+3. 候補2（残差19語の同時注入）：引き続き優先度は低い（実施35で既知
+   非因果カテゴリに帰属済み）。
