@@ -21,6 +21,7 @@
 #include <kernel.h>
 #include <t_syslog.h>
 #include <string.h>
+#include "kernel_cfg.h"		/* STALL_SNAPSHOT用：SHIM_*/NET_*のID参照 */
 #include "load_test_c5.h"
 #include "esp_shim.h"
 
@@ -45,6 +46,206 @@ static volatile uint32_t	g_tcp_sessions;
 static volatile uint32_t	g_udp_datagrams;
 static volatile uint32_t	g_tcp_send_errors;
 static volatile uint32_t	g_udp_send_errors;
+
+/*
+ *  ==========================================================
+ *  停止時スナップショット診断（実施47．docs/c5-bringup.md）
+ *  ==========================================================
+ *
+ *  負荷誘発リンク完全停止（C3実施1／C5実施46で確認済み，2〜10秒で
+ *  発生・双方向死・STA_DISCONNECTEDなし・heap一定・カーネル健全）の
+ *  分類（(i) WiFiタスク系がsem/queue待ちで恒久ブロック，(ii) タスク
+ *  全部生存だがTXが黙って落ちる，(iii) esp_wifi_internal_txがエラー
+ *  連発）を判別するため，デバイス発1Hz raw pingの連続失敗（net/
+ *  netif_esp32c3.cのnet_ping_result→本ファイルのnetstall_trace_
+ *  ping_result．TOPPERS_ESP32C5_NETSTALL_TRACEガード）をトリガに
+ *  全関連タスクのref_tsk（状態／待ち要因／待ちオブジェクトID）と
+ *  シムqueue（DTQ）の水位，esp_wifi_internal_txの直近戻り値をUARTへ
+ *  ダンプする．1ブートにつき1回だけ発火（ラッチ）。
+ */
+#ifdef TOPPERS_ESP32C5_NETSTALL_TRACE
+
+extern volatile uint32_t	g_netstall_tx_calls;
+extern volatile uint32_t	g_netstall_tx_errs;
+extern volatile int32_t	g_netstall_last_tx_ret;
+
+#define STALL_PING_FAIL_THRESHOLD	3	/* 連続3回（約3秒）で発火 */
+
+static volatile uint32_t	g_ping_fail_streak;
+static volatile bool_t		g_stall_snapshot_done;
+
+typedef struct {
+	ID			id;
+	const char	*name;
+} ID_NAME;
+
+/*  タスク（WiFiシムタスクプール＋NET_TSK＋本アプリのタスク一式） */
+static const ID_NAME	s_tsk_names[] = {
+	{ SHIM_TSK1,      "SHIM_TSK1"      },
+	{ SHIM_TSK2,      "SHIM_TSK2"      },
+	{ SHIM_TSK3,      "SHIM_TSK3"      },
+	{ SHIM_TSK4,      "SHIM_TSK4"      },
+	{ SHIM_TSK5,      "SHIM_TSK5"      },
+	{ SHIM_TSK6,      "SHIM_TSK6"      },
+	{ SHIM_TIMER_TSK, "SHIM_TIMER_TSK" },
+	{ NET_TSK,        "NET_TSK"        },
+	{ MAIN_TASK,      "MAIN_TASK"      },
+	{ TCP_TASK,       "TCP_TASK"       },
+	{ UDP_TASK,       "UDP_TASK"       },
+	{ MON_TASK,       "MON_TASK"       },
+};
+
+/*  セマフォ（WiFiシムsemプール＋net/ sys_arch semプール） */
+static const ID_NAME	s_sem_names[] = {
+	{ SHIM_SEM1,  "SHIM_SEM1"  }, { SHIM_SEM2,  "SHIM_SEM2"  },
+	{ SHIM_SEM3,  "SHIM_SEM3"  }, { SHIM_SEM4,  "SHIM_SEM4"  },
+	{ SHIM_SEM5,  "SHIM_SEM5"  }, { SHIM_SEM6,  "SHIM_SEM6"  },
+	{ SHIM_SEM7,  "SHIM_SEM7"  }, { SHIM_SEM8,  "SHIM_SEM8"  },
+	{ SHIM_SEM9,  "SHIM_SEM9"  }, { SHIM_SEM10, "SHIM_SEM10" },
+	{ SHIM_SEM11, "SHIM_SEM11" }, { SHIM_SEM12, "SHIM_SEM12" },
+	{ SHIM_SEM13, "SHIM_SEM13" }, { SHIM_SEM14, "SHIM_SEM14" },
+	{ SHIM_SEM15, "SHIM_SEM15" }, { SHIM_SEM16, "SHIM_SEM16" },
+	{ SHIM_SEM17, "SHIM_SEM17" }, { SHIM_SEM18, "SHIM_SEM18" },
+	{ SHIM_SEM19, "SHIM_SEM19" }, { SHIM_SEM20, "SHIM_SEM20" },
+	{ SHIM_SEM21, "SHIM_SEM21" }, { SHIM_SEM22, "SHIM_SEM22" },
+	{ SHIM_SEM23, "SHIM_SEM23" }, { SHIM_SEM24, "SHIM_SEM24" },
+	{ SHIM_TIMER_SEM, "SHIM_TIMER_SEM" },
+	{ NET_SEM1, "NET_SEM1" }, { NET_SEM2, "NET_SEM2" },
+	{ NET_SEM3, "NET_SEM3" }, { NET_SEM4, "NET_SEM4" },
+	{ NET_SEM5, "NET_SEM5" }, { NET_SEM6, "NET_SEM6" },
+	{ NET_SEM7, "NET_SEM7" }, { NET_SEM8, "NET_SEM8" },
+};
+
+/*  ミューテックス（WiFiシムmtxプール） */
+static const ID_NAME	s_mtx_names[] = {
+	{ SHIM_MTX1, "SHIM_MTX1" }, { SHIM_MTX2, "SHIM_MTX2" },
+	{ SHIM_MTX3, "SHIM_MTX3" }, { SHIM_MTX4, "SHIM_MTX4" },
+	{ SHIM_MTX5, "SHIM_MTX5" }, { SHIM_MTX6, "SHIM_MTX6" },
+	{ SHIM_MTX7, "SHIM_MTX7" }, { SHIM_MTX8, "SHIM_MTX8" },
+};
+
+/*  データキュー（WiFiシムDTQプール＋lwIP sys_arch mboxプール） */
+static const ID_NAME	s_dtq_names[] = {
+	{ SHIM_DTQ1, "SHIM_DTQ1" }, { SHIM_DTQ2, "SHIM_DTQ2" },
+	{ SHIM_DTQ3, "SHIM_DTQ3" }, { SHIM_DTQ4, "SHIM_DTQ4" },
+	{ NET_MBOX1, "NET_MBOX1" }, { NET_MBOX2, "NET_MBOX2" },
+	{ NET_MBOX3, "NET_MBOX3" }, { NET_MBOX4, "NET_MBOX4" },
+	{ NET_MBOX5, "NET_MBOX5" }, { NET_MBOX6, "NET_MBOX6" },
+	{ NET_MBOX7, "NET_MBOX7" }, { NET_MBOX8, "NET_MBOX8" },
+	{ NET_MBOX9, "NET_MBOX9" }, { NET_MBOX10, "NET_MBOX10" },
+};
+
+static const char *
+find_id_name(const ID_NAME *tbl, size_t n, ID id)
+{
+	size_t	i;
+
+	for (i = 0; i < n; i++) {
+		if (tbl[i].id == id) {
+			return(tbl[i].name);
+		}
+	}
+	return("?");
+}
+
+#define NUM_ELEM(a)		(sizeof(a) / sizeof((a)[0]))
+
+static void
+stall_dump_task(ID tskid, const char *name)
+{
+	T_RTSK		rt;
+	ER			er;
+	const char	*wtype = "-";
+	const char	*wname = "-";
+
+	er = ref_tsk(tskid, &rt);
+	if (er != E_OK) {
+		syslog(LOG_NOTICE, "STALL: tsk=%s ref_tsk err=%d",
+			   name, (int_t) er);
+		return;
+	}
+	if ((rt.tskstat & TTS_WAI) != 0) {
+		if ((rt.tskwait & TTW_SEM) != 0) {
+			wtype = "SEM";
+			wname = find_id_name(s_sem_names, NUM_ELEM(s_sem_names),
+								  rt.wobjid);
+		} else if ((rt.tskwait & TTW_MTX) != 0) {
+			wtype = "MTX";
+			wname = find_id_name(s_mtx_names, NUM_ELEM(s_mtx_names),
+								  rt.wobjid);
+		} else if ((rt.tskwait & (TTW_SDTQ | TTW_RDTQ)) != 0) {
+			wtype = ((rt.tskwait & TTW_SDTQ) != 0) ? "SDTQ" : "RDTQ";
+			wname = find_id_name(s_dtq_names, NUM_ELEM(s_dtq_names),
+								  rt.wobjid);
+		} else if ((rt.tskwait & TTW_SLP) != 0) {
+			wtype = "SLP";
+		} else if ((rt.tskwait & TTW_DLY) != 0) {
+			wtype = "DLY";
+		}
+	}
+	syslog(LOG_NOTICE, "STALL: tsk=%s stat=%#x wait=%#x tmo=%d",
+		   name, (uint_t) rt.tskstat, (uint_t) rt.tskwait,
+		   (int_t) rt.lefttmo);
+	syslog(LOG_NOTICE, "STALL: tsk=%s wobjtype=%s wobjname=%s",
+		   name, wtype, wname);
+}
+
+static void
+stall_dump_dtq(ID dtqid, const char *name)
+{
+	T_RDTQ	rd;
+	ER		er;
+
+	er = ref_dtq(dtqid, &rd);
+	if (er != E_OK) {
+		return;
+	}
+	syslog(LOG_NOTICE, "STALL: dtq=%s cnt=%d stsk=%d rtsk=%d",
+		   name, (int_t) rd.sdtqcnt, (int_t) rd.stskid, (int_t) rd.rtskid);
+}
+
+static void
+stall_snapshot_dump(void)
+{
+	uint_t	i;
+
+	syslog(LOG_NOTICE,
+		   "STALL: ==== snapshot fired (ping fail streak=%u) ====",
+		   (uint_t) g_ping_fail_streak);
+	syslog(LOG_NOTICE,
+		   "STALL: tx_calls=%u tx_errs=%u last_tx_ret=%d",
+		   (uint_t) g_netstall_tx_calls, (uint_t) g_netstall_tx_errs,
+		   (int_t) g_netstall_last_tx_ret);
+	syslog(LOG_NOTICE,
+		   "STALL: heap_free=%u tcp_bytes=%u udp_bytes=%u",
+		   (uint_t) esp_shim_heap_free_size(),
+		   (uint_t) g_tcp_bytes_echoed, (uint_t) g_udp_bytes_echoed);
+
+	for (i = 0; i < NUM_ELEM(s_tsk_names); i++) {
+		stall_dump_task(s_tsk_names[i].id, s_tsk_names[i].name);
+	}
+	for (i = 0; i < NUM_ELEM(s_dtq_names); i++) {
+		stall_dump_dtq(s_dtq_names[i].id, s_dtq_names[i].name);
+	}
+	syslog(LOG_NOTICE, "STALL: ==== snapshot done ====");
+}
+
+void
+netstall_trace_ping_result(int ok)
+{
+	if (ok) {
+		g_ping_fail_streak = 0;
+		return;
+	}
+	g_ping_fail_streak++;
+	if (g_ping_fail_streak >= STALL_PING_FAIL_THRESHOLD
+		&& !g_stall_snapshot_done) {
+		g_stall_snapshot_done = true;
+		stall_snapshot_dump();
+	}
+}
+
+#endif /* TOPPERS_ESP32C5_NETSTALL_TRACE */
 
 /*
  *  CPU例外フォルト捕捉ハンドラ（apps/wifi_dhcp実施45と同一機構の

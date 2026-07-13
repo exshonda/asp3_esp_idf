@@ -54,6 +54,29 @@ static bool_t		s_dhcp_started;
 static bool_t		s_ip_reported;
 
 /*
+ *  ---- 負荷誘発リンク停止 診断計装（実施47．docs/c5-bringup.md）----
+ *
+ *  net/はC3/C5/C6で完全共有（本ファイルも同一ソース）のため，
+ *  ★TOPPERS_ESP32C5_NETSTALL_TRACEでガードし，未定義時（C3/C6の通常
+ *  ビルド含む全ビルド）は完全no-opにする加算的変更のみとする
+ *  （CLAUDE.md「サブエージェントで調査を回すときの鉄則」）。
+ *
+ *  - g_netstall_tx_calls/errs/last_tx_ret：low_level_output（＝
+ *    esp_wifi_internal_txの唯一の呼出し元）の直近戻り値と累積エラー数。
+ *    apps/load_test_c5のスナップショットダンプから参照する。
+ *  - netstall_trace_ping_result()：net_ping_result（1Hz raw pingの
+ *    成否コールバック．tcpip_thread文脈）にフックし，連続失敗で
+ *    停止検出→スナップショット発火のトリガに使う（実体はapps/
+ *    load_test_c5.c）。
+ */
+#ifdef TOPPERS_ESP32C5_NETSTALL_TRACE
+volatile uint32_t	g_netstall_tx_calls;
+volatile uint32_t	g_netstall_tx_errs;
+volatile int32_t	g_netstall_last_tx_ret;
+extern void netstall_trace_ping_result(int ok);
+#endif /* TOPPERS_ESP32C5_NETSTALL_TRACE */
+
+/*
  *  ---- 送信（tcpip_thread文脈．linkoutputはpbufを解放しない＝呼出し元の
  *  責務）----
  *
@@ -67,6 +90,7 @@ low_level_output(struct netif *netif, struct pbuf *p)
 	static uint8_t	txbuf[1600];
 	struct pbuf		*q;
 	uint16_t		total = 0;
+	esp_err_t		txret;
 
 	(void) netif;
 	for (q = p; q != NULL; q = q->next) {
@@ -76,8 +100,15 @@ low_level_output(struct netif *netif, struct pbuf *p)
 		memcpy(&txbuf[total], q->payload, q->len);
 		total += q->len;
 	}
-	return((esp_wifi_internal_tx(WIFI_IF_STA, txbuf, total) == ESP_OK)
-		   ? ERR_OK : ERR_IF);
+	txret = esp_wifi_internal_tx(WIFI_IF_STA, txbuf, total);
+#ifdef TOPPERS_ESP32C5_NETSTALL_TRACE
+	g_netstall_tx_calls++;
+	g_netstall_last_tx_ret = (int32_t) txret;
+	if (txret != ESP_OK) {
+		g_netstall_tx_errs++;
+	}
+#endif /* TOPPERS_ESP32C5_NETSTALL_TRACE */
+	return((txret == ESP_OK) ? ERR_OK : ERR_IF);
 }
 
 /*
@@ -135,6 +166,9 @@ void
 net_ping_result(int ok)
 {
 	syslog(LOG_NOTICE, "net: ping gateway -> %s", ok ? "OK" : "timeout");
+#ifdef TOPPERS_ESP32C5_NETSTALL_TRACE
+	netstall_trace_ping_result(ok);
+#endif /* TOPPERS_ESP32C5_NETSTALL_TRACE */
 }
 
 void
