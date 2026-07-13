@@ -454,6 +454,26 @@ puts(const char *s)
 }
 
 /*
+ *  printf（BLE実施01．ESP32-C6/C5世代BTコントローラblob
+ *  ＝libble_app.aが（ESP_LOGx経由でなく）直接printf()を呼ぶ箇所が
+ *  複数実在する＝filter_duplicate.c.o／filter_data_base.c.o等．
+ *  ASP3にはstdout概念が無いためsyslogへ折返す（esp_log()と同型）．
+ */
+int
+printf(const char *format, ...)
+{
+	char	buf[128];
+	va_list	args;
+	int		ret;
+
+	va_start(args, format);
+	ret = vsnprintf(buf, sizeof(buf), format, args);
+	va_end(args);
+	syslog(LOG_NOTICE, "%s", buf);
+	return(ret);
+}
+
+/*
  *  setbuf（バッファリング設定．ASP3にストリームI/Oは無いためno-op）
  */
 struct __FILE;

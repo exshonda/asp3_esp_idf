@@ -54,6 +54,14 @@ SECTIONS
          *  問題ない）
          */
         *(.iram1 .iram1.*)
+        /*
+         *  BLE実施01：libble_app.a（BTコントローラblob）が要求する
+         *  高速実行用セクション．明示ルールが無いとorphan section扱いと
+         *  なり.dataとLMAが重なりリンクエラーになる（実機リンクで判明．
+         *  上のコメントと同じ理由・同じ対策）．
+         */
+        *(.high_perf_code_iram1 .high_perf_code_iram1.*)
+        *(.adv_fast_execute_code_iram1 .adv_fast_execute_code_iram1.*)
         *(.coexiram .coexiram.*)
         *(.wifi0iram .wifi0iram.*)
         *(.wifiextrairam .wifiextrairam.*)

@@ -658,21 +658,17 @@ wifi_reset_mac_wrapper(void)
  *  示す（C5実施34「regi2cマスタ自体のICGゲート」と同一機構のC6版）．
  *  詳細はdocs/wifi-shim-c6.md 実施91参照．
  */
-static void
-esp_shim_modem_icg_init(void)
-{
-	pmu_dev_t			*pmu = (pmu_dev_t *)0x600B0000U;
-	modem_lpcon_dev_t	*lpcon = (modem_lpcon_dev_t *)0x600AF000U;
-	modem_syscon_dev_t	*syscon = (modem_syscon_dev_t *)0x600A9800U;
-	uint32_t			code_bit = 1U << 2;	/* BIT(PMU_HP_ICG_MODEM_CODE_ACTIVE=2) */
+extern void esp_shim_modem_icg_init(void);
+/*
+ *  ★BLE実施01：本関数の実体はwifi/esp_shim.cへ移設した（ESP32C6_WIFI/
+ *  ESP32C6_BTの両方でリンクされる共有ファイルのため）．BT単体ビルド
+ *  （ESP32C6_WIFI=OFF）は本ファイル（esp_wifi_adapter.c）自体が
+ *  コンパイル対象外になり，wifi_clock_enable_wrapper()経由の呼出しが
+ *  発生しないため，BT側は別途bt/bt_shim.cから直接esp_shim_modem_icg_
+ *  init()を呼ぶ（実施91の根治をBTパスにも適用．詳細はdocs/ble-c5c6.md
+ *  「BLE実施01」参照）．
+ */
 
-	pmu_ll_hp_set_icg_modem(pmu, PMU_MODE_HP_ACTIVE, 2U);
-	modem_syscon_ll_set_modem_apb_icg_bitmap(syscon, code_bit);
-	modem_lpcon_ll_set_i2c_master_icg_bitmap(lpcon, code_bit);
-	modem_lpcon_ll_set_lp_apb_icg_bitmap(lpcon, code_bit);
-	pmu_ll_imm_update_dig_icg_modem_code(pmu, true);
-	pmu_ll_imm_update_dig_icg_switch(pmu, true);
-}
 
 static void
 wifi_clock_enable_wrapper(void)

@@ -42,6 +42,10 @@
 								   Bluetooth単体ビルドではmbedtlsを
 								   リンクしないため未定義時は除外する） */
 #endif /* TOPPERS_ESP32C3_WIFI || TOPPERS_ESP32C6_WIFI */
+#include "hal/regi2c_ctrl_ll.h"
+#include "hal/modem_lpcon_ll.h"
+#include "hal/modem_syscon_ll.h"
+#include "hal/pmu_ll.h"
 
 /*
  *  クリティカルセクション（mstatus.MIEの退避・復元＝ネスト対応）
@@ -60,6 +64,44 @@ esp_shim_int_restore(uint32_t state)
 {
 	if (state != 0U) {
 		Asm("csrsi mstatus, 8");
+	}
+}
+
+/*
+ *  ------------------------------------------------------------------
+ *  esp_shim_enter_critical／esp_shim_exit_critical（BLE実施01．
+ *  bt/stub/include/freertos/FreeRTOS.hのportENTER/EXIT_CRITICALが
+ *  委譲する．esp_shim_int_disable/restoreと異なりネストカウンタを
+ *  持つ——C3のBT/BLE統合（docs/bt-shim.md）で確立した教訓を最初から
+ *  適用する：npl_os_freertos.c（NimBLE NPL）はportENTER_CRITICALの
+ *  再入（同一タスク内で既にクリティカルセクション中にさらに入る）を
+ *  行う箇所があり，単純なsave/restoreだと外側の区間で先に割込みが
+ *  再度有効化されてしまう．ASP3は単一コアのためmuxは無視．
+ *  ------------------------------------------------------------------
+ */
+static volatile uint32_t	shim_crit_nest;
+static volatile uint32_t	shim_crit_saved;
+
+void
+esp_shim_enter_critical(void)
+{
+	uint32_t	state;
+
+	Asm("csrrci %0, mstatus, 8" : "=r"(state));
+	if (shim_crit_nest == 0U) {
+		shim_crit_saved = state & 8U;
+	}
+	shim_crit_nest++;
+}
+
+void
+esp_shim_exit_critical(void)
+{
+	if (shim_crit_nest > 0U) {
+		shim_crit_nest--;
+		if (shim_crit_nest == 0U && shim_crit_saved != 0U) {
+			Asm("csrsi mstatus, 8");
+		}
 	}
 }
 
@@ -326,6 +368,21 @@ int32_t
 esp_shim_sem_give(void *sem)
 {
 	return(sig_sem((ID)(intptr_t)sem) == E_OK ? 1 : 0);
+}
+
+/*
+ *  現在のセマフォ資源数（FreeRTOS uxSemaphoreGetCount相当．BLE実施01
+ *  ＝NimBLE NPL用．bt/stub/include/freertos/semphr.hが要求）．
+ */
+uint32_t
+esp_shim_sem_get_count(void *sem)
+{
+	T_RSEM	rsem;
+
+	if (ref_sem((ID)(intptr_t)sem, &rsem) != E_OK) {
+		return(0U);
+	}
+	return((uint32_t)rsem.semcnt);
 }
 
 /*
@@ -607,6 +664,26 @@ esp_shim_queue_recv(void *que, void *item, uint32_t block_time_tick)
 	return(1);
 }
 
+/*
+ *  キューを空にする（FreeRTOS xQueueReset相当．BLE実施01＝NimBLE NPL
+ *  用．bt/stub/include/freertos/queue.hが要求）．固定プール化以降は
+ *  freeせずスロットをfree_stkへ回収する．
+ */
+void
+esp_shim_queue_reset(void *que)
+{
+	SHIM_QUE	*q = (SHIM_QUE *)que;
+	intptr_t	data;
+
+	if (q != NULL) {
+		while (prcv_dtq(q->dtqid, &data) == E_OK) {
+			SHIM_LOCK();
+			shim_que_slot_free(q, (uint32_t)data);
+			SHIM_UNLOCK();
+		}
+	}
+}
+
 uint32_t
 esp_shim_queue_msg_waiting(void *que)
 {
@@ -743,7 +820,14 @@ esp_shim_task_delay(uint32_t tick)
 
 	(void) dly_tsk((RELTIM)(tick * 1000U));
 	t1 = (uint32_t)esp_shim_time_us();
+#if defined(TOPPERS_ESP32C6_WIFI)
+	/*  wifi_trace.cはWiFi専用の一時計装ファイル（--wrap前提）のため
+	 *  BT単体ビルドではリンクしない．BLE実施01で本ファイル
+	 *  （esp_shim.c）がWiFi/BT共有になったため呼出しをガードする．  */
 	wifi_taskdelay_capture(tick, t0, t1 - t0);
+#else
+	(void) t0; (void) t1;
+#endif
 }
 
 void *
@@ -1041,6 +1125,36 @@ shim_int_dispatch(int intno)
 void esp_shim_inthdr_1(void) { shim_int_dispatch(1); }
 void esp_shim_inthdr_2(void) { shim_int_dispatch(2); }
 void esp_shim_inthdr_3(void) { shim_int_dispatch(3); }
+
+/*
+ *		modem ICG（Internal Clock Gating）初期化
+ *
+ *  ★実施91（docs/wifi-shim-c6.md）：PMU HP_ACTIVE ICG_MODEM_REG
+ *  （0x600B000C，dig_icg_modem_code，bits[31:30]）がPOR既定code=0の
+ *  ままだとregi2cマスタ/modem APBクロックが永久ゲートされ，cold boot
+ *  時にwait_i2c_sdm_stableが無限ループする（=phy_initハング）．
+ *  元々はWi-Fi専用esp_wifi_adapter.cのwifi_clock_enable_wrapper()内
+ *  static関数だったが，BLE実施01でBT単体ビルド（ESP32C6_WIFI=OFF）
+ *  でも同じ根治が要るとわかったため，WiFi/BT共有ファイルの本ファイル
+ *  （ESP32C6_WIFI・ESP32C6_BTどちらでもリンクされる）へ移設した．
+ *  呼出し元＝WiFi: esp_wifi_adapter.cのwifi_clock_enable_wrapper()，
+ *  BT: bt/bt_shim.cのesp_shim_bt_clock_init()．
+ */
+void
+esp_shim_modem_icg_init(void)
+{
+	pmu_dev_t			*pmu = (pmu_dev_t *)0x600B0000U;
+	modem_lpcon_dev_t	*lpcon = (modem_lpcon_dev_t *)0x600AF000U;
+	modem_syscon_dev_t	*syscon = (modem_syscon_dev_t *)0x600A9800U;
+	uint32_t			code_bit = 1U << 2;	/* BIT(PMU_HP_ICG_MODEM_CODE_ACTIVE=2) */
+
+	pmu_ll_hp_set_icg_modem(pmu, PMU_MODE_HP_ACTIVE, 2U);
+	modem_syscon_ll_set_modem_apb_icg_bitmap(syscon, code_bit);
+	modem_lpcon_ll_set_i2c_master_icg_bitmap(lpcon, code_bit);
+	modem_lpcon_ll_set_lp_apb_icg_bitmap(lpcon, code_bit);
+	pmu_ll_imm_update_dig_icg_modem_code(pmu, true);
+	pmu_ll_imm_update_dig_icg_switch(pmu, true);
+}
 
 /*
  *		初期化
