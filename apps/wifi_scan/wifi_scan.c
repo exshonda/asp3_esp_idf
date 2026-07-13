@@ -639,6 +639,65 @@ main_task(EXINF exinf)
 	 */
 	r40_pmupulse_cycle();
 #endif /* ESP32C5_R40_PMUPULSE */
+#ifdef ESP32C5_R41_CALL_ESPWIFIINIT
+	/*
+	 *  【実施41・変種A（主変種）】外部AI候補2＝実施35の残差19語のうち
+	 *  R/Wで注入可能な14語を，esp_wifi_init直前で一括注入する。
+	 */
+	{
+		extern void esp32c5_r41_combined_seed(void);
+		esp32c5_r41_combined_seed();
+		syslog(LOG_NOTICE, "wifi_scan: R41SEED called (ESPWIFIINIT variant)");
+		/*  実施35 12節・rigor docの「syslogバースト損失」対策：blob側の
+		 *  並行UART出力（esp_wifi_init直前後のpp/mac_vers等）と衝突しない
+		 *  よう，各syslog呼出しの間にログタスクへ処理時間を与える。  */
+		(void) tslp_tsk(50000);
+	}
+#endif /* ESP32C5_R41_CALL_ESPWIFIINIT */
+#ifdef ESP32C5_R41_COMBINED19
+	/*
+	 *  変種A・変種B共通：esp_wifi_init直前（＝較正直前）に14語の
+	 *  「生」再読取りを行い，注入がこの時点まで保持されているかを
+	 *  確認する（変種Bの場合は特に，boot-hook末尾からここまでの間に
+	 *  ASP3自身の他の処理やHWの自動補正で上書きされていないかの確認）。
+	 */
+	{
+		extern void esp32c5_r41_dump_live(void);
+		extern uint32_t esp32c5_r41_live_readback[14];
+		extern uint32_t esp32c5_r41_live_mismatch_count;
+		extern uint32_t esp32c5_r41_mismatch_count;
+		extern uint32_t esp32c5_r41_first_mismatch_addr;
+		esp32c5_r41_dump_live();
+		syslog(LOG_NOTICE,
+			   "wifi_scan: R41 seed_mismatch=%d live_mismatch=%d first_mismatch_addr=%x",
+			   (int_t)esp32c5_r41_mismatch_count,
+			   (int_t)esp32c5_r41_live_mismatch_count,
+			   (int_t)esp32c5_r41_first_mismatch_addr);
+		(void) tslp_tsk(50000);
+		syslog(LOG_NOTICE, "wifi_scan: R41 live0-3 %x %x %x %x",
+			   (int_t)esp32c5_r41_live_readback[0],
+			   (int_t)esp32c5_r41_live_readback[1],
+			   (int_t)esp32c5_r41_live_readback[2],
+			   (int_t)esp32c5_r41_live_readback[3]);
+		(void) tslp_tsk(50000);
+		syslog(LOG_NOTICE, "wifi_scan: R41 live4-7 %x %x %x %x",
+			   (int_t)esp32c5_r41_live_readback[4],
+			   (int_t)esp32c5_r41_live_readback[5],
+			   (int_t)esp32c5_r41_live_readback[6],
+			   (int_t)esp32c5_r41_live_readback[7]);
+		(void) tslp_tsk(50000);
+		syslog(LOG_NOTICE, "wifi_scan: R41 live8-11 %x %x %x %x",
+			   (int_t)esp32c5_r41_live_readback[8],
+			   (int_t)esp32c5_r41_live_readback[9],
+			   (int_t)esp32c5_r41_live_readback[10],
+			   (int_t)esp32c5_r41_live_readback[11]);
+		(void) tslp_tsk(50000);
+		syslog(LOG_NOTICE, "wifi_scan: R41 live12-13 %x %x",
+			   (int_t)esp32c5_r41_live_readback[12],
+			   (int_t)esp32c5_r41_live_readback[13]);
+		(void) tslp_tsk(50000);
+	}
+#endif /* ESP32C5_R41_COMBINED19 */
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_init");
 	err = esp_wifi_init(&cfg);
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_init -> %d", (int_t)err);

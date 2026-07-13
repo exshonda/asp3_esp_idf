@@ -36,6 +36,18 @@
 							   （下記hardware_init_hook参照） */
 #endif
 
+/*
+ *  【実施41】呼出し側マクロ（ESP32C5_R41_CALL_BOOTHOOK／
+ *  ESP32C5_R41_CALL_ESPWIFIINIT）はいずれもESP32C5_R41_COMBINED19が
+ *  提供する関数・データを使うため，呼出し側マクロだけがビルドへ渡され
+ *  定義側マクロが未定義という取り違えを防ぐために自動的に含意する。
+ */
+#if defined(ESP32C5_R41_CALL_BOOTHOOK) || defined(ESP32C5_R41_CALL_ESPWIFIINIT)
+#ifndef ESP32C5_R41_COMBINED19
+#define ESP32C5_R41_COMBINED19 1
+#endif
+#endif
+
 #ifdef TOPPERS_ESP32C5_WIFI
 /*
  *  【実施31】較正キー(A)候補の加算移植：stockの2nd-stageブートローダが
@@ -592,6 +604,162 @@ esp32c5_r35_pmu_hp_sleep_bank_fixed(void)
 	sil_wrw_mem((void *)ESP32C5_R35_PMU_IMM_MODEM_ICG, (1U << 31));
 	sil_wrw_mem((void *)ESP32C5_R35_PMU_IMM_SLEEP_SYSCLK, (1U << 28));
 }
+
+#ifdef ESP32C5_R41_COMBINED19
+/*
+ *  【実施41】候補2（外部AI回答tmp/external_ai_c5_answer_fable.md）：
+ *  実施35 10節が確定した「未説明の差分19語」（asp3cold_full_cand4_boot1.
+ *  json vs handoff_blocks_boot1.json，本ラウンドでスクラッチ資産から
+ *  再計算し直し完全一致を確認済み）を，個別注入ではなく**一括**で冷間
+ *  ASP3へ注入し，組合せマスキング（個別には効かないが複数同時なら
+ *  効く，という可能性）の有無を判定する。
+ *
+ *  19語のうち5語はESP-IDF v6.1のレジスタヘッダ（soc/pmu_reg.h・
+ *  soc/lpperi_reg.h・soc/pvt_reg.h）でビット単位に照合した結果，
+ *  差分ビットが**読取専用（RO）**であると確定したため注入対象から
+ *  除外した（実施35時点の分類より精密化——特にLPPERI+0x8/+0x28は
+ *  ヘッダ上「RNG_DATA/RNG_DATA_SYNC」＝生きたRNGエントロピー出力その
+ *  ものであり，LPPERI+0x24もR/W設定ビット[11:0]は両条件で完全一致・
+ *  差分は純粋にRO統計カウンタ[31:24](RNG_SAMPLE_CNT)——実施22の
+ *  「BOD/グリッチ検出器ノイズ」という分類は方向としては正しかったが，
+ *  正確には「RNGブロックの生きた出力/カウンタ」だったと判明）：
+ *    - PMU_CLK_STATE0（0x600B0198）：全ビットRO（クロックmux状態表示）
+ *    - PVT_MONITOR（0x600190D8）：差分ビット(delay_num_o/timing_err)が
+ *      RO，R/Wビット(monitor_en/delay_limit)は両条件で既に完全一致
+ *    - LPPERI_RNG_DATA（0x600B2808）：全ビットRO（RNG生データ）
+ *    - LPPERI_RNG_DATA_SYNC（0x600B2828）：全ビットRO（RNG同期データ）
+ *    - LPPERI_RNG_CFG（0x600B2824）：差分はRO統計カウンタのみ，R/W
+ *      設定ビットは既に一致（このアドレスは実施31の
+ *      esp32c5_r31_bootloader_random_cycle()が両条件で同一に書込む
+ *      対象でもあり，「同一ソフトウェアで同一に駆動されている」という
+ *      実施35 7〜8節の前提とも整合する）
+ *
+ *  残り14語がR/W（設定可能）と確認できたため注入対象とする。値は
+ *  ハンドオフ(WORKS)側の実測スナップショット（本ラウンドで
+ *  handoff_blocks_boot1.jsonから再計算・確認）。PMU_HP_ACTIVE_
+ *  HP_REGULATOR0とLP_AON_STORE1(RTC_SLOW_CLK_CAL)は実施35で個別に
+ *  既にcausal refute済み（前者はPVT自動dbiasループが書込み直後に
+ *  上書きすることも確認済み——本関数の直後読み戻しでは正しい値が
+ *  一旦観測される可能性があるが，esp_wifi_init直前の再読取り
+ *  （esp32c5_r41_dump_live，wifi_scan.c側）で保持されているかを
+ *  別途確認する）。他12語は個別注入は未実施（実施22/23の「机上棄却」
+ *  ＝レジスタ意味論からの推定のみ）——本ラウンドが初めての実注入。
+ *
+ *  ★安全上の注意（実施23/24の既知の罠）：PD_TOP/HPAON/HPCPU/LPPERI
+ *  force解除（本表の4語）は，実施23で「WiFi init時点の後付け移植で
+ *  書くとJTAG捕捉のブート到達性が悪化する」現象が報告され，実施24が
+ *  UART専用（JTAG不使用）で症状不変（causal refute側）を確認したのみ
+ *  で，JTAG特有の再現性は未検証のまま`#if 0`保留になっていた。本関数
+ *  はJTAGでの読み戻し確認を必須としないソフト自己完結読み戻し（本関数
+ *  自身のimmediate readback＋LP_AON STORE2-4への鏡写し）を主手段とし，
+ *  外部JTAGでのhalt/mdwは別プロセス（reset_and_read.py，起動完了後の
+ *  非同期アタッチ）で行うことで，実施23が踏んだ「JTAG halt自体が
+ *  書込みタイミングと絡む」経路を避ける。
+ */
+struct esp32c5_r41_word {
+	uint32_t	addr;
+	uint32_t	handoff_val;
+};
+
+static const struct esp32c5_r41_word esp32c5_r41_words[14] = {
+	/*  実施35候補3で個別refute済み・PVT自動dbiasループが上書きする
+	 *  ことも確認済み（動的値，「ハンドオフ側スナップショット」を
+	 *  注入する規約に従う）。  */
+	{ 0x600B0028U, 0xC004AFD0U },	/* PMU_HP_ACTIVE_HP_REGULATOR0 */
+	/*  実施23/24で個別refute済み（PD_TOP/HPAON/HPCPU/LPPERI force解除
+	 *  クラスタ，安全上の注意は上記コメント参照）。  */
+	{ 0x600B00F8U, 0x00000000U },	/* PMU_POWER_PD_TOP_CNTL */
+	{ 0x600B00FCU, 0x00000000U },	/* PMU_POWER_PD_HPAON_CNTL */
+	{ 0x600B0100U, 0x00000000U },	/* PMU_POWER_PD_HPCPU_CNTL */
+	{ 0x600B010CU, 0x00000000U },	/* PMU_POWER_PD_LPPERI_CNTL */
+	{ 0x600B0110U, 0xF0000000U },	/* PMU_POWER_PD_MEM_CNTL（同クラスタ） */
+	/*  個別注入は未実施（実施22/23の机上棄却のみ）。本ラウンドが
+	 *  初めての実注入。  */
+	{ 0x600B0130U, 0x00020000U },	/* PMU_SLP_WAKEUP_CNTL3 */
+	{ 0x600B0404U, 0x00000000U },	/* LP_CLKRST_LP_CLK_PO_EN */
+	{ 0x600B0418U, 0x19000000U },	/* LP_CLKRST_FOSC_CNTL(DFREQ 172→100) */
+	{ 0x600B2800U, 0x41000000U },	/* LPPERI_CLK_EN_REG */
+	{ 0x600B2C00U, 0x6FFC02C0U },	/* LP_ANA_BOD_MODE0_CNTL_REG */
+	{ 0x600B2C0CU, 0xFFFFFFC1U },	/* LP_ANA_FIB_ENABLE_REG */
+	{ 0x600B2C18U, 0x80000000U },	/* LP_ANA_INT_ENA_REG */
+	/*  実施35候補2で個別refute済み（値は本ラウンドのハンドオフ実測へ
+	 *  更新——実施35時点の固定値0x358b20と僅かに異なる，オシレータの
+	 *  ブート間variationの範囲内）。  */
+	{ 0x600B1004U, 0x00359755U },	/* LP_AON_STORE1(RTC_SLOW_CLK_CAL) */
+};
+
+#define ESP32C5_R41_LP_AON_STORE2   0x600B1008U
+#define ESP32C5_R41_LP_AON_STORE3   0x600B100CU
+#define ESP32C5_R41_LP_AON_STORE4   0x600B1010U
+#define ESP32C5_R41_MARKER          0xC0FFEE41U
+
+uint32_t	esp32c5_r41_readback[14];
+uint32_t	esp32c5_r41_mismatch_count;
+uint32_t	esp32c5_r41_first_mismatch_addr;
+
+/*
+ *  14語を書込み→即座に読み戻して確認する。呼出し位置は2変種
+ *  （ESP32C5_R41_CALL_BOOTHOOK＝hardware_init_hook末尾／
+ *  ESP32C5_R41_CALL_ESPWIFIINIT＝wifi_scan.cのesp_wifi_init直前）。
+ *  結果は.bss配列（esp32c5_r41_readback[]）に加え，LP_AON STORE2〜4
+ *  （ハードウェアレジスタ，.bssクリアの影響を受けない）にも鏡写しする
+ *  ——boot-hook末尾変種では実施36が学習したとおり.bssがこの後の
+ *  カーネル起動時クリアで消える可能性があるため。
+ */
+void
+esp32c5_r41_combined_seed(void)
+{
+	uint32_t	i;
+	uint32_t	v;
+	uint32_t	mismatch = 0U;
+	uint32_t	first_addr = 0xFFFFFFFFU;
+
+	for (i = 0U; i < 14U; i++) {
+		sil_wrw_mem((void *)esp32c5_r41_words[i].addr,
+					esp32c5_r41_words[i].handoff_val);
+		v = sil_rew_mem((void *)esp32c5_r41_words[i].addr);
+		esp32c5_r41_readback[i] = v;
+		if (v != esp32c5_r41_words[i].handoff_val) {
+			if (mismatch == 0U) {
+				first_addr = esp32c5_r41_words[i].addr;
+			}
+			mismatch++;
+		}
+	}
+	esp32c5_r41_mismatch_count = mismatch;
+	esp32c5_r41_first_mismatch_addr = first_addr;
+
+	sil_wrw_mem((void *)ESP32C5_R41_LP_AON_STORE2, mismatch);
+	sil_wrw_mem((void *)ESP32C5_R41_LP_AON_STORE3, ESP32C5_R41_MARKER);
+	sil_wrw_mem((void *)ESP32C5_R41_LP_AON_STORE4, first_addr);
+}
+
+/*
+ *  scan/esp_wifi_init直前の「生」再読取り（.bssではなく実レジスタを
+ *  直接読む）。注入がesp_wifi_init直前（同一呼出しの直後）でも
+ *  boot-hook末尾（較正・PVTループ等を経た後）でも，較正直前の時点で
+ *  実際に14語が保持されているかを確認する共通ダンプ関数。
+ */
+uint32_t	esp32c5_r41_live_readback[14];
+uint32_t	esp32c5_r41_live_mismatch_count;
+
+void
+esp32c5_r41_dump_live(void)
+{
+	uint32_t	i;
+	uint32_t	v;
+	uint32_t	mismatch = 0U;
+
+	for (i = 0U; i < 14U; i++) {
+		v = sil_rew_mem((void *)esp32c5_r41_words[i].addr);
+		esp32c5_r41_live_readback[i] = v;
+		if (v != esp32c5_r41_words[i].handoff_val) {
+			mismatch++;
+		}
+	}
+	esp32c5_r41_live_mismatch_count = mismatch;
+}
+#endif /* ESP32C5_R41_COMBINED19 */
 
 static void
 esp32c5_r32_cpu_clock_switch(void)
@@ -1333,6 +1501,20 @@ hardware_init_hook(void)
 	 */
 	esp32c5_r31_bootloader_random_cycle();
 #endif /* TOPPERS_ESP32C5_WIFI */
+
+#ifdef ESP32C5_R41_CALL_BOOTHOOK
+	/*
+	 *  【実施41・変種B（外部AI Q3-3対策）】boot-hook末尾＝ブート直後
+	 *  （esp_wifi_init/PHY較正より前，実施31のRNGサイクル等ASP3自身の
+	 *  boot時処理は全て完了した後）で候補2（19語中14語）を注入する。
+	 *  「初期化時に一度だけ読まれる」性質の語が万一あった場合の偽陰性
+	 *  （esp_wifi_init直前では遅すぎる）を排除する変種。既定では未定義
+	 *  （通常のCold Bootでは効果なし）。esp_wifi_init直前の変種
+	 *  （ESP32C5_R41_CALL_ESPWIFIINIT，wifi_scan.c側）と排他利用を想定
+	 *  （両方同時定義も害はないが二重書込みになるだけで無意味）。
+	 */
+	esp32c5_r41_combined_seed();
+#endif /* ESP32C5_R41_CALL_BOOTHOOK */
 }
 
 void
