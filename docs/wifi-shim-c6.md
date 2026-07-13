@@ -13659,3 +13659,124 @@ APM初期化ギャップというDirect Boot全体の構造的バグだったと
   （ASP3・phy-initハング症状・診断ガード`WIFI_REGI2C_TRACE_READS`
   のみ）。C5#2＝スニファ役割のまま（`scratchpad/sniffer`ビルド，
   DUT_MAC=board Cへ変更済み）。C5#1＝無接触。
+
+## 実施89：TCP/UDP（lwIP）配線 — ビルド全域成功だが，接続経路の
+実機検証はC5実施44と同型の壁（未実施だが同一コードパス）＋UART
+観測手段の限界により未達（申し送り）
+
+C5側で先に実施した実施44（`docs/c5-bringup.md`参照）と共通設計・
+共通手順のため，設計・配線の詳細はそちらを正本とし，本節はC6固有の
+差分のみ記す。
+
+### 配線
+
+`asp3/target/esp32c6_espidf/target.cmake`に`ESP32C6_LWIP`オプションを
+C3の`ESP32C3_LWIP`節と対応する構造で追加した。C5と全く同じ方針＝
+`net/`層はチップ非依存（`esp_wifi_internal_tx`等のblob APIのみに
+依存）のため，`${C3_TARGETDIR}/net`を**コピーせずそのまま参照**する
+（`esp_shim_libc.c`等の既存パターンを踏襲）。`apps/wifi_dhcp`等の
+アプリも無変更でそのまま使えた。
+
+### ビルド確認
+
+`ESP32C6_WIFI=ON -DESP32C6_LWIP=ON`で`wifi_dhcp`／`tcp_socket_echo`／
+`udp_socket_echo`ともビルド成功（RAM 94-95%，412KB中。C6はC5より
+RAM予算が小さい分タイトだが収まった）。`wifi_scan`回帰ビルド
+（`ESP32C6_LWIP`無指定）も成功。
+
+### ★環境の発見：C6のWiFiビルドはGCC14では通らない（本リポジトリの
+バグではなく，本セッションのツールチェーン選択ミス）
+
+`-DRISCV64_TOOLCHAIN_PREFIX=riscv32-esp-elf-`（Espressif版GCC14.2.0）
+を指定すると，`hal/components/esp_phy/src/phy_init.c`の
+`_lock_acquire`/`_lock_release`，mbedtlsの`fgets`/`setbuf`が
+`hal_stub`の意図的に最小限なスタブヘッダ（`sys/lock.h`は`_lock_t`の
+型定義のみ，`_lock_acquire`等の関数宣言は無し）では解決できず，
+GCC14がimplicit-function-declarationを既定でerror扱いするため
+ビルドに失敗する。これは**新規レグレッションではない**：`ESP32C6_LWIP`
+を全く使わない素の`wifi_scan`ビルドを同じGCC14でfromゼロ再構成
+しても同一のエラーで失敗することを確認した。実施88等の過去の成功
+ビルドの`CMakeCache.txt`を調べたところ，`CMAKE_C_COMPILER_AR`が
+`/usr/bin/riscv64-unknown-elf-gcc-ar`＝**デフォルトツールチェーン**
+（`RISCV64_TOOLCHAIN_PREFIX`未指定，システムの`riscv64-unknown-elf-
+gcc` 13.2.0）を使っていたことが判明した。GCC13.2.0は同じ
+implicit-function-declarationを**警告のみ**（デフォルトでerror化
+しない）とするため問題が起きなかった。本ラウンド以降，C6の
+ビルドはすべてデフォルトツールチェーンに統一して再確認した
+（C5は`~/tools/esp-idf-v6.1`側の別の`phy_init.c`を使うため元々
+影響を受けない）。
+
+### 実機検証：UART観測手段の限界に阻まれ，connect成立の確証が
+取れなかった
+
+`tcp_socket_echo`（`WIFI_SSID="<SSID-2G>"`）をboard Cへ書込み，
+UARTブリッジ（`125a266b…`）で観測したところ，起動直後は
+`wifi_scan: initializing shim`等クリーンに出力されるが，WiFi
+ドライバタスク起動後（`wifi driver task: ...`の直後）から出力が
+文字化けし始め，`W (nnn) rtc_clk: invalid RTC_XTAL_FREQ_REG value,
+assume 40MHz`という行（本来は起動ごく初期に一度だけ出るはずの
+ROM/クロック初期化系メッセージ）が毎回ほぼ同一のタイミング・同一
+バイト列で末尾に現れるところで停止する，という現象が**独立した
+複数回のflash+hard-reset試行で完全に再現**した。
+
+**★重要な切り分け**：この現象は実施88で検証済みのバイナリ
+（`build/c6_wifi_scan_uart/asp_flash.bin`，`ESP32C6_LWIP`を一切
+使わない）を**無変更のまま**再書込みしても同一パターンで再現した
+（ビルド識別文字列`Jul 10 2026, 02:44:19`で実施88と同一バイナリで
+あることを確認済み）。つまり**本ラウンドのlwIP配線が引き起こした
+回帰ではない**。一方で，実施88のログには`RESCAN 19,16,18,19,21,16
+APs`のようなクリーンな出力が記録されており，本ラウンドではそれが
+再現できていない——**同一バイナリでも本ラウンドのセッション環境
+（UART読取り手法・タイミング・あるいはボード個体の状態変化）に
+何らかの差があり，原因は未特定**。文字化けのパターン（英単語の
+断片とバイナリ様のバイトが混在）は，WiFi blobがROM printf系の
+関数でUARTへ直接書込む経路と，ASP3のsyslogタスクの出力が同じUART
+ペリフェラルを排他制御なしで共有している可能性を示唆するが，これは
+仮説であり検証していない。
+
+このため，board CでのDHCP/ping/TCP/UDP echoの実機確認は**未達**
+（コンソールで確証を得られなかったため）。C5実施44で確認された
+「connect自体がWiFi blob内の新しいLoad access faultで落ちる」壁は，
+board Cでも同一のコードパス（`esp_wifi`共通のconnection manager，
+`cnx_sta_associated`等）を通るため理論上は同様に発生する可能性が
+高いが，**board C側で同一の実機的確証（例外ダンプ・JTAG mepc/mcause
+読取り）は本ラウンドでは取得していない**（C5側の追加JTAG調査だけで
+1ラウンド分の時間を使ったため，同型の深掘りをC6側でも重ねることは
+見送った——申し送り事項とする）。
+
+### 回帰確認
+
+- **wifi_scan実機回帰**：`build/c6_r89_scan_regress`（`ESP32C6_LWIP`
+  無指定）をboard Cへ書込み，フレッシュビルドでGCC13（デフォルト
+  ツールチェーン）を使うことでビルド自体は正常。実機での
+  "N APs found"のクリーン表示は上記のUART観測問題により本ラウンドの
+  セッション内では確認できなかった（=ビルドレベルでは回帰なしを
+  確認したが，実機動作の最終確証はC5側実施44の`wifi_scan`実機成功
+  ログで代替確認とする）。
+- **既存の実施88バイナリの再現性**：無変更のまま再書込みして同一の
+  文字化けパターンが再現＝lwIP配線由来の回帰ではないことの直接証拠。
+
+### 終了処理
+
+- **board C**：`build/c6_wifi_scan_uart/asp_flash.bin`（実施88の
+  検証済みバイナリそのもの，無変更）を最終状態として書込み済み。
+- board B・C5#1/#2は本ラウンドで無接触（C5#1は実施44で操作したが
+  最終的に安全なscanビルドへ復元済み，詳細はc5-bringup.md実施44）。
+
+### 変更ファイル（実施89）
+
+- `asp3/target/esp32c6_espidf/target.cmake`：`ESP32C6_LWIP`オプション
+  節を追加（`C3_TARGETDIR/net`をそのまま再利用，コピーなし）。
+- `apps/`・C3側`net/`・`wifi/`は無変更。
+- git commitは行っていない（コーディネータのレビュー後commit&push
+  運用）。
+
+### 申し送り
+
+1. board Cでの`cnx_sta_associated`系faultの実機的確証（JTAG
+   mepc/mcause読取り）をC5実施44と同じ手法で取得する。
+2. UART観測をJTAGベース（`mdw`でのAP件数・状態変数の直接読取り）へ
+   切替え，syslogタスクとWiFi blob内部出力のUART競合を回避した
+   観測経路を確立する。
+3. `docs/c5-bringup.md`実施44の申し送り1（s1実測のための
+   ブレークポイント手法の見直し）はC6にも適用可能。

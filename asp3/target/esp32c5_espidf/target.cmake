@@ -208,6 +208,50 @@ if(ESP32C5_WIFI)
 endif()
 
 #
+#  TCP/IP統合（lwIP．Wi-Fi必須＝ESP32C5_WIFIが前提。実施44）
+#
+#  net/層（sys_arch・netif・lwipopts等）はチップ非依存（esp_wifi_
+#  internal_tx/reg_rxcb／esp_read_mac等のblob APIのみに依存し，
+#  C5固有のレジスタ・アドレスには一切触れない）ため，C3側
+#  （${C3_TARGETDIR}/net）をコピーせずそのまま再利用する．
+#  esp_shim_libc.c等と同じ「chip非依存部はC3_TARGETDIRから直接取込む」
+#  既存パターンを踏襲（docs/tcpip-integration.md，docs/c5-bringup.md
+#  実施44）．
+#
+option(ESP32C5_LWIP "Integrate lwIP (TCP/IP + BSD sockets, requires ESP32C5_WIFI)" OFF)
+if(ESP32C5_LWIP)
+    if(NOT ESP32C5_WIFI)
+        message(FATAL_ERROR "ESP32C5_LWIP requires ESP32C5_WIFI=ON")
+    endif()
+
+    get_filename_component(LWIP_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../lwip ABSOLUTE)
+    include(${LWIP_DIR}/src/Filelists.cmake)
+
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_LWIP)
+
+    list(APPEND ASP3_INCLUDE_DIRS
+        ${LWIP_DIR}/src/include
+        ${LWIP_DIR}/contrib/apps/ping
+        ${LWIP_DIR}/contrib/apps/tcpecho_raw
+        ${C3_TARGETDIR}/net/port/include
+        ${C3_TARGETDIR}/net
+    )
+
+    list(APPEND ASP3_CFG_FILES ${C3_TARGETDIR}/net/net.cfg)
+
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${lwipcore_SRCS}
+        ${lwipcore4_SRCS}
+        ${lwipapi_SRCS}
+        ${LWIP_DIR}/src/netif/ethernet.c
+        ${LWIP_DIR}/contrib/apps/ping/ping.c
+        ${LWIP_DIR}/contrib/apps/tcpecho_raw/tcpecho_raw.c
+        ${C3_TARGETDIR}/net/port/sys_arch.c
+        ${C3_TARGETDIR}/net/netif_esp32c3.c
+    )
+endif()
+
+#
 #  フラッシュイメージ生成等（aspターゲット定義後に取込み）
 #
 set(ASP3_TARGET_RUN_CMAKE ${TARGETDIR}/run.cmake)
