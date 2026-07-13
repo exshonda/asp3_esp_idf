@@ -98,7 +98,17 @@
  *  regression huntにしない・実測を信頼する」指針と同じ考え方）。
  *  docs/c5-bringup.md 実施32参照。
  */
-#define CORE_CLK_MHZ            96  /* 【実施32実測確定】CPUクロック切替え後のmcycle実測95.97〜96.01MHz（4窓で安定）。理論値80MHzとは不一致だが実測を正とする */
+/*
+ *  【実施34確定】BBPLL正規較正の実装（regi2c I2C_BBPLLブロックへの
+ *  48MHz XTALプロファイル書込み＋再較正．target_kernel_impl.cの
+ *  esp32c5_r34_bbpll_configure_480mhz()）により，まず80MHz(div=3，
+ *  bootloader相当)で理論値どおりの実測79.9934/80.0095MHz（2/2再現，
+ *  mcycle対SYSTIMER二点法）を確認した。ユーザ指示によりCPU動作周波数は
+ *  ESP-IDF標準（stock既定sdkconfig：CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240）
+ *  に合わせるため，最終的にdiv=1（240MHz）へ昇格した。
+ *  docs/c5-bringup.md 実施34参照。
+ */
+#define CORE_CLK_MHZ            240  /* 【実施34確定】ESP-IDF標準240MHz（BBPLL正規較正後，理論値=実測） */
 
 /*
  *  微少時間待ちのための定義（nsec単位）
@@ -113,8 +123,8 @@
  *  同じ手法）は実施していない——次段でのフォローアップ推奨（申し送り
  *  参照）。アンダーシュート回避のため切り上げ（41.67→42）を採用。
  */
-#define SIL_DLY_TIM1    42  /* 【実施32・机上比例外挿，未実測】エントリ(addi+分岐)≒1反復≒4cyc/96MHz=41.67ns→切上げ42 */
-#define SIL_DLY_TIM2    42  /* 【実施32・机上比例外挿，未実測】1反復=4cyc/96MHz=41.67ns→切上げ42 */
+#define SIL_DLY_TIM1    17  /* 【実施34確定，机上比例外挿・未hw-bp実測】4cyc/240MHz=16.67ns→切上げ17 */
+#define SIL_DLY_TIM2    17  /* 【実施34確定，机上比例外挿・未hw-bp実測】4cyc/240MHz=16.67ns→切上げ17 */
 
 /*
  *  ペリフェラルのベースアドレス

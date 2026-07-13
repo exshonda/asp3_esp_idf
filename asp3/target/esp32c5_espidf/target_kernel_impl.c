@@ -297,6 +297,24 @@ esp32c5_disable_mwdt(uint32_t timg_base)
 #define ESP32C5_R32_PMU_TIE_HIGH_XPD_BBPLL         (1U << 30)
 #define ESP32C5_R32_I2C_MST_BBPLL_CAL_DONE         (1U << 24)
 
+/*
+ *  【実施34】CPUディバイダ（stockのCONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240，
+ *  `stock_scan/sdkconfig`実測で確認済み＝ESP-IDF既定の最終動作周波数）。
+ *  PLL_F240Mソースは（BBPLL 480MHz較正が正しければ）ネット240MHzのため，
+ *  cpu_divider=1で240MHz・cpu_divider=3で80MHz（bootloader相当，中間
+ *  検証用）。AHBディバイダはrtc_clk_cpu_freq_to_pll_240_mhz()のとおり
+ *  要求CPU周波数に関わらず常に6固定（40MHz，制約cpu_div<=ahb_div かつ
+ *  ahb_div%cpu_div==0はcpu_div=1/3のいずれでも満たす）。
+ *  段階検証（docs/c5-bringup.md実施34）：まず3（80MHz，安全側）でBBPLL
+ *  修正の効果を実測確認してから1（240MHz，ESP-IDF標準・最終構成）へ
+ *  切替えた。
+ */
+#define ESP32C5_R34_CPU_DIVIDER   1U   /* 【実施34最終値】240MHz＝ESP-IDF標準（stock既定CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240と同一）。
+										 * 80MHz(div=3)段階でBBPLL修正後の実測79.9934/80.0095MHzを確認済み（2/2）。 */
+#define ESP32C5_R34_AHB_DIVIDER   6U
+
+static void esp32c5_r34_bbpll_configure_480mhz(void);
+
 static void
 esp32c5_r32_cpu_clock_switch(void)
 {
@@ -314,46 +332,31 @@ esp32c5_r32_cpu_clock_switch(void)
 				| ESP32C5_R32_PMU_TIE_HIGH_XPD_BBPLL);
 
 	/*
-	 *  BBPLL較正の要否確認。実施32のJTAG実測（較正ハング状態，2/2）で
-	 *  CAL_DONE=1が既に確認済みのため，通常はこの分岐へは入らない。
-	 *  CAL_DONE=0の場合のみ，タイムアウト付きで較正パルスを発行する
-	 *  （無条件whileループはASP3側では採用しない）。
+	 *  【実施34で変更】実施32はCAL_DONEビットが既に1（ROMが較正済み）の
+	 *  場合は較正ループを完全にスキップしていたが，実施34のJTAG実測
+	 *  （`r34_bbpll_read.py`）で「ROMは較正済みだが40MHz XTALプロファイル
+	 *  を誤って使っており，実際には576MHz相当へロックしていた」ことが
+	 *  判明した（div7_0=12・dr1=dr3=0を実測——48MHzプロファイルは
+	 *  div7_0=10・dr1=dr3=1）。CAL_DONE=1は「較正が完了した」ことしか
+	 *  示さず「正しい周波数へ較正された」ことは保証しないため，CAL_DONEの
+	 *  値に関わらず無条件で`esp32c5_r34_bbpll_configure_480mhz()`
+	 *  （regi2cによる48MHzプロファイルの明示書込み＋再較正）を実行する。
+	 *  呼出し時点でCPUはまだXTAL直結（本関数はここでのみPLLソースへ
+	 *  切り替える）ため，BBPLL再較正中の一時的な不定状態がCPU動作へ
+	 *  影響することはない。
 	 */
-	v = sil_rew_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0);
-	if ((v & ESP32C5_R32_I2C_MST_BBPLL_CAL_DONE) == 0U) {
-		/*  regi2c_ctrl_ll_bbpll_calibration_start()相当  */
-		sil_wrw_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0,
-					v & ~(1U << 2));
-		v = sil_rew_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0);
-		sil_wrw_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0,
-					v | (1U << 3));
-		for (i = 0U; i < 2000000U; i++) {
-			v = sil_rew_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0);
-			if ((v & ESP32C5_R32_I2C_MST_BBPLL_CAL_DONE) != 0U) {
-				break;
-			}
-		}
-		/*  regi2c_ctrl_ll_bbpll_calibration_stop()相当（タイムアウト時も
-		 *  較正回路を安全な停止状態へ戻してから先へ進む）  */
-		v = sil_rew_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0);
-		sil_wrw_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0,
-					v & ~(1U << 3));
-		v = sil_rew_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0);
-		sil_wrw_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0,
-					v | (1U << 2));
-	}
+	esp32c5_r34_bbpll_configure_480mhz();
 
 	/*
-	 *  ディバイダ設定（rtc_clk_cpu_freq_to_pll_240_mhz(80)相当）：
-	 *  CPUディバイダ=3(240/80)・AHBディバイダ=6（固定）。
+	 *  ディバイダ設定（rtc_clk_cpu_freq_to_pll_240_mhz(freq)相当）：
 	 *  ソース切替え前に設定する（rtc_clk.cと同じ順序）。
 	 */
 	v = sil_rew_mem((void *)ESP32C5_R32_PCR_CPU_FREQ_CONF);
-	v = (v & ~0xFFU) | (3U - 1U);
+	v = (v & ~0xFFU) | (ESP32C5_R34_CPU_DIVIDER - 1U);
 	sil_wrw_mem((void *)ESP32C5_R32_PCR_CPU_FREQ_CONF, v);
 
 	v = sil_rew_mem((void *)ESP32C5_R32_PCR_AHB_FREQ_CONF);
-	v = (v & ~0xFFU) | (6U - 1U);
+	v = (v & ~0xFFU) | (ESP32C5_R34_AHB_DIVIDER - 1U);
 	sil_wrw_mem((void *)ESP32C5_R32_PCR_AHB_FREQ_CONF, v);
 
 	/*  ソース切替え：soc_clk_sel[17:16]=3(PLL_F240M)  */
@@ -370,6 +373,328 @@ esp32c5_r32_cpu_clock_switch(void)
 			break;
 		}
 	}
+}
+
+/*
+ *  【実施34】BBPLLの正規較正（regi2c I2C_BBPLLブロック，block=0x66）
+ *
+ *  背景：docs/c5-bringup.md 実施32/33/34。実施32はROMが既に較正済み
+ *  （I2C_ANA_MST_ANA_CONF0.CAL_DONE=1）だったBBPLLをそのまま流用したが，
+ *  実測CPU周波数は理論値80MHzに対し実測96MHz（＝1.2倍）というズレを
+ *  残していた。実施34の事前JTAG読み（advisor指示のcheap disambiguator，
+ *  実施14の手動regi2cリプレイ手法を再利用，`r34_bbpll_read.py`）で，
+ *  block 0x66のreg3(OC_DIV_7_0)=0x0C(12)・reg5(DR1[2:0]/DR3[6:4])=0x00
+ *  （dr1=0,dr3=0）を実測——これはhal `clk_tree_ll.h`の
+ *  `clk_ll_bbpll_set_config()`が定義する**40MHz XTALプロファイル**
+ *  （div7_0=12,dr1=0,dr3=0）そのものである。C5の実際のXTALは48MHz
+ *  （プロファイルはdiv7_0=10,dr1=1,dr3=1）——ROMは40MHz用の分周設定で
+ *  480MHzのつもりで較正してしまい，実際には480×(48/40)=576MHz相当へ
+ *  ロックしていたと判明した（576/480=1.2＝実測96MHz/理論80MHzの比と
+ *  正確に一致，advisorの予測どおり）。
+ *
+ *  本関数は`rtc_clk_bbpll_configure(48MHz, 480MHz)`
+ *  （`hal/esp_hw_support/port/esp32c5/rtc_clk.c`）相当を，regi2cの
+ *  実体（`hal/esp_hal_regi2c/esp32c5/regi2c_impl.c`の
+ *  `_regi2c_impl_write`/`_regi2c_impl_write_mask`——実体はGPIO I2Cでは
+ *  なくMMIOレジスタ`I2C_ANA_MST_I2C0/1_CTRL_REG`経由の疑似バス転送．
+ *  実施14で確認済みのプロトコル）を`sil_*w_mem`で手動再現する形で
+ *  移植した。ROM regi2c関数へのリンク（実施32のコメントで検討した
+ *  代替案）は，B-0/B-1（WiFi無効）ビルドでROM ldを含まないため使えず，
+ *  実施14の手動プロトコル（MMIO直叩き）はビルド形態に依存しないため
+ *  こちらを採用した。
+ *
+ *  安全設計：
+ *  - 全てのbusy-wait（regi2cトランザクション完了・CAL_DONE成立）に
+ *    タイムアウト上限を設ける（無条件whileは採用しない，実施32と同じ
+ *    方針）。
+ *  - regi2cマスタクロック前提（`MODEM_LPCON_CLK_CONF` bit2
+ *    `clk_i2c_mst_en`・`MODEM_SYSCON_CLK_CONF` bit12
+ *    `clk_i2c_mst_sel_160m`，実施14で確認済みの前提条件）は，本関数
+ *    自身が冒頭で（他のどの初期化より先に，WiFi有無に関わらず）
+ *    OR書込みで有効化する——`ANALOG_CLOCK_ENABLE()`はBOOTLOADER_BUILD
+ *    では恒久有効化戦略（no-op，`bootloader_hardware_init()`が起動時に
+ *    一度有効化してそのまま）であり，ASP3のDirect Bootも同じ戦略
+ *    （一度有効化して恒久的に維持）を採る。
+ *  - `clk_ll_bbpll_calibration_start()`→`clk_ll_bbpll_set_config()`
+ *    →`while(!is_done)`→`calibration_stop()`の順序をそのまま保持する
+ *    （rtc_clk.cの`rtc_clk_bbpll_configure()`と同一順序——calibration_
+ *    startが先，regi2cのdiv/dr/lref/href書込みはcalibration実行中に
+ *    行う）。
+ */
+#define ESP32C5_R34_I2C_ANA_MST_BASE        0x600AF800U
+#define ESP32C5_R34_I2C_ANA_MST_I2C0_CTRL   (ESP32C5_R34_I2C_ANA_MST_BASE + 0x00U)
+#define ESP32C5_R34_I2C_ANA_MST_I2C1_CTRL   (ESP32C5_R34_I2C_ANA_MST_BASE + 0x04U)
+#define ESP32C5_R34_I2C_ANA_MST_ANA_CONF1   (ESP32C5_R34_I2C_ANA_MST_BASE + 0x1CU)
+#define ESP32C5_R34_I2C_ANA_MST_ANA_CONF2   (ESP32C5_R34_I2C_ANA_MST_BASE + 0x20U)
+#define ESP32C5_R34_REGI2C_BUSY             (1U << 25)
+#define ESP32C5_R34_REGI2C_WR_CNTL          (1U << 24)
+
+#define ESP32C5_R34_MODEM_LPCON_CLK_CONF    0x600AF018U
+#define ESP32C5_R34_MODEM_LPCON_CLK_I2C_MST_EN  (1U << 2)
+#define ESP32C5_R34_MODEM_SYSCON_CLK_CONF   0x600A9C04U  /* ESP32C5_R31_...と同一アドレス。
+														   * TOPPERS_ESP32C5_WIFI非依存で
+														   * 使うため本関数専用に再定義
+														   * （実施31の定義はWiFi限定
+														   * ガード内のため不可視）。 */
+
+#define ESP32C5_R34_BBPLL_BLOCK              0x66U
+#define ESP32C5_R34_BBPLL_MST_SEL_BIT        (1U << 9)   /* ANA_CONF2内，REGI2C_BBPLL_MST_SEL */
+#define ESP32C5_R34_BBPLL_RD_MASK            (~(1U << 7) & 0x00FFFFFFU)  /* ANA_CONF1へ書く値 */
+
+#define ESP32C5_R34_BBPLL_REG_OC_REF_DIV     2U  /* OC_DCHGP[6:4]|OC_REF_DIV[3:0]，full byte */
+#define ESP32C5_R34_BBPLL_REG_OC_DIV_7_0     3U  /* full byte */
+#define ESP32C5_R34_BBPLL_REG_DR             5U  /* OC_DR3[6:4]/OC_DR1[2:0]，masked */
+#define ESP32C5_R34_BBPLL_REG_DHLREF         6U  /* OC_DLREF_SEL[7:6]/OC_DHREF_SEL[5:4]，masked */
+
+/*
+ *  【実施34・決定実験で発見】I2C_ANA_MST（regi2cマスタ）はMODEM_LPCON.
+ *  clk_i2c_mst_enを立てるだけでは実際には動かない——ANA_CONF0/1/2の
+ *  読み書きが恒久的に0x00000000のまま（regi2c_write()のbusy waitは
+ *  「即座にクリアされる」ため一見成功して見えるが，実際にはANA_MST
+ *  ブロック自体に機能クロックが供給されていないため何も起きていない）
+ *  ことをJTAG実測で確認した。実施13が`esp_shim_modem_icg_init()`
+ *  （`wifi/esp_wifi_adapter.c`）で発見・修正した「WIFIBBクロックの
+ *  ICGゲート」と同じ機構——PMU HP_ACTIVEのicg_modem.code（0x600B000C
+ *  bits[31:30]）がDirect Boot起動直後は0のままで，MODEM_SYSCON/
+ *  MODEM_LPCONのCLK_CONF_POWER_ST（ICGコード別に「どのコード値で
+ *  クロックを通すか」を指定するビットマップ）にはコード0が含まれない
+ *  ため，機能クロックがゲートされたまま——が，I2C_MASTER ICGドメイン
+ *  （regi2cマスタ自体）にもそのまま適用されると判明した。
+ *  `esp_shim_modem_icg_init()`はWiFiビルドの`esp_wifi_init()`経路
+ *  でのみ・本関数（BBPLL較正）よりずっと後に実行されるため，
+ *  `hardware_init_hook()`の最初期で動くBBPLL較正には間に合わない。
+ *  本関数はその最小部分集合（I2C_MASTER／MODEM_APB／LP_APB ICG
+ *  ドメインのみ，WIFI/BT/FE/ZB等は対象外）を，WiFi有無に関わらず
+ *  BBPLL較正の直前に独立して適用する。
+ */
+#define ESP32C5_R34_PMU_HP_ACTIVE_ICG_MODEM   0x600B000CU  /* icg_modem.code，bits[31:30] */
+#define ESP32C5_R34_PMU_IMM_MODEM_ICG         0x600B00DCU  /* update_dig_icg_modem_en，bit31 */
+#define ESP32C5_R34_PMU_IMM_SLEEP_SYSCLK      0x600B00D0U  /* update_dig_icg_switch，bit28 */
+#define ESP32C5_R34_MODEM_SYSCON_CLK_CONF_POWER_ST  0x600A9C0CU  /* CLK_MODEM_APB_ST_MAP，bits[31:28] */
+#define ESP32C5_R34_MODEM_LPCON_CLK_CONF_POWER_ST   0x600AF020U  /* CLK_LP_APB_ST_MAP[31:28]/CLK_I2C_MST_ST_MAP[27:24] */
+
+static void
+esp32c5_r34_modem_icg_enable_min(void)
+{
+	uint32_t	v;
+
+	/*  icg_modem.code = 2（esp_shim_modem_icg_init()と同じ値）  */
+	v = sil_rew_mem((void *)ESP32C5_R34_PMU_HP_ACTIVE_ICG_MODEM);
+	v = (v & ~(0x3U << 30)) | (2U << 30);
+	sil_wrw_mem((void *)ESP32C5_R34_PMU_HP_ACTIVE_ICG_MODEM, v);
+
+	/*  ST_MAP（コード値2＝BIT(2)=0x4のときクロックを通す）を
+	 *  MODEM_APB・LP_APB・I2C_MASTERの3ドメインへ設定  */
+	v = sil_rew_mem((void *)ESP32C5_R34_MODEM_SYSCON_CLK_CONF_POWER_ST);
+	v = (v & ~(0xFU << 28)) | (0x4U << 28);
+	sil_wrw_mem((void *)ESP32C5_R34_MODEM_SYSCON_CLK_CONF_POWER_ST, v);
+
+	v = sil_rew_mem((void *)ESP32C5_R34_MODEM_LPCON_CLK_CONF_POWER_ST);
+	v = (v & ~(0xFU << 28)) | (0x4U << 28);			/* LP_APB_ST_MAP */
+	v = (v & ~(0xFU << 24)) | (0x4U << 24);			/* I2C_MST_ST_MAP */
+	sil_wrw_mem((void *)ESP32C5_R34_MODEM_LPCON_CLK_CONF_POWER_ST, v);
+
+	/*  即時反映パルス2本（両方必要，実施13で確認済み）  */
+	sil_wrw_mem((void *)ESP32C5_R34_PMU_IMM_MODEM_ICG, (1U << 31));
+	sil_wrw_mem((void *)ESP32C5_R34_PMU_IMM_SLEEP_SYSCLK, (1U << 28));
+}
+
+static uint32_t
+esp32c5_r34_regi2c_select_ctrl(void)
+{
+	uint32_t	conf2;
+	uint32_t	i2c_sel;
+
+	conf2 = sil_rew_mem((void *)ESP32C5_R34_I2C_ANA_MST_ANA_CONF2);
+	i2c_sel = (conf2 & ESP32C5_R34_BBPLL_MST_SEL_BIT) ? 0U : 1U;
+	sil_wrw_mem((void *)ESP32C5_R34_I2C_ANA_MST_ANA_CONF1,
+				ESP32C5_R34_BBPLL_RD_MASK);
+	return (i2c_sel == 0U) ? ESP32C5_R34_I2C_ANA_MST_I2C0_CTRL
+							: ESP32C5_R34_I2C_ANA_MST_I2C1_CTRL;
+}
+
+static void
+esp32c5_r34_regi2c_wait_idle(uint32_t ctrl_reg)
+{
+	uint32_t	i;
+
+	for (i = 0U; i < 200000U; i++) {
+		if ((sil_rew_mem((void *)ctrl_reg) & ESP32C5_R34_REGI2C_BUSY) == 0U) {
+			break;
+		}
+	}
+}
+
+/*
+ *  regi2c_impl_write()相当：block内reg_addへ1byte全体を書く
+ *  （実施14手動プロトコル・`_regi2c_impl_write()`と同一の
+ *  ビットレイアウト：[7:0]=slave_id(block)，[15:8]=reg_addr，
+ *  [24]=WR_CNTL，[23:16]=data）。
+ */
+static void
+esp32c5_r34_regi2c_write(uint32_t block, uint32_t reg_add, uint32_t data)
+{
+	uint32_t	ctrl_reg;
+	uint32_t	v;
+
+	ctrl_reg = esp32c5_r34_regi2c_select_ctrl();
+	esp32c5_r34_regi2c_wait_idle(ctrl_reg);
+	v = (block & 0xFFU) | ((reg_add & 0xFFU) << 8)
+		| ESP32C5_R34_REGI2C_WR_CNTL | ((data & 0xFFU) << 16);
+	sil_wrw_mem((void *)ctrl_reg, v);
+	esp32c5_r34_regi2c_wait_idle(ctrl_reg);
+}
+
+/*
+ *  regi2c_impl_write_mask()相当：block内reg_addのbits[msb:lsb]だけを
+ *  read-modify-writeする。
+ */
+static void
+esp32c5_r34_regi2c_write_mask(uint32_t block, uint32_t reg_add,
+							   uint32_t msb, uint32_t lsb, uint32_t data)
+{
+	uint32_t	ctrl_reg;
+	uint32_t	v;
+	uint32_t	cur;
+	uint32_t	width;
+	uint32_t	mask;
+
+	ctrl_reg = esp32c5_r34_regi2c_select_ctrl();
+	esp32c5_r34_regi2c_wait_idle(ctrl_reg);
+	v = (block & 0xFFU) | ((reg_add & 0xFFU) << 8);
+	sil_wrw_mem((void *)ctrl_reg, v);
+	esp32c5_r34_regi2c_wait_idle(ctrl_reg);
+	cur = (sil_rew_mem((void *)ctrl_reg) >> 16) & 0xFFU;
+
+	width = msb - lsb + 1U;
+	mask = (width >= 8U) ? 0xFFU : ((1U << width) - 1U);
+	cur &= ~(mask << lsb);
+	cur |= (data & mask) << lsb;
+
+	v = (block & 0xFFU) | ((reg_add & 0xFFU) << 8)
+		| ESP32C5_R34_REGI2C_WR_CNTL | ((cur & 0xFFU) << 16);
+	sil_wrw_mem((void *)ctrl_reg, v);
+	esp32c5_r34_regi2c_wait_idle(ctrl_reg);
+}
+
+/*
+ *  BBPLLをXTAL=48MHzプロファイルで再構成し，480MHzへ較正し直す
+ *  （`rtc_clk_bbpll_configure(SOC_XTAL_FREQ_48M, CLK_LL_PLL_480M_FREQ_
+ *  MHZ)`相当）。呼出し前提：CPUはまだXTAL直結（PLL未使用）——このPLLの
+ *  出力はCPUクロックとして未参照のため，較正中の一時的な不定状態が
+ *  CPU動作へ影響しない。
+ */
+static void
+esp32c5_r34_bbpll_configure_480mhz(void)
+{
+	uint32_t	v;
+	uint32_t	i;
+	bool_t		done;
+
+	/*
+	 *  【実施34】I2C_MASTER/MODEM_APB/LP_APB ICGドメインの最小有効化
+	 *  （esp_shim_modem_icg_init()の部分集合，上記コメント参照）。
+	 *  regi2cマスタクロック前提の有効化より先に行う——ICGゲートが
+	 *  閉じたままだと，直後のclk_i2c_mst_en書込み自体は「効いている
+	 *  ように見える」が（MODEM_LPCON_CLK_CONFの静的configビットは常に
+	 *  書換え可能），実際のANA_MST機能クロックは供給されないままで
+	 *  regi2cトランザクションが無反応・無効なまま進んでしまう。
+	 */
+	esp32c5_r34_modem_icg_enable_min();
+
+	/*
+	 *  regi2cマスタクロック前提の有効化（ANALOG_CLOCK_ENABLE()相当，
+	 *  bootloaderと同じ「一度有効化して恒久維持」戦略）。
+	 *  MODEM_SYSCON_CLK_CONF.clk_i2c_mst_sel_160mは実施31の
+	 *  esp32c5_r31_bootloader_random_cycle()も同じビットを立てるが，
+	 *  あちらはWiFi限定・本関数より後に実行されるため，ここで独立に
+	 *  先立って設定する（冪等，副作用なし）。
+	 */
+	v = sil_rew_mem((void *)ESP32C5_R34_MODEM_LPCON_CLK_CONF);
+	sil_wrw_mem((void *)ESP32C5_R34_MODEM_LPCON_CLK_CONF,
+				v | ESP32C5_R34_MODEM_LPCON_CLK_I2C_MST_EN);
+	v = sil_rew_mem((void *)ESP32C5_R34_MODEM_SYSCON_CLK_CONF);
+	sil_wrw_mem((void *)ESP32C5_R34_MODEM_SYSCON_CLK_CONF, v | (1U << 12));
+
+	/*
+	 *  【実施34・decision experiment】clk_i2c_mst_enをORで立てた直後に
+	 *  ANA_MSTブロック（I2C_ANA_MST_ANA_CONF0等）へ即アクセスすると，
+	 *  クロックドメインが実際に立ち上がる前の書込みが無視される
+	 *  （実測：ANA_CONF0が恒久0x00000000のまま＝calibration_stop()の
+	 *  最終書込みすら反映されない）ことをtest_porting非WiFiビルドの
+	 *  JTAG読みで確認した——WiFiビルドでこれまで問題が出なかったのは，
+	 *  `wifi_clock_enable_wrapper()`がこのビットを立ててから実際に
+	 *  regi2cを使うまでに他の初期化処理を挟むため，結果的に十分な
+	 *  settle時間が空いていたためと考えられる。ここでは`sil_*`のみに
+	 *  依存する短いbusy spinでクロックドメイン立上りのcushionを設ける
+	 *  （正確な時間は不明だが，数百〜数千サイクル程度あれば十分と
+	 *  みて安全側に大きめの値を採る）。
+	 */
+	for (i = 0U; i < 10000U; i++) {
+		sil_rew_mem((void *)ESP32C5_R34_MODEM_LPCON_CLK_CONF);
+	}
+
+	/*  BBPLL/BB-I2Cアナログ電源のtie-high（clk_ll_bbpll_enable()相当，
+	 *  実施32から流用）。  */
+	sil_wrw_mem((void *)ESP32C5_R32_PMU_IMM_HP_CK_POWER,
+				ESP32C5_R32_PMU_TIE_HIGH_GLOBAL_BBPLL_ICG
+				| ESP32C5_R32_PMU_TIE_HIGH_XPD_BB_I2C
+				| ESP32C5_R32_PMU_TIE_HIGH_XPD_BBPLL_I2C
+				| ESP32C5_R32_PMU_TIE_HIGH_XPD_BBPLL);
+
+	/*  clk_ll_bbpll_calibration_start()：CONF0のSTOP_FORCE_HIGHを
+	 *  クリア・STOP_FORCE_LOWをセット（較正回路を「実行中」へ）。  */
+	v = sil_rew_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0);
+	sil_wrw_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0, v & ~(1U << 2));
+	v = sil_rew_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0);
+	sil_wrw_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0, v | (1U << 3));
+
+	/*  clk_ll_bbpll_set_config(480, 48)：XTAL=48MHzプロファイル
+	 *  （div_ref=1,div7_0=10,dr1=1,dr3=1,dchgp=5,href=3,lref=1）を
+	 *  block 0x66へ書込む。  */
+	esp32c5_r34_regi2c_write(ESP32C5_R34_BBPLL_BLOCK,
+							  ESP32C5_R34_BBPLL_REG_OC_REF_DIV,
+							  (5U << 4) | 1U);			/* dchgp=5,div_ref=1 -> 0x51 */
+	esp32c5_r34_regi2c_write(ESP32C5_R34_BBPLL_BLOCK,
+							  ESP32C5_R34_BBPLL_REG_OC_DIV_7_0,
+							  10U);						/* div7_0=10 (48MHzプロファイル) */
+	esp32c5_r34_regi2c_write_mask(ESP32C5_R34_BBPLL_BLOCK,
+								   ESP32C5_R34_BBPLL_REG_DR, 2U, 0U, 1U);	/* dr1=1 */
+	esp32c5_r34_regi2c_write_mask(ESP32C5_R34_BBPLL_BLOCK,
+								   ESP32C5_R34_BBPLL_REG_DR, 6U, 4U, 1U);	/* dr3=1 */
+	esp32c5_r34_regi2c_write_mask(ESP32C5_R34_BBPLL_BLOCK,
+								   ESP32C5_R34_BBPLL_REG_DHLREF, 7U, 6U, 1U);	/* lref=1 */
+	esp32c5_r34_regi2c_write_mask(ESP32C5_R34_BBPLL_BLOCK,
+								   ESP32C5_R34_BBPLL_REG_DHLREF, 5U, 4U, 3U);	/* href=3 */
+
+	/*  while(!clk_ll_bbpll_calibration_is_done())：タイムアウト付き
+	 *  （無条件whileは採用しない，安全設計方針）。  */
+	done = false;
+	for (i = 0U; i < 2000000U; i++) {
+		v = sil_rew_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0);
+		if ((v & ESP32C5_R32_I2C_MST_BBPLL_CAL_DONE) != 0U) {
+			done = true;
+			break;
+		}
+	}
+	(void)done;	/* タイムアウトしても後続のcalibration_stopは実行する
+				 * （rtc_clk.cは無条件待ちだが，ASP3はここで打ち切り，
+				 * 較正回路を安全な停止状態へ戻すことを優先する）。 */
+
+	/*  esp_rom_delay_us(10)相当："wait for true stop"のcushion。
+	 *  ROM未リンクのB-0/B-1でも使えるよう，sil_*のみに依存する短い
+	 *  busy spin（正確な10usである必要はなく，桁が合っていれば十分）
+	 *  で代替する。  */
+	for (i = 0U; i < 5000U; i++) {
+		sil_rew_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0);
+	}
+
+	/*  clk_ll_bbpll_calibration_stop()：STOP_FORCE_LOWをクリア・
+	 *  STOP_FORCE_HIGHをセット（較正回路を確定的に停止状態へ）。  */
+	v = sil_rew_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0);
+	sil_wrw_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0, v & ~(1U << 3));
+	v = sil_rew_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0);
+	sil_wrw_mem((void *)ESP32C5_R32_I2C_ANA_MST_ANA_CONF0, v | (1U << 2));
 }
 
 /*
