@@ -315,6 +315,280 @@ esp32c5_disable_mwdt(uint32_t timg_base)
 
 static void esp32c5_r34_bbpll_configure_480mhz(void);
 
+/*
+ *  【実施35】esp_clk_init()／esp_clk_tree_initialize()の残余効果の移植
+ *  （docs/c5-bringup.md実施35）。実施32/34はesp_clk_init()のうち「CPU
+ *  周波数切替え」（rtc_clk_cpu_freq_set_config，末尾の1項目）だけを
+ *  移植済みで，それより前の項目（RTC_FAST_CLK源選択・RTC_SLOW_CLK源
+ *  選択＋較正値保存）は未移植のまま残っていた。実機JTAG差分確認
+ *  （stock=ESP-IDF標準ブート列 vs ASP3冷間，2/2再現）で下記2件の
+ *  静的差分を確認済み：
+ *
+ *  1. LP_CLKRST_LP_CLK_CONF.fast_clk_sel（0x600B0400 bits[3:2]）：
+ *     ASP3＝1（XTAL_D2，リセット既定値のまま未変更）／stock＝0（RC_FAST，
+ *     esp_clk_init()のrtc_clk_fast_src_set(RC_FAST)相当，既定
+ *     CONFIG_RTC_FAST_CLK_SRC_RC_FASTで確認）。
+ *  2. RTC_SLOW_CLK_CAL_REG（=LP_AON_STORE1，0x600B1004）：
+ *     ASP3＝0x00000000（一度も書込まれていない）／stock＝0x00358b20
+ *     （esp_clk_init()のselect_rtc_slow_clk()内，rtc_clk_cal()による
+ *     実測較正値をesp_clk_slowclk_cal_set()が保存．Q13.19固定小数点，
+ *     マイクロ秒／サイクル）。
+ *
+ *  advisor査読：promisc_rx_count=0（実施33/34）という「タイミング定数の
+ *  誤りというより受信経路そのものが無反応」という症状の性質からは，
+ *  2（RTC_SLOW_CLK較正値）よりも1（RTC_FAST_CLK源，PMU/LPドメインの
+ *  電源状態機械に絡む可能性）を先に試すべきとの指摘を受け，本ラウンドは
+ *  1→2の順で1候補ずつ加算する。
+ *
+ *  【実施35・候補1の実機結果】esp32c5_r35_rtc_fast_clk_select()を単独で
+ *  加算した冷間Direct Boot・独立2回のRTSリセット試行で，JTAG読み戻しに
+ *  よりfast_clk_sel=0（RC_FAST，stock一致）へ切り替わったことを確認した
+ *  上で，AP検出は依然`0 APs found`のまま（2/2）——**候補1単独では
+ *  refute**。次段（候補2）を試す前提として，候補1は「正しさの上では
+ *  stockに合わせる価値がある」ため実装は残したままとする（無害・
+ *  他の副作用も観測されず）。
+ *
+
+ *  なお，PMU LP_ACTIVE.clk_power（0x600B00AC，xpd_fosc等）はJTAG差分
+ *  確認の結果ASP3=stock=0x40000000で完全一致（ROM/PMUのPOR既定値が
+ *  既にesp_clk_init()の目標値と一致していたと判明）——**候補から除外
+ *  済み**（porting不要，rigor docの「既に一致する候補への移植は
+ *  無駄働き」を回避）。
+ */
+#define ESP32C5_R35_LP_CLKRST_LP_CLK_CONF          0x600B0400U
+#define ESP32C5_R35_LP_CLKRST_FAST_CLK_SEL_M       (0x3U << 2)
+#define ESP32C5_R35_LP_CLKRST_FAST_CLK_SEL_RC_FAST (0x0U << 2)
+
+/*
+ *  候補1：RTC_FAST_CLK源をリセット既定のXTAL_D2からRC_FASTへ切替え
+ *  （clk_ll_rtc_fast_set_src(SOC_RTC_FAST_CLK_SRC_RC_FAST)相当）。
+ *  他ビット（slow_clk_selは既にstockと同じRC_SLOW=0）を保持する
+ *  masked read-modify-writeとする。
+ */
+static void
+esp32c5_r35_rtc_fast_clk_select(void)
+{
+	uint32_t	v;
+
+	v = sil_rew_mem((void *)ESP32C5_R35_LP_CLKRST_LP_CLK_CONF);
+	v &= ~ESP32C5_R35_LP_CLKRST_FAST_CLK_SEL_M;
+	v |= ESP32C5_R35_LP_CLKRST_FAST_CLK_SEL_RC_FAST;
+	sil_wrw_mem((void *)ESP32C5_R35_LP_CLKRST_LP_CLK_CONF, v);
+}
+
+/*
+ *  候補2：RTC_SLOW_CLK_CAL_REG（esp_clk_slowclk_cal_set()相当）。
+ *
+ *  正規の実装（select_rtc_slow_clk()のrtc_clk_cal()）は，主XTAL
+ *  （SYSTIMER相当の高精度基準）を用いてRTC_SLOW_CLKの実測サイクル数を
+ *  数百サイクル分カウントし，Q13.19固定小数点のus/サイクル値を算出する
+ *  もので，実装コストと実機ハングリスクが候補1より高い。task手順の
+ *  「固定値書込みでまず因果を確認→効けば正式な較正実装へ」の2段構えに
+ *  従い，本段階では**stockの実測値をそのまま定数として注入**し，
+ *  この経路が実際にAP検出を左右するかどうかをまず安価に確認する
+ *  （効かなければ正式実装は不要，効けば次段でrtc_clk_cal()相当の実測
+ *  ルーチンへ格上げする）。
+ *
+ *  注入値0x00358b20は，stock ESP-IDF v6.1 examples/wifi/scan
+ *  （esp32c5，本ラウンドでC5#1へ再ビルド・再フラッシュして採取，
+ *  RTSリセット後T=0.3s/6.0sの独立読み取り2点・独立2回のRTSリセット
+ *  試行で全て同一値，安定）の実測値であり，ASP3自身のRC_SLOW発振器の
+ *  真の周波数とは一致しない可能性がある（同一チップでも発振器個体差・
+ *  温度依存があるため，本来は自己測定が正しい）——本段階はあくまで
+ *  「この値域のレジスタが0か非ゼロかでAP検出が変わるか」という因果の
+ *  有無を安価に確認する目的の暫定実装であることに注意。
+ */
+#define ESP32C5_R35_RTC_SLOW_CLK_CAL_REG   0x600B1004U /* LP_AON_STORE1 */
+#define ESP32C5_R35_RTC_SLOW_CLK_CAL_FIXED 0x00358b20U /* stock実測値（本ラウンド採取） */
+
+static void
+esp32c5_r35_rtc_slowclk_cal_set_fixed(void)
+{
+	sil_wrw_mem((void *)ESP32C5_R35_RTC_SLOW_CLK_CAL_REG,
+				ESP32C5_R35_RTC_SLOW_CLK_CAL_FIXED);
+}
+
+/*
+ *  候補3：PMU HP_MODEM電源/クロックバンク（＋HP_ACTIVE.HP_REGULATOR0）
+ *  の未初期化（docs/c5-bringup.md実施35）。
+ *
+ *  背景：候補1・候補2を実装しても実機でAP検出は変わらなかった（0 APs
+ *  found，2/2）ため，advisor指摘に従いesp_clk_init()の外側まで対象を
+ *  広げ，実施29の11ブロックJTAGスナップショット相当の広域差分比較を
+ *  実施した（本ラウンド，`blockdump.py`）。その結果，PMU
+ *  HP_MODEMバンク（`pmu_hp_system_init()`がPMU_MODE_HP_MODEMモードで
+ *  書込む7レジスタ，0x600B0034〜0x600B005C）が**ASP3では一度も書込まれず
+ *  ほぼ全ゼロのまま**（対してstockは`pmu_init()`実行後の実測値が全て
+ *  非ゼロ）という，実施21〜24が検討していなかった新規の大きな差分を
+ *  発見した——実施23「決定実験C」はHP_ACTIVEバンクの一部フィールド
+ *  （CK_POWER等）のみを対象としており，HP_MODEMバンク（PMUがモデム
+ *  電源状態へ遷移した際に実際に使われるICG/クロック/電源設定）は
+ *  当時の較正キー(A)調査の範囲外だった。HP_ACTIVE.HP_REGULATOR0
+ *  （0x600B0028）にも軽微な差分がある。
+ *
+ *  正式には`pmu_hp_system_param_default(PMU_MODE_HP_MODEM, ...)`の
+ *  デフォルトパラメータテーブル（`pmu_param.c`，eFuse依存項目を含む）を
+ *  再現すべきだが，実装コストが高いため，task手順の2段構えに従い
+ *  **本段階ではstockの実測値をそのまま定数として注入**し，このバンクが
+ *  AP検出を左右するかをまず安価に確認する。
+ *
+ *  実施30のP1/P4ハンドオフ実験との整合性の注記：P1（stockの
+ *  `system_early_init()`直前，すなわちstockの`pmu_init()`実行**後**）は
+ *  RX恒久ゼロだった。もしHP_MODEMバンクの初期化だけで十分なら，P1でも
+ *  RXが生きるはずだが実際には生きなかった——つまりHP_MODEMバンクの
+ *  初期化は**単独では不十分**（必要条件の一つに過ぎない可能性が高い）。
+ *  本候補は，候補1・2（esp_clk_init由来）と**併せて**初めてP2/P3相当の
+ *  状態に近づく，という仮説の下で追加する（1つずつ加算する原則には
+ *  反するが，候補1・2は個別にAP検出への効果ゼロと確定済みのため，
+ *  「まだ試していない別のカテゴリの差分」を追加する本段は妥当な次段
+ *  と判断——advisor指摘のとおり）。
+ */
+#define ESP32C5_R35_PMU_HP_ACTIVE_HP_REGULATOR0   0x600B0028U
+#define ESP32C5_R35_PMU_HP_MODEM_DIG_POWER        0x600B0034U
+#define ESP32C5_R35_PMU_HP_MODEM_ICG_HP_FUNC      0x600B0038U
+#define ESP32C5_R35_PMU_HP_MODEM_ICG_HP_APB       0x600B003CU
+#define ESP32C5_R35_PMU_HP_MODEM_ICG_MODEM        0x600B0040U
+#define ESP32C5_R35_PMU_HP_MODEM_HP_SYS_CNTL      0x600B0044U
+#define ESP32C5_R35_PMU_HP_MODEM_HP_CK_POWER      0x600B0048U
+#define ESP32C5_R35_PMU_HP_MODEM_BACKUP           0x600B0050U
+#define ESP32C5_R35_PMU_HP_MODEM_BACKUP_CLK       0x600B0054U
+#define ESP32C5_R35_PMU_HP_MODEM_SYSCLK           0x600B0058U
+#define ESP32C5_R35_PMU_HP_MODEM_HP_REGULATOR0    0x600B005CU
+
+/*  stock実測値（本ラウンド，`stock_scan`実行中，RTSリセット後T=6.0s，
+ *  独立2回のRTSリセット試行いずれも同一値）。  */
+#define ESP32C5_R35_FIXED_HP_ACTIVE_HP_REGULATOR0 0xc004afd0U
+#define ESP32C5_R35_FIXED_HP_MODEM_DIG_POWER      0x20000000U
+#define ESP32C5_R35_FIXED_HP_MODEM_ICG_HP_FUNC    0x00100000U
+#define ESP32C5_R35_FIXED_HP_MODEM_ICG_HP_APB     0x00000200U
+#define ESP32C5_R35_FIXED_HP_MODEM_ICG_MODEM      0x40000000U
+#define ESP32C5_R35_FIXED_HP_MODEM_HP_SYS_CNTL    0x31000000U
+#define ESP32C5_R35_FIXED_HP_MODEM_HP_CK_POWER    0x70000000U
+#define ESP32C5_R35_FIXED_HP_MODEM_BACKUP         0x00100010U
+#define ESP32C5_R35_FIXED_HP_MODEM_BACKUP_CLK     0xffffffffU
+#define ESP32C5_R35_FIXED_HP_MODEM_SYSCLK         0xb8000000U
+#define ESP32C5_R35_FIXED_HP_MODEM_HP_REGULATOR0  0xc0048000U
+
+/*  pmu_ll_imm_update_dig_icg_modem_code(true)／
+ *  pmu_ll_imm_update_dig_icg_switch(true)相当のラッチパルス
+ *  （実施34のesp32c5_r34_modem_icg_enable_min()と同一レジスタ，
+ *  自己クリア型・重複発行は無害）。  */
+#define ESP32C5_R35_PMU_IMM_MODEM_ICG      0x600B00DCU
+#define ESP32C5_R35_PMU_IMM_SLEEP_SYSCLK   0x600B00D0U
+
+static void
+esp32c5_r35_pmu_hp_modem_bank_fixed(void)
+{
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_ACTIVE_HP_REGULATOR0,
+				ESP32C5_R35_FIXED_HP_ACTIVE_HP_REGULATOR0);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_MODEM_DIG_POWER,
+				ESP32C5_R35_FIXED_HP_MODEM_DIG_POWER);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_MODEM_ICG_HP_FUNC,
+				ESP32C5_R35_FIXED_HP_MODEM_ICG_HP_FUNC);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_MODEM_ICG_HP_APB,
+				ESP32C5_R35_FIXED_HP_MODEM_ICG_HP_APB);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_MODEM_ICG_MODEM,
+				ESP32C5_R35_FIXED_HP_MODEM_ICG_MODEM);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_MODEM_HP_SYS_CNTL,
+				ESP32C5_R35_FIXED_HP_MODEM_HP_SYS_CNTL);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_MODEM_HP_CK_POWER,
+				ESP32C5_R35_FIXED_HP_MODEM_HP_CK_POWER);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_MODEM_BACKUP,
+				ESP32C5_R35_FIXED_HP_MODEM_BACKUP);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_MODEM_BACKUP_CLK,
+				ESP32C5_R35_FIXED_HP_MODEM_BACKUP_CLK);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_MODEM_SYSCLK,
+				ESP32C5_R35_FIXED_HP_MODEM_SYSCLK);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_MODEM_HP_REGULATOR0,
+				ESP32C5_R35_FIXED_HP_MODEM_HP_REGULATOR0);
+
+	/*  ラッチパルス（自己クリア型，実施34と同一レジスタへの重複発行は
+	 *  無害）。  */
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_IMM_MODEM_ICG, (1U << 31));
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_IMM_SLEEP_SYSCLK, (1U << 28));
+}
+
+/*
+ *  候補4：PMU HP_SLEEPバンク（`pmu_hp_system_init()`のPMU_MODE_HP_SLEEP
+ *  版，`pmu_init()`の完全な3モード反復のうち最後の1つ）。
+ *
+ *  背景：候補1〜3を実装しても実機でAP検出は変わらなかったため，
+ *  advisor指摘に従い「クロスカーネル・ハンドオフ実験の再構築」を実施
+ *  （docs/c5-bringup.md実施35）。stockホストからノーリセットで（本
+ *  ビルド自身の候補1〜3処理は`HANDOFF_SKIP_CLOCK_INIT`でスキップして）
+ *  ジャンプしたところ，**同一のASP3ゲストコードでAP検出（20/24/21/23
+ *  APs，独立2回）に成功**——実施29の headjump 結果を再現した。この
+ *  「動くソフトウェア（ハンドオフ）」対「動かないソフトウェア（候補
+ *  1〜3込みcold boot）」という**同一ソフトウェア条件下**の広域レジスタ
+ *  再比較で，候補3（HP_MODEMバンク）は正しく再現できていたことが確認
+ *  できた一方，**HP_SLEEPバンク（`pmu_hp_system_init()`が反復する3
+ *  モードのうち残る1つ）が未移植のまま**であることが判明した——
+ *  `pmu_init()`は`PMU_MODE_HP_ACTIVE`・`PMU_MODE_HP_MODEM`・
+ *  `PMU_MODE_HP_SLEEP`の3モードを同一ループで設定するが，候補3は
+ *  HP_MODEMとHP_ACTIVE.HP_REGULATOR0のみを対象としており，HP_SLEEP
+ *  バンク（0x600B0068〜0x600B0098，9レジスタ）を見落としていた。
+ *
+ *  Direct Bootは実際のsleepモードへ遷移しないため一見無関係に見えるが，
+ *  `pmu_hp_system_init()`はモードに関わらず末尾で
+ *  `pmu_ll_hp_set_sleep_protect_mode(..., PMU_SLEEP_PROTECT_HP_LP_SLEEP)`
+ *  を呼ぶ等，3モード全体が一体のPMU設定として扱われる実装になっている
+ *  ため，HP_SLEEPバンクが未設定のままだとPMU全体の設定が不完全な状態に
+ *  留まっている可能性がある——候補3と同じくstock実測値を固定注入する
+ *  形で追加する。
+ */
+#define ESP32C5_R35_PMU_HP_SLEEP_DIG_POWER      0x600B0068U
+#define ESP32C5_R35_PMU_HP_SLEEP_ICG_HP_FUNC    0x600B006CU
+#define ESP32C5_R35_PMU_HP_SLEEP_ICG_HP_APB     0x600B0070U
+#define ESP32C5_R35_PMU_HP_SLEEP_HP_SYS_CNTL    0x600B0078U
+#define ESP32C5_R35_PMU_HP_SLEEP_HP_CK_POWER    0x600B007CU
+#define ESP32C5_R35_PMU_HP_SLEEP_BACKUP         0x600B0084U
+#define ESP32C5_R35_PMU_HP_SLEEP_BACKUP_CLK     0x600B0088U
+#define ESP32C5_R35_PMU_HP_SLEEP_SYSCLK         0x600B008CU
+#define ESP32C5_R35_PMU_HP_SLEEP_HP_REGULATOR0  0x600B0090U
+#define ESP32C5_R35_PMU_HP_SLEEP_XTAL           0x600B0098U
+
+/*  stock実測値（実施35のクロスカーネル・ハンドオフ実験，成功後の
+ *  ASP3ゲスト実行中，T=6.0s，独立2回のRTSリセット試行いずれも同一値）。  */
+#define ESP32C5_R35_FIXED_HP_SLEEP_DIG_POWER     0x08200000U
+#define ESP32C5_R35_FIXED_HP_SLEEP_ICG_HP_FUNC   0x00000000U
+#define ESP32C5_R35_FIXED_HP_SLEEP_ICG_HP_APB    0x00000000U
+#define ESP32C5_R35_FIXED_HP_SLEEP_HP_SYS_CNTL   0x39000000U
+#define ESP32C5_R35_FIXED_HP_SLEEP_HP_CK_POWER   0x1c000000U
+#define ESP32C5_R35_FIXED_HP_SLEEP_BACKUP        0x21100200U
+#define ESP32C5_R35_FIXED_HP_SLEEP_BACKUP_CLK    0xffffffffU
+#define ESP32C5_R35_FIXED_HP_SLEEP_SYSCLK        0x30000000U
+#define ESP32C5_R35_FIXED_HP_SLEEP_HP_REGULATOR0 0x08048000U
+#define ESP32C5_R35_FIXED_HP_SLEEP_XTAL          0x00000000U
+
+static void
+esp32c5_r35_pmu_hp_sleep_bank_fixed(void)
+{
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_SLEEP_DIG_POWER,
+				ESP32C5_R35_FIXED_HP_SLEEP_DIG_POWER);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_SLEEP_ICG_HP_FUNC,
+				ESP32C5_R35_FIXED_HP_SLEEP_ICG_HP_FUNC);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_SLEEP_ICG_HP_APB,
+				ESP32C5_R35_FIXED_HP_SLEEP_ICG_HP_APB);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_SLEEP_HP_SYS_CNTL,
+				ESP32C5_R35_FIXED_HP_SLEEP_HP_SYS_CNTL);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_SLEEP_HP_CK_POWER,
+				ESP32C5_R35_FIXED_HP_SLEEP_HP_CK_POWER);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_SLEEP_BACKUP,
+				ESP32C5_R35_FIXED_HP_SLEEP_BACKUP);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_SLEEP_BACKUP_CLK,
+				ESP32C5_R35_FIXED_HP_SLEEP_BACKUP_CLK);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_SLEEP_SYSCLK,
+				ESP32C5_R35_FIXED_HP_SLEEP_SYSCLK);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_SLEEP_HP_REGULATOR0,
+				ESP32C5_R35_FIXED_HP_SLEEP_HP_REGULATOR0);
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_HP_SLEEP_XTAL,
+				ESP32C5_R35_FIXED_HP_SLEEP_XTAL);
+
+	/*  ラッチパルス（候補3と同一，重複発行は無害）。  */
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_IMM_MODEM_ICG, (1U << 31));
+	sil_wrw_mem((void *)ESP32C5_R35_PMU_IMM_SLEEP_SYSCLK, (1U << 28));
+}
+
 static void
 esp32c5_r32_cpu_clock_switch(void)
 {
@@ -823,7 +1097,78 @@ hardware_init_hook(void)
 	 *  不十分で，**PLLへのクロック切替え自体が較正キー(A)の必要条件**
 	 *  であることが確定した（docs/c5-bringup.md 実施32 10節）。
 	 */
+
+	/*
+	 *  【実施35】クロスカーネル・ハンドオフ実験（実施26/27/29系，本
+	 *  ラウンド＝実施35で再構築）では，ホスト（stock）が既にCPU/BBPLL/
+	 *  PMUクロック状態を正しく確立した後にリセット無しでこのゲストへ
+	 *  制御が渡る。その状態で下記のクロック/PMU書換え系（候補1〜3＋
+	 *  実施32/34のCPUクロック切替え・BBPLL再較正）を無条件実行すると，
+	 *  実行中のCPUクロック源を生きたまま再切替え・BBPLLを再較正する
+	 *  ことになり，ハンドオフ直後の実行中クロックにグリッチ/ハング
+	 *  リスクがある（実施26のHANDOFF_SKIP_WIFI_INITと同種の配慮）。
+	 *  `HANDOFF_SKIP_CLOCK_INIT`定義時はこれらをスキップし，ホストが
+	 *  確立した状態をそのまま引き継ぐ。通常のDirect Boot（cold boot）
+	 *  では定義しないため，実施32〜35の効果はそのまま有効。
+	 */
+#ifndef HANDOFF_SKIP_CLOCK_INIT
+	/*
+	 *  【実施35・出荷時ガード】候補2〜4はいずれも実機2/2でAP検出に
+	 *  無効と確定した（causal refute，docs/c5-bringup.md実施35 3〜4・
+	 *  6・9節）。候補3・4は特に，stock実測値をそのまま定数注入して
+	 *  おり，`pmu_hp_system_init()`実体（`pmu_init.c:175`）を見ると
+	 *  HP_MODEM/HP_SLEEPの`regulator0.dbias`はeFuse由来の基板固有電圧
+	 *  トリム（`get_act_hp_dbias()`）であるべき値——HP_ACTIVE側では
+	 *  PVT自動dbiasループがこの固定注入を実測でライブに上書きする
+	 *  ことを確認済み（6節）だが，HP_MODEM/HP_SLEEP側で同種の上書きが
+	 *  実際に起きるかは**未確認**（advisor指摘）。C5#1では実害なしと
+	 *  確認済みだが，**他基板でこのコードをそのまま「出荷」すると
+	 *  C5#1のトリム値を焼き付ける副作用の恐れがある**——refuteされた
+	 *  実験コードを既定で無効化し，`ESP32C5_R35_ENABLE_REFUTED_
+	 *  CANDIDATES`定義時のみ再現実験用に有効化できるようにする
+	 *  （関数自体は次段の参考のため残置，デフォルトでは未実行）。
+	 *  候補1（RTC_FAST_CLK源をRC_FASTへ）はstockの実際の選択と一致する
+	 *  正しい修正でありrefuteの対象外のため，常時有効のまま残す。
+	 */
+#ifdef ESP32C5_R35_ENABLE_REFUTED_CANDIDATES
+	/*
+	 *  【実施35候補3】PMU HP_MODEMバンク（＋HP_ACTIVE.HP_REGULATOR0）の
+	 *  固定値注入。stockの実行順序（`sys_rtc_init()`=`esp_rtc_init()`=
+	 *  `pmu_init()`は`system_early_init()`＝esp_clk_init等より前）に
+	 *  合わせ，候補1・2よりも前に置く。
+	 */
+	esp32c5_r35_pmu_hp_modem_bank_fixed();
+
+	/*
+	 *  【実施35候補4】PMU HP_SLEEPバンクの固定値注入。候補3と同じ
+	 *  `pmu_hp_system_init()`呼出しが設定する残る1モード分。
+	 */
+	esp32c5_r35_pmu_hp_sleep_bank_fixed();
+#endif /* ESP32C5_R35_ENABLE_REFUTED_CANDIDATES */
+
+	/*
+	 *  【実施35候補1】RTC_FAST_CLK源をRC_FASTへ切替え（esp_clk_init()の
+	 *  rtc_clk_fast_src_set()相当）。stockのesp_clk_init()内での実行
+	 *  順序（RTC_FAST/SLOW_CLK設定はCPU周波数切替えより前）に合わせ，
+	 *  esp32c5_r32_cpu_clock_switch()の前に置く。stockの実際の選択
+	 *  （RC_FAST）と一致する正しい修正のため，refuteの対象外として
+	 *  常時有効。
+	 */
+	esp32c5_r35_rtc_fast_clk_select();
+
+#ifdef ESP32C5_R35_ENABLE_REFUTED_CANDIDATES
+	/*
+	 *  【実施35候補2・因果確認段階】RTC_SLOW_CLK_CAL_REGへstock実測値を
+	 *  固定注入する（esp_clk_slowclk_cal_set()相当，正式なrtc_clk_cal()
+	 *  実測は未実装）。候補1（直上）は単独ではAP検出に効果がなかった
+	 *  ため，候補2を追加する。診断専用の暫定注入であり，board/temp
+	 *  依存の実測値をそのまま焼き付けるため既定では無効。
+	 */
+	esp32c5_r35_rtc_slowclk_cal_set_fixed();
+#endif /* ESP32C5_R35_ENABLE_REFUTED_CANDIDATES */
+
 	esp32c5_r32_cpu_clock_switch();
+#endif /* !HANDOFF_SKIP_CLOCK_INIT */
 
 #ifdef TOPPERS_ESP32C5_WIFI
 	esp_rom_set_cpu_ticks_per_us(CORE_CLK_MHZ);
