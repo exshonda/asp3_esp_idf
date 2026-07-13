@@ -101,6 +101,46 @@ promisc_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 	promisc_rx_count++;
 }
 
+#ifdef ESP32C5_R38_RXINSTR
+/*
+ *  【実施38】候補0（2×2判定）の(b) RX観測用，JTAG非依存のUART計装。
+ *  1秒周期でpromiscuousコールバック数（3秒対照窓後もfilter=ALLで
+ *  維持し続ける，scan実行中の受信も含む）とWi-Fi MAC割込み総数
+ *  （esp_shim_int_count[1..15]，実施78のC6手法のC5移植）を出力する。
+ *  併せてトーン自己ループバック測定チェーンの生ADC(0x600A081C)と
+ *  IQ_DONE(0x600A047C bit16)＝実施20由来のAGC/noise floor生存代理指標も
+ *  出す。TNFY_HANDLER（タスク非依存コンテキスト）なのでmain_taskが
+ *  停止していても発火し続ける（実施24と同型）。
+ */
+void
+r38_rxinstr_cyclic_handler(EXINF exinf)
+{
+	extern volatile uint32_t esp_shim_int_count[];
+	static uint32_t last_promisc = 0U, last_int = 0U;
+	uint32_t promisc_now = promisc_rx_count;
+	uint32_t int_now = 0U;
+	uint32_t raw_adc = *(volatile uint32_t *)0x600A081CU;
+	uint32_t done    = *(volatile uint32_t *)0x600A047CU;
+	int wi;
+
+	(void) exinf;
+	for (wi = 1; wi <= 15; wi++) {
+		int_now += esp_shim_int_count[wi];
+	}
+
+	syslog(LOG_NOTICE,
+		"R38RX: promisc=%d dpromisc=%d macint=%d dmacint=%d scandone=%d",
+		(int_t)promisc_now, (int_t)(promisc_now - last_promisc),
+		(int_t)int_now, (int_t)(int_now - last_int), (int_t)scan_done);
+	syslog(LOG_NOTICE,
+		"R38RX: raw_adc=0x%08x iq_done16=%d",
+		(unsigned int)raw_adc, (int_t)((done >> 16) & 1U));
+
+	last_promisc = promisc_now;
+	last_int = int_now;
+}
+#endif /* ESP32C5_R38_RXINSTR */
+
 static void
 wifi_event_handler(void *arg, const char *base, int32_t id, void *data)
 {
@@ -316,13 +356,30 @@ main_task(EXINF exinf)
 		err = esp_wifi_set_promiscuous_rx_cb(promisc_rx_cb);
 		syslog(LOG_NOTICE, "wifi_scan: DIAG set_promiscuous_rx_cb -> %d",
 			   (int_t)err);
+#ifdef ESP32C5_R38_RXINSTR
+		/*  実施38：候補0のRX観測はscan実行中も継続するため，
+		 *  filter maskをALL（mgmt/data/ctrl/misc全種別）へ明示設定する。 */
+		{
+			wifi_promiscuous_filter_t filt;
+			filt.filter_mask = WIFI_PROMIS_FILTER_MASK_ALL;
+			err = esp_wifi_set_promiscuous_filter(&filt);
+			syslog(LOG_NOTICE, "wifi_scan: R38 set_promiscuous_filter(ALL) -> %d",
+				   (int_t)err);
+		}
+#endif /* ESP32C5_R38_RXINSTR */
 		err = esp_wifi_set_promiscuous(true);
 		syslog(LOG_NOTICE, "wifi_scan: DIAG set_promiscuous(true) -> %d",
 			   (int_t)err);
 		(void) tslp_tsk(3000000);	/* 3秒間，周辺の電波を受信できるか観測 */
 		syslog(LOG_NOTICE, "wifi_scan: DIAG promisc_rx_count=%d",
 			   (int_t)promisc_rx_count);
+#ifdef ESP32C5_R38_RXINSTR
+		/*  実施38：ここではdisableしない——scan実行中も含めてpromiscuous
+		 *  RXカウントを取り続ける（r38_rxinstr_cyclic_handlerが1秒周期で
+		 *  出力）。 */
+#else
 		(void) esp_wifi_set_promiscuous(false);
+#endif /* ESP32C5_R38_RXINSTR */
 	}
 #endif /* HANDOFF_SKIP_WIFI_INIT */
 

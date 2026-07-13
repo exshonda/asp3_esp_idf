@@ -7818,3 +7818,174 @@ C6側でこの視点からの再監査が行われたかは未確認——将来
 - 冷間ベースライン：本ラウンドのべ4回（全て0 APs，既知症状の再現）。
 - 最終状態：`git diff`でソース無変更を確認＋実機UART 35秒確認
   （退行なし）。
+
+---
+
+## 実施38：候補0（外部AI回答・2×2判定）——C5#2をスニファへ転用し，冷間0APの真因を初めてTX/RX軸で直接分離。**結果＝TX無・RX無（C6 deaf-RXと同一バケット）**——37ラウンド追ってきた「RX側較正チェーン」の外側，TX/RX共通のフロントエンド/シンセ段が疑わしいと判明
+
+コーディネータ指示＝`tmp/external_ai_c5_answer_fable.md`候補0の実行。
+C5#2（`D0:CF:13:F0:C8:94`）を**ユーザーが2026-07-13に直接承認**した役割変更で
+スニファへ転用し，C5#1（`D0:CF:13:F0:A7:44`）のscan中probe requestが空中に
+出ているか（TX）・promiscuousコールバックが発火するか（RX）を初めて直接測る。
+
+### 0. 環境・機材
+
+- C5#1（DUT）＝`D0:CF:13:F0:A7:44`／ttyACM1／UARTブリッジ`b04e3bcf…`＝ttyUSB0。
+  着手時flash＝`build/c5_r34_wifi80`（240MHz出荷構成，実施34以降の標準）。
+- C5#2（スニファ，**役割変更をユーザー承認済み・2026-07-13**）＝
+  `D0:CF:13:F0:C8:94`／ttyACM2／UARTブリッジ`3e7bd19f…`＝ttyUSB2。
+  着手時flash＝旧stock scanサンプル（上書き）。
+- 接触禁止（C6 board C `14:C1:9F:E0:5A:9C`／ttyACM0，UARTブリッジ`125a266b…`／
+  ttyUSB1）は全操作で無接触（by-idピン留め徹底，操作前後にudevadm照合）。
+- 全UART通信はCP2102Nブリッジ（ttyUSB0/ttyUSB2）のみ使用——ttyACM（native
+  USB-JTAG CDC）はopenで`rst:0x15`を誘発する既知罠（実施21）のため未接触。
+  JTAG/OpenOCDも本ラウンドは不使用（advisor助言どおり，ファームウェア内
+  UART計装のみで完結）。
+
+### 1. スニファアプリ（C5#2，IDF v6.1 native，スクラッチ`sniffer/`・`sniffer5g/`）
+
+`esp_wifi_set_promiscuous`+`WIFI_PROMIS_FILTER_MASK_ALL`で全種別を受信し，
+802.11フレームコントロール（type/subtype）を自前パースして
+全フレーム数／mgmt数／probe request数／beacon数（環境陽性対照用）と，
+送信元MAC＝DUT（`d0:cf:13:f0:a7:44`）のprobe request数・全フレーム数を
+1秒周期でUARTへ出力する。帯域・チャンネルはビルド時定数固定
+（2.4GHz版＝ch6，5GHz版＝`esp_wifi_set_band_mode(WIFI_BAND_MODE_5G_ONLY)`＋ch36）。
+5GHzチャンネルは事前サーベイ（36〜165の主要チャンネルを1.5秒ずつhop）で
+ch36/ch48が安定して強い環境beacon活性を示すことを確認して選定
+（ch36＝UNII-1，非DFS＝active scan常時許可）。
+
+**環境陽性対照（両帯域とも成立を確認してからDUT測定に進む，鉄則どおり）**：
+- 2.4GHz ch6：起動後13秒で total=1460 mgmt=1232 probereq=19 beacon=956
+  （継続的に増加，ambient probe/beaconの安定検出を確認）
+- 5GHz ch36：起動後13秒で total=1332 mgmt=717 probereq=22 beacon=454
+  （同様に安定検出）
+
+### 2. DUT計装（`apps/wifi_scan/wifi_scan.c`，新規`ESP32C5_R38_RXINSTR`ビルドフラグ）
+
+既存の3秒promiscuous対照窓（実施12由来）をscan実行中も維持するよう変更
+（`esp_wifi_set_promiscuous_filter(ALL)`を明示設定した上でscan完了後もdisableしない）。
+新規`r38_rxinstr_cyclic_handler`（実施24の`wifi_diag_cyclic_handler`と同型，
+`TNFY_HANDLER`＝タスク非依存の1秒周期CRE_CYC）で以下をUARTへ出力：
+promiscuousコールバック累積数・delta，Wi-Fi MAC割込み総数
+（`esp_shim_int_count[1..15]`合計，実施78のC6手法のC5移植）・delta，
+トーン自己ループバック測定チェーンの生ADC（`0x600A081C`）とIQ_DONE
+（`0x600A047C` bit16，実施20由来）。scan設定はNULL既定（active scan，
+show_hidden無効，全チャンネル走査——変更なし，advisor助言により「既知の
+20-25APベースラインに新変数を入れない」方針を優先）。
+
+冷間ビルド（`build/c5_r38_cold`）とハンドオフゲスト（`build/c5_r38_handoff`，
+`HANDOFF_SKIP_CLOCK_INIT=1`併用，実施35のstock app_main先頭ジャンプ機構を
+`stock_scan/`スクラッチ資産で再利用）は**同一ソース**から
+`ESP32C5_R38_RXINSTR=1`のみ差分でビルド（実施37が確定した「冷間/ハンドオフ
+ゲストは別リンク＝0x2AEオフセット差」は残るが，計装コード自体は同一ソース）。
+
+### 3. 測定マトリクス（各セル2回再現，DUT・スニファ同時二重キャプチャ，
+   各70秒，`r38_dualcap.py`でUARTブリッジ2本を同時読み・DUT側のみRTSリセット）
+
+| セル | promisc(DUT) | DUT送信元フレーム(スニファ検出) | MAC割込み | scan結果 |
+|---|---|---|---|---|
+| 冷間×2.4GHz boot1 | 0（70秒間終始） | 0（probereq含め終始0，同時に環境probereq最大116件検出） | 生きている（2688→7831，バースト状） | RESCAN 0 APs |
+| 冷間×2.4GHz boot2 | 0（130秒相当，終始） | 0 | 生きている（→16096） | RESCAN 0 APs |
+| 冷間×5GHz boot1 | 0 | 0（環境probereq同時44件検出） | 生きている（→24768） | RESCAN 0 APs |
+| 冷間×5GHz boot2 | 0 | 0 | 生きている | RESCAN 0 APs |
+| ハンドオフ×2.4GHz boot1 | 生きている（0→1786） | **17**（probereq） | 生きている（896→2068） | RESCAN 22/27 APs |
+| ハンドオフ×2.4GHz boot2 | 生きている（→3431） | **39** | 生きている（→4023） | RESCAN 25-29 APs |
+| ハンドオフ×5GHz boot1 | 生きている（→4838） | **7〜8** | 生きている（→5738） | RESCAN 23-28 APs |
+| ハンドオフ×5GHz boot2 | 生きている（→6754） | **16** | 生きている（→7902） | RESCAN 26-28 APs |
+
+**DUT側陽性対照（advisorが要求した「反対条件で本当に検出できるか」）が
+本ラウンドの核**：同一2枚・同一設置・同一アプリコード経路・同一チャンネルで，
+ハンドオフ系譜は4セット全てでスニファがDUT送信元probe requestを実検出
+（7〜39件）し，promiscuousコールバックも生きている。冷間系譜は同じ2枚・
+同じ設置で4セット全てゼロ——**リンクや設置の問題ではなく，DUT（冷間ブート
+固有の状態）に原因が局在する**ことを，実施のたびに書き換える必要のない
+一つの実験系列で示せた。
+
+トーンADC/IQ_DONE（生存代理指標）：**iq_done16=1が冷間・ハンドオフ両方，
+全ブートで終始1**（実施15-20時代の「ASP3のみ生ADCハードゼロ」からの変化——
+実施33/34のクロック/WDT修正でこの較正ビットは完走するようになっていた）。
+生ADC値自体は各ブート内で単一の静的値に固定され動かない（冷間
+`0x0a3a0a44`，ハンドオフ`0x0a3a0a3a`）——両系譜とも「一発較正値が固まって
+動かない」点で同型であり，下位バイトの差はブート毎の較正ノイズの域を出ない
+（`memory/feedback_hardware_investigation_rigor.md`のdegenerate-comparator
+ノイズと同型）。**プラットフォーム差の指標としては不採用**（iq_done16=1と
+いう「両系譜とも較正チェーン自体は完走する」事実だけを採用する）。
+
+### 4. 判定
+
+事前固定の判定表（外部AI回答候補0）：
+
+> TX有+promisc≈0＝RX前段（RF/AGC/BB）で死亡／TX有+promisc>0＝MACフィルタ〜
+> ソフト集計で死亡／**TX無＝TX・RX共通の前段（synth/FE/BB共通）で死亡**
+
+観測＝**TX無・RX無**（4セル×2回，計8回全てTX/RXともゼロ，DUT側陽性対照が
+同一機材・同一手法で4/4成立）。判定は**「TX・RX共通の前段で死亡」**——
+これは37ラウンド（実施15〜37）が集中して追ってきた「RX側較正チェーン
+（トーン自己ループバック測定）」の**外側**にある可能性を強く示唆する新知見。
+
+ただし観測と機序は区別する（advisor指摘）。本ラウンドが直接示したのは
+「冷間ブートはTX電波を一切放射せず，RXも一切フレームを受理しない」という
+**観測**であり，「共有フロントエンド／シンセ段が起動しない」は最有力
+**仮説**であって直接測定した機序ではない。「FEは上がるがTXパスだけ個別に
+死んでいる」という代替説とスニファ無検出という結果だけでは区別できないが，
+**両方とも同じ場所（共有FE/シンセ）に収束する**ため，判定の分岐先は変わらない。
+最も強く言える一文：冷間scanは`err=0`で「完走」を報告し（`RESCAN 0 APs
+(err=0)`），かつ同一チャンネルでハンドオフ系譜は完走scanが確実に電波を
+放射する——**「完走を報告するのに何も放射しない」冷間scanは異常であり，
+フロントエンドが一度も起動していない可能性を指し示す**。
+
+なお`promiscuous(true)`自体の戻り値ログは，起動直後のsyslogバースト
+（既知のsyslog取りこぼしバグ，`memory/feedback_hardware_investigation_rigor.md`
+参照）で本ラウンドの捕捉から漏れ，冷間ブートでpromiscuousが実際にarmされた
+ことの直接証明は取れていない——ただしRX無の判定はスニファ側で独立に
+（`esp_wifi_scan_get_ap_records`が0件を返す＝RESCAN 0 APsという，
+promiscuous設定に依存しない別経路の観測）成立しているため，この欠落は
+判定を揺るがさない。
+
+### 5. C6 deaf-RXとの定量比較
+
+| 項目 | C5冷間（本ラウンド） | C6 deaf-RX（実施80/81/83） |
+|---|---|---|
+| TX電波放射 | 無（4/4セル×2回，DUT陽性対照で検出感度は確認済み） | 無（実施81，271件の環境probe対照下でゼロ） |
+| RX（promiscuous/lmacRxDone等） | 無（promisc=0終始） | 無（`lmacRxDone` 0/120s） |
+| MAC割込み | 生きている（バースト状，1秒窓で0〜256，scanサイクルに同期） | 生きている（定常〜140/s） |
+| 較正ビット | iq_done16=1（両系譜とも完走） | （AGC/CCA動的に生存，実施78） |
+
+**同じバケット（TX無・RX無・下位MAC割込みは生存）に入るが，時間パターンは
+異なる**——C6は定常的な割込みレート，C5冷間はscanサイクルに同期したバースト
+（サイクル中0〜256，サイクル間0）。「同一バケット・同程度の桁」であって
+「同一現象」と断定はしない。
+
+### 6. 変更ファイル（実施38）
+
+- `apps/wifi_scan/wifi_scan.c`／`wifi_scan.h`／`wifi_scan.cfg`：新規
+  `ESP32C5_R38_RXINSTR`ビルドフラグ（未定義時は実施12以来の挙動と完全互換）。
+  promiscuousをscan中も維持するよう変更（フラグ有効時のみ）・
+  `r38_rxinstr_cyclic_handler`新設（1秒周期UART計装）。
+- 本doc：実施38節追記。
+- スクラッチ（`260d98fa…/scratchpad/`）：`sniffer/`・`sniffer5g/`・
+  `sniffer5survey/`（IDF v6.1 nativeプロジェクト一式）・`r38_dualcap.py`
+  （DUT/スニファ同時二重キャプチャ）・`r38_guest_640k.bin`（ハンドオフ
+  ゲスト，実施37罠対応で0x200000へ別途書込み済みだったが，手順6の全域
+  書き戻しで意図的に消去——次回ハンドオフ検証時は再作成要）・
+  `r38_cold_*`/`r38_handoff_*`の生ログ一式（DUT/スニファ双方）・
+  `survey5_out.log`（5GHzチャンネルサーベイ）。
+- git commitは行っていない（コーディネータのレビュー後のcommit&push運用）。
+
+### 7. 検証（実施38）
+
+- ビルド：`build/c5_r38_cold`（FLASH 11.79%/RAM 76.23%）・
+  `build/c5_r38_handoff`（同型）とも成功。`sniffer`/`sniffer5g`/
+  `sniffer5survey`（IDF v6.1 native，esp32c5）とも成功。
+- スニファ環境陽性対照：2.4GHz ch6・5GHz ch36とも成立（1節）。
+- DUT側陽性対照（ハンドオフ系譜）：4セット全てでpromiscuous生存・
+  MAC割込み生存・AP数20-29（既知ベースライン内）・スニファでDUT送信元
+  probe request実検出（7〜39件）——本ラウンドの核となる反対条件対照。
+- 冷間ベースライン再現：4セット全てTX無・RX無・RESCAN 0 APs（2/2×2帯域）。
+- 最終状態：C5#1＝`build/c5_r34_wifi80`（240MHz出荷構成）を`write-flash 0x0`
+  でフル4MB書き戻し（実施37罠どおり，これにより0x200000のハンドオフゲストは
+  意図的に消去），UART確認で`wifi_scan: 0 APs found (err=0)`・
+  `wifi_scan: done`・`RESCAN 0 APs (err=0)`を実測——冷間症状の回帰を確認。
+  C5#2＝スニファ（2.4GHz ch6版）のまま維持（次ラウンド以降も転用継続の
+  想定，役割変更はユーザー承認済み2026-07-13）。
+  接触禁止2台（C6 board C／UARTブリッジ`125a266b…`）は全工程で無接触。
