@@ -393,86 +393,150 @@ esp_random(void)
  *  esp_intr_alloc/free/enable/disable（bt.cが直接呼ぶ標準割込み確保
  *  API．esp_wifi_adapter.cのset_intr_wrapper／esp_shim_set_isrと
  *  同じ仕組み（INTMTXルーティング＋esp_shim.cfgでDEF_INH済みの
- *  CPU割込み線）を流用する．BTコントローラは単一のISRソースしか
- *  要求しないため（実測：esp_intr_alloc呼出しは1箇所），固定で
- *  CPU割込み線1（Wi-Fi未使用時のみ空き＝ESP32C3_BT+ESP32C3_WIFI
- *  同時ONは現状未対応のため衝突しない）を割り当てる単発実装とする．
+ *  CPU割込み線）を流用する．
+ *
+ *  ★（D-2b再開ラウンド＝S3真因の移植．docs/s3-bt-intr-source-overwrite-
+ *  fix-for-c3.md・docs/bt-c3-resume-plan.md）旧実装は「BTコントローラは
+ *  単一のISRソースしか要求しない（実測：esp_intr_alloc呼出しは1箇所）」
+ *  という前提で単一static handle＋固定CPU線1だったが，S3実機で同一の
+ *  bt.c（hal/components/bt/controller/esp32c3/bt.c＝S3と共有）＋同系列
+ *  blobがesp_intr_allocを**2回（source8=RWBLE→source5=BT_BB）**呼ぶ
+ *  ことが確定した．単一handleだと2回目の登録が1回目のhandler/argを
+ *  上書きし，source8の割込みがsource5用handlerへ配送され続ける
+ *  （handlerはsource8のstatus/clearに触れない）＝status0のspurious
+ *  ストームの正体（S3では修正で消滅を確認）．本実装はS3同様スロット
+ *  配列化し，呼出し順でCPU線1,2へ分離する（線2はesp_shim.cfgの
+ *  DEF_INH(2)＋esp_shim_inthdr_2が既存＝カーネルコンフィグ変更不要）．
+ *  Wi-Fi未使用時のみ線1,2は空き（ESP32C3_BT+ESP32C3_WIFI同時ONは
+ *  現状未対応のため衝突しない）．
  * ------------------------------------------------------------------
  */
 #define BT_INTMTX_BASE_ADDR   0x600C2000U
 #define BT_INTMTX_ENABLE_REG  (BT_INTMTX_BASE_ADDR + 0x104U)
 #define BT_INTMTX_PRI_REG(n)  (BT_INTMTX_BASE_ADDR + 0x114U + (n) * 4U)
-#define BT_INTR_CPU_LINE      1
+#define BT_INTR_CPU_LINE      1		/* スロット0の線．スロットnは線(1+n) */
+#define BT_INTR_MAX_SLOT      2
 
 struct intr_handle_data_t {
 	int	source;
+	int	cpu_line;	/* 0=未割当て */
 };
 
-static struct intr_handle_data_t	bt_intr_handle;
+static struct intr_handle_data_t	bt_intr_slot[BT_INTR_MAX_SLOT];
+static uint32_t						bt_intr_nalloc;
+
+/*
+ *  （診断計装）esp_intr_allocの呼出し回数とsourceの時系列をRTC STORE1
+ *  (0x60008054，usb-reset生存)へ記録し，esptool read-memで事後読みする．
+ *  旧計装（単一スカラへの上書き記録）は「最後のsource」しか見えず
+ *  呼出し回数を判別できなかった（docs/bt-c3-resume-plan.md 2.3節）．
+ *    bits[31:24]=0xA1（マーカ），[23:16]=呼出し累積回数，
+ *    [15:8]=1回目のsource，[7:0]=2回目のsource
+ *  例：0xA1020805＝2回呼出し・source8→source5（S3実測パターン）．
+ */
+#define BT_INTR_TRACE_REG	0x60008054UL
 
 esp_err_t
 esp_intr_alloc(int source, int flags, intr_handler_t handler, void *arg,
 			   intr_handle_t *ret_handle)
 {
+	struct intr_handle_data_t	*slot;
+	uint32_t					line;
+	uint32_t					trace;
+
 	(void) flags;
-	bt_intr_handle.source = source;
 
-	/*  （D-2b(1) ISRストーム診断）source番号は実測で5(BT_BB)確定済み．
-	    (a)フェーズではshim_int_dispatchがBB status 0x6001108c を集計．
-	    0xC0=status非0のディスパッチ数, 0xC4=status sticky OR．蓄積reg
-	    0xC0/0xC4を0初期化（前回boot残値の混入防止）．診断のみ・無害．  */
-	sil_wrw_mem((void *) 0x600080C0UL, 0U);
-	sil_wrw_mem((void *) 0x600080C4UL, 0U);
+	bt_intr_nalloc++;
+	trace = sil_rew_mem((const uint32_t *) BT_INTR_TRACE_REG);
+	if ((trace >> 24) != 0xA1U) {
+		trace = 0xA1000000U;		/* 前回boot残値を破棄 */
+	}
+	trace = (trace & 0xFF00FFFFU)
+			| ((bt_intr_nalloc <= 0xFFU ? bt_intr_nalloc : 0xFFU) << 16);
+	if (bt_intr_nalloc == 1U) {
+		trace = (trace & 0xFFFF00FFU) | (((uint32_t) source & 0xFFU) << 8);
+	}
+	else if (bt_intr_nalloc == 2U) {
+		trace = (trace & 0xFFFFFF00U) | ((uint32_t) source & 0xFFU);
+	}
+	sil_wrw_mem((uint32_t *) BT_INTR_TRACE_REG, trace);
 
+	if (bt_intr_nalloc == 1U) {
+		/*  （D-2b(1) ISRストーム診断）shim_int_dispatchの蓄積reg
+		    0xC0/0xC4を0初期化（前回boot残値の混入防止）．診断のみ・無害．  */
+		sil_wrw_mem((void *) 0x600080C0UL, 0U);
+		sil_wrw_mem((void *) 0x600080C4UL, 0U);
+	}
+
+	/*  呼出し順でスロット割当て（1個目→線1，2個目→線2）．3回以上は
+	    想定外＝最終スロットへ上書き（traceのcountで検出できる）  */
+	if (bt_intr_nalloc <= (uint32_t) BT_INTR_MAX_SLOT) {
+		slot = &bt_intr_slot[bt_intr_nalloc - 1U];
+	}
+	else {
+		slot = &bt_intr_slot[BT_INTR_MAX_SLOT - 1];
+	}
+	line = (uint32_t) BT_INTR_CPU_LINE + (uint32_t)(slot - bt_intr_slot);
+	slot->source = source;
+	slot->cpu_line = (int) line;
+
+	/*  INTMTX：source→CPU線 のルーティング  */
 	sil_wrw_mem((void *)(uintptr_t)(BT_INTMTX_BASE_ADDR + (uint32_t) source * 4U),
-				BT_INTR_CPU_LINE);
+				line);
 	/*
-	 *  （D-2b(A)）BTコントローラISR（CPU線1）をINTMTX優先度1（最低）にし，
-	 *  カーネルタイマISR（CPU線16・優先度2）が**プリエンプトできる**ように
-	 *  する．両者が同レベル(2)だとadvertising中のBT ISR活動がタイマISRを
-	 *  スターブし2秒HCIタイムアウトが不発でホストがハングする疑いがあった．
-	 *  （ただし単独では未解決＝真のブロッカーはadv-enable後の割込みストーム
-	 *  疑い＝CPU飽和でホストタスクスターブ．docs/bt-shim.md「Phase D-2b」．
-	 *  優先度を上げてもBB割込みが立ち続けるか＝ack不能/クロックゲートかを
-	 *  esp_shim_int_count[1]のストーム率で観測する．）
+	 *  （D-2b(A)）BTコントローラISRをINTMTX優先度1（最低）にし，
+	 *  カーネルタイマISR（CPU線16・優先度2）がプリエンプトできるように
+	 *  する（経緯はdocs/bt-shim.md「Phase D-2b」(A)(iii)）．
 	 */
-	sil_wrw_mem((void *)(uintptr_t) BT_INTMTX_PRI_REG(BT_INTR_CPU_LINE), 1U);
-	esp_shim_set_isr(BT_INTR_CPU_LINE, (void *) handler, arg);
+	sil_wrw_mem((void *)(uintptr_t) BT_INTMTX_PRI_REG(line), 1U);
+	esp_shim_set_isr((int32_t) line, (void *) handler, arg);
 	sil_wrw_mem((void *)(uintptr_t) BT_INTMTX_ENABLE_REG,
 				sil_rew_mem((void *)(uintptr_t) BT_INTMTX_ENABLE_REG)
-				| (1UL << BT_INTR_CPU_LINE));
+				| (1UL << line));
 
-	*ret_handle = &bt_intr_handle;
+	*ret_handle = slot;
 	return(ESP_OK);
+}
+
+/*
+ *  handleからCPU線を引く（per-handle操作．旧実装は固定線1決め打ちで，
+ *  複数handleが実在する場合に誤った線を操作していた）．
+ */
+static uint32_t
+bt_intr_line_of(intr_handle_t handle)
+{
+	struct intr_handle_data_t	*h = (struct intr_handle_data_t *) handle;
+
+	if (h != NULL && h->cpu_line != 0) {
+		return((uint32_t) h->cpu_line);
+	}
+	return((uint32_t) BT_INTR_CPU_LINE);
 }
 
 esp_err_t
 esp_intr_free(intr_handle_t handle)
 {
-	(void) handle;
 	sil_wrw_mem((void *)(uintptr_t) BT_INTMTX_ENABLE_REG,
 				sil_rew_mem((void *)(uintptr_t) BT_INTMTX_ENABLE_REG)
-				& ~(1UL << BT_INTR_CPU_LINE));
+				& ~(1UL << bt_intr_line_of(handle)));
 	return(ESP_OK);
 }
 
 esp_err_t
 esp_intr_enable(intr_handle_t handle)
 {
-	(void) handle;
 	sil_wrw_mem((void *)(uintptr_t) BT_INTMTX_ENABLE_REG,
 				sil_rew_mem((void *)(uintptr_t) BT_INTMTX_ENABLE_REG)
-				| (1UL << BT_INTR_CPU_LINE));
+				| (1UL << bt_intr_line_of(handle)));
 	return(ESP_OK);
 }
 
 esp_err_t
 esp_intr_disable(intr_handle_t handle)
 {
-	(void) handle;
 	sil_wrw_mem((void *)(uintptr_t) BT_INTMTX_ENABLE_REG,
 				sil_rew_mem((void *)(uintptr_t) BT_INTMTX_ENABLE_REG)
-				& ~(1UL << BT_INTR_CPU_LINE));
+				& ~(1UL << bt_intr_line_of(handle)));
 	return(ESP_OK);
 }
 

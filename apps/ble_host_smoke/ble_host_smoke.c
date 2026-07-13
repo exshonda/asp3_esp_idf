@@ -95,13 +95,15 @@ raw_systimer_lo(void)
 
 #define BLE_DEVICE_NAME		"ASP3-C3-BLE"
 
-/*  RTC_CNTL scratch（STORE系）．リセットを跨いで残り，JTAG読出し容易  */
+/*  RTC_CNTL scratch（STORE系）．リセットを跨いで残り，JTAG読出し容易．
+    ★D-2b再開ラウンドで再割当て：0x54=esp_intr_alloc呼出しトレース
+    （bt_shim.c），0x58=CPU線2ディスパッチ数（esp_shim.c）に使うため，
+    advマーカは0x5cへ移動・connマーカのRTC書込みは廃止（グローバル
+    g_gap_conn_countで観測）．probe_taskのRTC書込みも廃止．  */
 #define BLE_SYNC_MARK_ADDR	((void *) 0x60008050UL)
 #define BLE_SYNC_MARK_VAL	0x5ADE51C0UL
-#define BLE_ADV_MARK_ADDR	((void *) 0x60008054UL)	/* adv開始マーカ */
+#define BLE_ADV_MARK_ADDR	((void *) 0x6000805CUL)	/* adv開始マーカ */
 #define BLE_ADV_MARK_VAL	0x0ADE5000UL
-#define BLE_CONN_MARK_ADDR	((void *) 0x60008058UL)	/* connectマーカ */
-#define BLE_CONN_MARK_VAL	0xC0117EC7UL
 
 static int gap_event_cb(struct ble_gap_event *event, void *arg);
 
@@ -175,7 +177,6 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 	switch (event->type) {
 	case BLE_GAP_EVENT_CONNECT:
 		g_gap_conn_count++;
-		sil_wrw_mem(BLE_CONN_MARK_ADDR, BLE_CONN_MARK_VAL);
 		syslog(LOG_NOTICE,
 			   "ble_host_smoke: GAP CONNECT status=%d handle=%d",
 			   (int_t) event->connect.status,
@@ -225,7 +226,7 @@ on_reset(int reason)
 	g_reset_count++;
 	/*  タグ付きでRTC 0x60008050へ記録＝esptool read-mem（JTAG不要）で
 	    事後読み．上位バイト0x5E=reset識別，下位=reason，中位=count下位．
-	    （プローブのRTC番地0x54/58/5cとは別番地＝衝突回避）  */
+	    （計装番地0x54/58/5cとは別番地＝衝突回避）  */
 	sil_wrw_mem((void *) 0x60008050UL,
 				0x5E000000UL | ((g_reset_count & 0xffUL) << 8)
 				| ((uint32_t) reason & 0xffUL));
@@ -397,18 +398,16 @@ void
 probe_task(EXINF exinf)
 {
 	(void) exinf;
-	/*  開始時の基準値（reset halt後にRTC 0x60008054=first, 0x60008058=latest,
-	    0x6000805c=count を読み，latest-first が進んでいればSYSTIMER HWは
-	    advertising中も生きている＝計測アーチファクト側，凍結ならBLE固有）  */
+	/*  開始時の基準値（グローバルのみ＝JTAG読み．★D-2b再開ラウンド：
+	    RTC 0x54/0x58/0x5cはalloc計装・線2カウント・advマーカに再割当て
+	    したため，本タスクのRTC書込みは廃止．HRT凍結問題自体は解決済み
+	    （CPU飽和が真因）でこのタスクはCPU飽和検知の生存確認用に残す）  */
 	g_probe_systimer_first = raw_systimer_lo();
 	g_probe_hrtcache_first = _kernel_current_hrtcnt;
-	sil_wrw_mem((void *) 0x60008054UL, g_probe_systimer_first);
 	for (;;) {
 		g_probe_systimer = raw_systimer_lo();
 		g_probe_hrtcache = _kernel_current_hrtcnt;
 		g_probe_count++;
-		sil_wrw_mem((void *) 0x60008058UL, g_probe_systimer);
-		sil_wrw_mem((void *) 0x6000805cUL, g_probe_count);
 		{
 			volatile int	k;
 			for (k = 0; k < 20000; k++) { }	/* 短いbusy間隔 */

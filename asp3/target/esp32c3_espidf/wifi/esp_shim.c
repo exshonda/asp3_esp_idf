@@ -995,6 +995,15 @@ static void
 shim_int_dispatch(int intno)
 {
 	esp_shim_int_count[intno]++;
+	if (esp_shim_isr_storm_probe != 0U && intno == 2) {
+		/*  （D-2b再開ラウンド）source多重登録修正（bt_shim.c）で2個目の
+		    BTソース（予測=source5:BT_BB）を線2へ分離した．線2の発火数を
+		    STORE2(0x60008058)へミラー＝esptool read-memで事後読み．
+		    線2が実際にディスパッチされる＝INTMTXルーティング着弾の
+		    機能的証拠（INTMTXレジスタ自体はusb-resetで初期化されるため
+		    事後読み不可）．  */
+		sil_wrw_mem((uint32_t *) 0x60008058UL, esp_shim_int_count[2]);
+	}
 	if (esp_shim_isr_storm_probe != 0U && intno == 1) {
 		/*  （D-2b(1)(a) BBステータス計装）BT_BB(source5)割込みの原因を判定
 		    する blob ISR（r_bt_bb_isr_hack）が読むBB割込みステータス
