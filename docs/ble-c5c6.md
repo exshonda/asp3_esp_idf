@@ -857,3 +857,149 @@ submodule（`asp3/asp3_core`・`hal/`）変更なし。C5系ファイル
 - ベースコミット：`fc296a1`（BLE実施01完了時点）
 - ブランチ：`claude/c6-wifi-c5-dev-5vc6x9`
 - 本ラウンドは**git commitしていない**（作業指示通り）。
+
+## BLE実施04：C5 BTビルドの「カーネル起動阻害」調査——★実施03は誤診・C5 D-1は実は達成済み。真因は「no time event氾濫」＝C6と同型のSYSTIMERアラームlevel再ラッチ（良性ノイズ）がコンソールを埋め尽くしていただけ
+
+**日付**：2026-07-14　**対象**：C5#1（`D0:CF:13:F0:A7:44`，UART=`b04e3bcf…`／
+JTAG=ttyACM2）　**出発点**：実施03「BTビルドは実機ブートがD-1到達前に
+BLOCKED，`main_task`の最初の1行すら走らずHRT割込みが再帰的即時再発火」。
+
+### ★結論サマリ（実施03の診断を訂正）
+
+- **C5 BTビルドは実は D-1 を達成していた**。実施03の「BLOCKED／main_task
+  非到達」は**誤診**であった。真因は，`no time event is processed in hrt
+  interrupt.`の**無限氾濫がsyslogバッファを溢れさせ（`N messages are
+  lost`），バナー・`main_task`のD-1到達ログを含む全出力をコンソール上で
+  かき消していた**こと。氾濫行を`grep -av`で除去すると，2回の独立ブート
+  いずれもD-1シーケンスが完走していた（後述）。
+- **立てた3仮説はすべて実機観測で反証**：
+  - **H1（`LAST_INDEX()==0`／HRTCNT_BOUND経路）＝反証**。JTAGで
+    `_kernel_tmevt_heap[0].last_index=1`（＝保留タイムイベントが常に存在）。
+    HRTCNT_BOUND経路は一度も通っていない。
+  - **H2（RAM枯渇・オーバーラップ）＝反証**。BT版RAM 70.77%（.bss末尾
+    0x40843EFC・HP-SRAM 384KBに対し約115KBの余裕），かつ**より大きな
+    RAMを使うWiFiビルド（76.25%）が正常起動**する（実施03のヒープ
+    192KB→32KB反証実験とも整合）。
+  - **H3（TICKS_PER_US較正）＝反証**。`ESP32C5_SYSTIMER_TICKS_PER_US=16`
+    は実施03でJTAG実測16.00MHz確定済み。
+- **氾濫（storm）の真因＝target層のSYSTIMER oneshotアラームの
+  「level再ラッチ」**：C6の実施50追記7(B)で特定済みの機構と同型。
+  無線（BTコントローラ）稼働で誘発される良性だがCPU浪費・コンソール
+  占有型のノイズであり，**カーネル致命ではない**（D-1が完走した事実が
+  その証拠）。asp3_core共通部（`kernel/time_event.c`）のバグではなく，
+  **修正するなら`asp3/target/esp32c5_espidf/target_timer.*`のtarget層で
+  閉じる**（ただしC6と共有の挙動＝下記「申し送り」参照）。
+
+### 実機JTAG物証（BLOCKED状態のC5#1，2ブート＋動的トレース）
+
+OpenOCD（`adapter serial D0:CF:13:F0:A7:44`／`board/esp32c5-builtin.cfg`／
+super-WDT解錠後にhalt）。SYSTIMER base=`0x6000A000`。
+
+- **livelock署名**（boot1）：halt時PCは常に`0x420052ac`〜`0x420052b0`
+  （`dispatcher_1/2`），`mcause=0x88000020`（interrupt・cause32＝HRT
+  タイマ割込みINTNO16），`mepc=0x42007812`（`irc_begin_int_demote`）。
+  ＝HRT割込みがCPUをディスパッチャに張り付かせている（実施03の観測と一致）。
+- **SYSTIMER比較器 vs 実カウンタ直読み（H1直接検証／boot1）**：
+  `TARGET0`（armed）＝119,641,053 ticks，`UNIT0`実カウンタ（snapshot）＝
+  124,709,809 ticks → **アラームtargetは実カウンタより5,068,756 ticks
+  ＝約316ms「過去」**。`INT_ST bit0=1`かつ`INT_RAW bit0=1`（両方ラッチ），
+  `TGT0_CONF`のperiodビット=0（**oneshot**），`INT_ENA=1`，
+  `CONF=0x47000000`（TARGET0_WORK_EN bit24=1＝アラーム有効のまま）。
+  → **oneshotが発火後も自動解除されず（WORK_EN残），かつ
+  `systimer_ll_clear_alarm_int`は`int_clr`しか叩かないため，
+  `counter>=target`が恒真の間はINT_RAW/INT_STがクリア直後に即再ラッチ**
+  ＝level再ラッチstormの直接的レジスタ証拠。
+- **保留イベントの正体（動的トレース／単一ブートで5サンプル）**：ヒープ
+  先頭イベントの`callback=0x42007450=_kernel_wait_tmout_ok`（タスクの
+  タイムアウト付き待ちのタイムアウトコールバック），`arg`＝**tskid9の
+  TCB（＝`LOGTASK`，内部prio2）**。`evttim`は毎サンプル
+  **current_evttimの常に約9,998μs（=10ms）先**を追走（6.33M→8.35M→
+  9.15M→9.95M→10.74M）＝LOGTASKが`dly_tsk`≒10ms周期でループし，
+  タイムアウトイベントを絶えず再登録している通常挙動。`signal_time`は
+  **前進している**（2秒resumeで`current_evttim`が+2,498,667μs進行）＝
+  カーネルは氷結しておらず，storm下でも遅いながら前進する。
+- **全TCBダンプ**（tcb_table=`0x408336b0`・TCB=0x20）：
+  tskid8=`BT_TIMER_TSK`（SEM待ち＝初期化済），tskid9=`LOGTASK`
+  （DLY待ち），**tskid10=`MAIN_TASK`（内部prio9＝MAIN_PRIORITY 10）
+  が`tstat=0x00=TS_DORMANT`**。`main_task`は末尾で`return`する実装
+  （`apps/bt_smoke_c5/bt_smoke_c5.c`）のため，**DORMANT＝
+  main_taskは走り切って正常終了した**ことを意味する（＝実施03の
+  「main_task非到達」を直接反証）。
+
+### ★D-1達成の物証（コンソール，氾濫除去，2ブート独立）
+
+`grep -av "no time event is processed"`で氾濫を除去したUART採取：
+
+- **boot1**：`TOPPERS/ASP3 Kernel Release 3.7.2 for ESP32-C5`バナー →
+  `esp_bt_controller_init OK (heap free=179888)` →
+  `esp_bt_controller_enable(BLE)` → `phy: libbtbb version: 92325d6` →
+  `ble_ll_task -> tskid 1 (prio 23)` → `intr rate/1s line1=0 line2=0`
+  （**BT線の割込みstorm無し**＝スロット配列・多重登録耐性が機能） →
+  `controller enabled, sending HCI Reset` → **`Phase D-1 milestone
+  reached`** → `HP_APM M0-M3 exception latch clear (BT path OK)`。
+- **boot2**（独立reset）：同上に加え **`intr trace = 0xa1020704
+  (nalloc=2 src1=7 src2=4)`＝C6のD-1結果と完全一致**，`sending HCI
+  Reset` → `VHCI recv 7 bytes [0]=0x04 [1]=0x0e …`＝**HCI Command
+  Complete（04 0e …）受信**（C6 D-1の`04 0e 04 01 03 0c 00`と同型）。
+- ＝**判定基準(a)controller init／(b)enable=0／(c)HCI_Reset往復／
+  (d)多重登録トレース／(e)APM例外ラッチ健全 の全てを2/2ブートで充足**。
+  C5でBLEのcontroller初期化＋VHCI疎通（D-1）が達成された。
+
+### 氾濫（level再ラッチstorm）の機構と局在
+
+氾濫の1サイクル：LOGTASKの10ms `dly_tsk`イベントが発火→`signal_time`が
+処理・LOGTASKが新イベント（10ms先）を再登録・`set_hrt_event`が新target
+（未来）をarm→復帰。しかし**oneshotの旧発火がクリア直後に即再ラッチ**
+（`counter>=旧target`が恒真・WORK_EN残・`int_clr`だけでは解除されない）
+→ 次の実イベントが実際にdueになる10ms後まで，その隙間をISRが高頻度の
+空振り（`nocall==0`→`no time event`）で埋め尽くす。**実イベントは10ms毎に
+確実に前進する**ため，D-1は数秒〜十数秒かけて完走する（致命ではない）。
+
+これはC6の実施50追記7(B)で「無線稼働で誘発されるHRTアラームlevel
+再ラッチ」として既に特定・「良性・恒久HRTドライババグではない」と
+切り分け済みの現象と**同型**。素のASP3（sample1）・WiFiビルドでは実
+イベントの処理が十分速く常に未来targetがarmされ隙間が生じないため
+顕在化しない（実施03のA/B対照＝sample1正常，WiFi正常と整合）。C5では
+氾濫が桁違いに激しくコンソールを完全占有する点がC6（adv中でも読める）
+と異なるが，機構は同一。
+
+### 修正の可否と申し送り
+
+- **真因はtarget層（`target_timer.*`）で閉じる**。asp3_core共通部
+  （`kernel/time_event.c`の`set_hrt_event`）は仕様通りで無罪
+  （HRTCNT_BOUND経路は不使用・EVTTIM比較も正しい）。
+- **本ラウンドでは氾濫の恒久修正は行わない**（判断）。理由：(i) D-1は
+  既に達成＝本ラウンドの主目的は満たされた，(ii) 氾濫はC6が意図的に
+  許容している同型の良性現象であり，タイマ中核（全C5ビルド共有：WiFi
+  600s負荷・test_porting）に影響する変更は，回帰試験を尽くした上で
+  **C6と統一して**慎重に行うべき（BLEブリングアップの片手間で入れる
+  べきでない），(iii) 厳密性基準（未検証の変更を「動くはず」で入れない）。
+- **提案する修正（次段・要回帰試験）**：`target_hrt_set_event()`で
+  target設定前後にアラームを一度disable→（set_target・apply）→enable
+  し，oneshotの旧比較を確実に解除して新未来targetでクリーンに再arm
+  する（`systimer_ll_enable_alarm(&SYSTIMER,0,false/true)`を挟む）。
+  あるいは`target_hrt_handler()`でクリア後に`counter>=現target`なら
+  アラームをdisableして空振り再ラッチを断つ。**必ず** sample1・WiFi
+  scan・load_test（600s）・test_porting_c5で回帰確認し，C6にも同時
+  適用して整合を取ること。
+
+### WiFiビルド回帰
+
+`ESP32C5_WIFI=ON`（`apps/wifi_scan`）は実施03で再ビルド成功済み・
+本ラウンドではソース未変更（target層に手を入れていない）ため回帰なし。
+共有shim基盤も無変更。
+
+### C5#1最終状態
+
+BLE実施03の`ESP32C5_BT=ON`ビルド（`build/bt_smoke_c5/asp_flash.bin`，
+D-1達成が確認された当該バイナリ）を**フラッシュしたまま残置**（次段の
+氾濫修正を同一条件で継続できるようにする判断）。`load_test_c5_r47`への
+復元手順は実施03節に記載のとおり。
+
+### 使用した計測資産（scratchpad）
+
+`r04_hrtprobe.py`（SYSTIMER比較器 vs 実カウンタ・PCサンプル・kernel
+変数直読み），`r04_hrtprobe2.py`（保留イベント同定・前進検証），
+`r04_dyn.py`（全TCBダンプ＋動的トレース），`r04_console.py`（reset＋
+UART採取／氾濫は`grep -av`で除去）。いずれも実施21系`r21_capture.py`の
+OOCD／RTSリセット・reenum待ちハーネスを流用。
