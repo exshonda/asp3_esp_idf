@@ -66,6 +66,14 @@ SECTIONS
          *  教訓を踏まえ最初からC3の全セクション名一覧を含めておく。
          */
         *(.iram1 .iram1.*)
+        /*
+         *  BLE実施03：libble_app.a（BTコントローラblob，IDF v6.1）が
+         *  要求する高速実行用セクション．明示ルールが無いとorphan
+         *  section扱いとなり.dataとLMAが重なりリンクエラーになる
+         *  （実機リンクで判明．C6のBLE実施01と同じ理由・同じ対策）．
+         */
+        *(.high_perf_code_iram1 .high_perf_code_iram1.*)
+        *(.adv_fast_execute_code_iram1 .adv_fast_execute_code_iram1.*)
         *(.coexiram .coexiram.*)
         *(.wifi0iram .wifi0iram.*)
         *(.wifiextrairam .wifiextrairam.*)

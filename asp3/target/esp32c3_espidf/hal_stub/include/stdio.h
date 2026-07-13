@@ -33,5 +33,9 @@ extern size_t fwrite(const void *ptr, size_t size, size_t n, FILE *fp);
 extern int fseek(FILE *fp, long offset, int whence);
 extern long ftell(FILE *fp);
 extern int ferror(FILE *fp);
+extern char *fgets(char *s, int size, FILE *fp);
+extern void setbuf(FILE *fp, char *buf);
+extern int remove(const char *path);
+extern int rename(const char *oldpath, const char *newpath);
 
 #endif /* TOPPERS_HAL_STUB_STDIO_H */

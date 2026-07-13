@@ -712,21 +712,13 @@ wifi_reset_mac_wrapper(void)
  *  DR_REG_MODEM_SYSCON_BASEで確認済み．docs/c5-port-design.md §9）．
  *  C6の値をそのまま転記しないという方針に従い個別に確認した．
  */
-static void
-esp_shim_modem_icg_init(void)
-{
-	pmu_dev_t			*pmu = (pmu_dev_t *)0x600B0000U;
-	modem_lpcon_dev_t	*lpcon = (modem_lpcon_dev_t *)0x600AF000U;
-	modem_syscon_dev_t	*syscon = (modem_syscon_dev_t *)0x600A9C00U;	/* C6の0x600A9800から+0x400移動 */
-	uint32_t			code_bit = 1U << 2;	/* BIT(PMU_HP_ICG_MODEM_CODE_ACTIVE=2) */
-
-	pmu_ll_hp_set_icg_modem(pmu, PMU_MODE_HP_ACTIVE, 2U);
-	modem_syscon_ll_set_modem_apb_icg_bitmap(syscon, code_bit);
-	modem_lpcon_ll_set_i2c_master_icg_bitmap(lpcon, code_bit);
-	modem_lpcon_ll_set_lp_apb_icg_bitmap(lpcon, code_bit);
-	pmu_ll_imm_update_dig_icg_modem_code(pmu, true);
-	pmu_ll_imm_update_dig_icg_switch(pmu, true);
-}
+/*
+ *  BLE実施03：実体はwifi/esp_shim.cへ移設した（WiFi/BT共有ファイルへ
+ *  移すことでBT単体ビルドでもリンクできるようにするため．C6のBLE実施01
+ *  と同じ理由・同じパターン）．中身は無変更．呼出し箇所
+ *  （wifi_clock_enable_wrapper内）も無変更．
+ */
+extern void esp_shim_modem_icg_init(void);
 
 /*
  *  PVT自動dbias調整＋チャージポンプの初期化（【実施21】候補Bの加算移植）

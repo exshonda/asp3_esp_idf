@@ -20,8 +20,13 @@
  *  （NimBLE ホストを積むビルドのみ立つ．esp_bt.cmake で定義）限定にして，
  *  WiFi ビルドおよび BT コントローラ単体（bt_smoke）の RAM を従来通りに保つ．
  *  （esp_shim.cfg／esp_shim.c の配列・CRE_* と一致させること）
+ *
+ *  ★BLE実施02（C6）：C6/C5はesp_shim.h／esp_shim_cfg.h／esp_shim.cfgを
+ *  target.cmake経由でC3側のこのファイルをそのまま再利用する（chip非依存
+ *  部）．TOPPERS_ESP32C6_BT_NIMBLEをOR条件で追加し，C3の既存条件・値は
+ *  一切変更しない（strictly additive．docs/ble-c5c6.md「BLE実施02」）．
  */
-#ifdef TOPPERS_ESP32C3_BT_NIMBLE
+#if defined(TOPPERS_ESP32C3_BT_NIMBLE) || defined(TOPPERS_ESP32C6_BT_NIMBLE)
 #define ESP_SHIM_NUM_SEM    28    /* 24→28：NimBLE分+4 */
 #define ESP_SHIM_NUM_MTX    12    /* 8→12：NimBLE分+4 */
 #define ESP_SHIM_NUM_DTQ    8     /* 4→8：NimBLE eventq分+4 */

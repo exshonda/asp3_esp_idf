@@ -70,6 +70,17 @@ rand(void)
 	return((int)(esp_shim_random() & 0x7FFFFFFFU));
 }
 
+/*
+ *  bzero（BLE実施02で発覚．wpa_supplicant/src/ap/ap_config.c等が
+ *  strings.h相当のBSD互換関数として直接呼ぶ．ROMのmemcpy/memsetと
+ *  異なりbzero自体はROMに無いため実体を提供する）
+ */
+void
+bzero(void *s, size_t n)
+{
+	(void) memset(s, 0, n);
+}
+
 void
 abort(void)
 {
@@ -136,6 +147,19 @@ ferror(struct __FILE *fp)
 {
 	(void) fp;
 	return(1);
+}
+
+/*
+ *  BLE実施02で発覚：mbedtls（tf-psa-crypto/drivers/builtin/src/bignum.c
+ *  のmbedtls_mpi_read_file，MBEDTLS_FS_IO経路）がfgets()を直接呼ぶ．
+ *  ASP3にファイルシステムは無いため，fopen等と同様に常に失敗
+ *  （EOF＝NULL）を返すスタブとする．
+ */
+char *
+fgets(char *s, int size, struct __FILE *fp)
+{
+	(void) s; (void) size; (void) fp;
+	return(NULL);
 }
 
 /*

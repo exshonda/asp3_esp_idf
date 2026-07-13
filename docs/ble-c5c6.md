@@ -288,3 +288,572 @@ cmake -S asp3/asp3_core -B build/c6_r90_load_test -G Ninja \
 恒久ビルド構成）でも衝突しないことをここで確認できた。検証用
 ビルドディレクトリは確認後に削除済み。実際の書込みには本物の
 WPA2パスワードが必要（本セッションには無い）。
+
+## BLE実施03：C5 D-1（controller init + VHCI疎通）——ビルド/リンクは
+達成，実機ブートが未知の壁でBLOCKED（カーネルHRT/systimerストーム）
+
+**日付**：2026-07-14　**対象**：ESP32-C5 board C5#1（`D0:CF:13:F0:A7:44`，
+`asp3/target/esp32c5_espidf`）　**目的**：BLE実施01（C6 D-1）の資産・
+知見をC5へ転写し，C5でもcontroller init + VHCI疎通を達成する。
+
+### 結論サマリ
+
+- **ソース転写・ビルド・リンクは完全に成功**（後述の適応7件を実施）。
+- **実機ブートがD-1到達前にBLOCKED**：`main_task`（bt_smoke_c5）の
+  最初の1行すら実行されない＝**カーネル起動シーケンス自体が
+  停止する**新規の壁を発見した。`esp_bt_controller_init()`より
+  遥かに手前，バナー表示より前の段階のため，**BLE/BTコード自体は
+  一度も実行されていない**。判定基準(a)-(e)・APM確認はいずれも
+  「到達不能」＝未判定。
+- 壁の性質はBT固有ではなく**カーネル共通のHRT（SYSTIMER）割込み
+  ハンドラが再帰的に即時再発火し続ける**という新種の現象で，
+  厳密な二分実験（後述）により，BT機能そのものではなく**BTビルドの
+  何らかの副作用**（現時点では未特定）が引き金と判明した。
+
+### ライブラリ選定（本ラウンドの中心判断）
+
+C6のBLE実施01はhal submodule（esp-hal-3rdparty）の
+`controller/esp32c6/bt.c`＋`libble_app.a`をそのまま採用したが，**C5は
+IDF v6.1（`~/tools/esp-idf-v6.1`）からbt.c／ble.c／npl_os_freertos.c／
+libble_app.a／esp_phy／esp_coexを丸ごと採用した**。判断根拠：
+
+1. **C5のWiFi統合（実施09/10）が実機で確定させた事実**：hal
+   submodule版のlibphy.a（v8世代／os_adapter 0x08）は，実機C5（eco2
+   シリコン）のPHY RX較正（`phy_iq_est_enable_new`）で収束せず無限
+   リトライループへ入る（実施09で逆アセンブル差分まで確認済み）。
+   IDF v6.1のlibphy.a（v9世代／os_adapter 0x09）は同一チップで収束
+   する（実施10で実機確認済み）。
+2. **BTコントローラも同じ経路を通る**：`controller/esp32c5/bt.c`は
+   `esp_bt_controller_enable()`の中で`esp_phy_enable(PHY_MODEM_BT)`
+   を呼び，WiFiと**全く同一のlibphy.a／`register_chipv7_phy`経路**を
+   通る（hal版・v6.1版どちらのbt.cも同じ呼び出しをソースレベルで
+   確認済み）。hal世代のBT blob（`libble_app.a`）とv6.1世代のPHY
+   blobを手で混ぜる「ハイブリッド」構成は，Espressifが実際には
+   検証していないblob世代ABI境界を新規に作ることになり（advisor
+   レビュー指摘），WiFiが実機で踏んだ「eco2で収束しないPHY較正
+   ループ」をBTでも素朴に再現するリスクが高いと判断し，**PHY/coex
+   と同じIDF v6.1 matched setへBTも統一した**。
+3. **副次的な発見**：IDF v6.1の`controller/esp32c5/bt.c`は，hal
+   submodule版（`"platform/os.h"`のesp_os_*経由．C6のBLE実施01が
+   採った設計）とは異なり，**C3の旧世代`controller/esp32c3/bt.c`と
+   同じプログラミングモデル**（`xTaskCreatePinnedToCore`/
+   `vTaskDelete`を直接呼び，割込みは標準`esp_intr_alloc`/
+   `esp_intr_free`APIを直接呼ぶ）を採用している。そのため：
+   - `bt/stub/include`は**C6のような専用`platform/os.h`を新設せず，
+     C3の`bt/stub/include`一式（`freertos/*.h`＋`esp_partition.h`）を
+     インクルードパスでそのまま再利用する**（新規コピー無し）。
+   - C6のBLE実施01で必要だった上流ドリフト吸収シム2件
+     （`nimble_port_os.h`リダイレクト・`npl_os_*`→`npl_freertos_*`
+     橋渡し）は，**v6.1のソースツリー自体に当該ドリフトが存在しない
+     ため不要**（`bt.c`は`nimble/nimble_port_freertos.h`を正しく
+     include・`npl_freertos_funcs_init/get`を直接呼ぶ）。
+   - hal版とv6.1版の`bt.c`のソース差分は，実際に読むと
+     「SPDX年号とUHCIログ出力関連の数行差分のみ」という設計書
+     （`docs/ble-c5c6-plan.md`）の当初評価より大きく，sleep-retention
+     ／`esp_pm_register_skip_light_sleep_callback`関連のコードが
+     v6.1側にのみ追加で存在した。ただしこれらは全て
+     `CONFIG_BT_LE_SLEEP_ENABLE && CONFIG_FREERTOS_USE_TICKLESS_IDLE`
+     （本ビルドは両方未定義）でコンパイル対象外になるため実害は
+     無いことを確認済み。
+
+### C6のBLE実施01から転写した知見・先読み適用したもの
+
+- `BT_TIMER_NUM`＝最初から16（4→16への事後拡大を経験済みのC6の
+  教訓を先読み適用）。
+- 割込み多重登録耐性（スロット配列化，2枠）を最初から採用（S3/C3の
+  教訓）。ただしC5はC6の"PLIC_MX"ではなく**標準RISC-V CLIC**
+  （`asp3/target/esp32c5_espidf/wifi/esp_wifi_adapter.c`の
+  `set_intr_wrapper`と同一のINTMTX＋CLIC規約）を使うため，
+  `bt/bt_shim.c`のCLIC操作コードは**C6のPLIC_MXコードではなくC5
+  WiFi shimのCLICコードを土台に新規移植**した。
+- 多重登録トレース計装（`BT_INTR_TRACE_REG=0x600B101C`，LP_AON
+  STORE7相当）はC6と同一アドレスを採用——C5のLP_AON STORE1-4は
+  既に別用途（実施35のRTC_SLOW_CLK_CAL・実施41の診断）で使用中
+  であることを確認した上で，未使用のSTORE7を選んだ（衝突なし）。
+- APM確認用のHP_APM M0-M3例外ラッチアドレス（`0x600990CC`+i*0x10）
+  はC6と同一レイアウト——`target_kernel_impl.c`の実施42（C5版APM
+  恒久修正，`esp32c5_r42_apm_unblock()`）のM1アドレス実測
+  （`0x600990DC`）と整合することを確認した上で採用した。
+
+### 実装で新規に必要だった適応（C6には無かった壁）
+
+1. **`os_mempool.c`を自前でリンクする必要があった**：C6のBLE実施01
+   は「os_mbuf.c/os_mempool.cは自前で持たない（libble_app.aが自分の
+   os_mbuf.c.oを同梱）」という教訓を残していたが，**C5のIDF v6.1
+   blobではこの前提が成立しない**——`os_memblock_get/put/from`・
+   `os_mempool_init/clear/unregister/flags_set`等が未解決のまま
+   （plain名で参照）リンクエラーになり，`bt/porting/mem/os_mempool.c`
+   を自前でリンクして解決した（`os_mbuf.c`は引き続き不要）。
+2. **`esp_bit_defs.h`の強制include**：`os_mempool.c`が`BIT()`マクロを
+   使うが自ファイルではincludeせず（実ESP-IDFのビルドシステムが
+   暗黙にグローバル可視にする前提），未定義のまま関数呼出しと誤解釈
+   されてリンクエラーになった。`-include esp_bit_defs.h`をBT全体へ
+   強制適用して解決（他のBTソースは別経路で既にesp_bit_defs.hが
+   見えているため無害）。
+3. **`CONFIG_XTAL_FREQ`/`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ`の直接定義が
+   必要**：C6のesp_bt.cmakeは「これらはhal/nuttx/esp32c6/include/
+   sdkconfig.hの間接定義に頼れるため直接-Dは無効化される」という
+   罠を記録していたが，**C5にはそもそもNuttXポートのsdkconfig.h一式
+   が存在しない**（C5 WiFi統合が既に確認済みの事実）ため，この前提が
+   成立しない。C6と逆に，**素直に`-DCONFIG_XTAL_FREQ=48
+   -DCONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240`が必要かつ有効**（実施32/34
+   確定のC5実測値＝48MHz XTAL・BBPLL経由240MHz）。
+4. **`esp32c5.ld`への2セクション追加が必要**（C6と同型の壁）：
+   `libble_app.a`が要求する`.high_perf_code_iram1.*`・
+   `.adv_fast_execute_code_iram1.*`の配置ルールが無いとorphan
+   section扱いとなり`.data`とLMAが重なりリンクエラーになった。C6と
+   同じ対策（`*(...)`追加）で解決（WiFi側の`.iram1`等のセクション
+   一覧には影響しない追加のみ）。
+5. **`wifi/esp_shim.c`への4関数追加が必要**：C5のesp_shim.cは
+   WiFi専用として書かれていたため，C3/C6のbt/stub freertosシムが
+   要求する`esp_shim_enter_critical`/`esp_shim_exit_critical`
+   （ネスト対応クリティカルセクション）・`esp_shim_sem_get_count`・
+   `esp_shim_queue_reset`が未実装だった。C3/C6と同一実装（chip非依存
+   ロジック）を追加した。
+6. **`esp_shim_modem_icg_init`の共有ファイルへの移設**：実施13の
+   PMU ICGアンロック（C6の実施91相当，C5固有の実機JTAG確認済み
+   恒久修正）は`wifi/esp_wifi_adapter.c`のstatic関数として実装されて
+   いたため，BT単体ビルド（WiFi OFF）ではリンクされない。C6の
+   BLE実施01と同じ理由・同じ対策で`wifi/esp_shim.c`（WiFi/BT共有）
+   へ非static化して移設した（中身・呼出し箇所は無変更，WiFi回帰
+   ビルドで無破壊を確認済み）。
+7. **target.cmakeのゲート拡張**：C3/C6と同じパターンで，shim基盤
+   （`wifi/esp_shim.c`・`esp_shim_blobglue.c`・`esp_shim_libc.c`）の
+   ゲートを`ESP32C5_WIFI`単独から`(ESP32C5_WIFI OR ESP32C5_BT)`へ
+   拡張し，`ESP32C5_BT`オプション（`ESP32C5_WIFI`との同時ON禁止＝
+   C3/C6の前例踏襲）を新設した。
+
+### ビルド検証
+
+- `ESP32C5_BT=ON`でクリーンビルド成功：FLASH 326832B（7.79%），
+  RAM 278268B（70.77%）。
+- 回帰確認：`ESP32C5_WIFI=ON`（`apps/wifi_scan`）の再ビルドが引き続き
+  成功することを確認（FLASH 498368B 11.88%・RAM 299832B 76.25%，
+  従来と同水準——共有ファイル変更の非破壊を実証）。
+
+### 実機（C5#1）：カーネル起動がD-1到達前にBLOCKED
+
+**現象**：`asp_flash.bin`（ESP32C5_BT版）をC5#1へフル4MB書込み後，
+UARTコンソール（`b04e3bcf…`，115200bps，console=uart0既定）を
+複数回（esptool `--after watchdog-reset`／pyserial open自体が
+CP2102Nブリッジ経由でチップをリセットする既知挙動，実施39）独立
+リセットして観測した結果，**カーネルバナー（"TOPPERS/ASP3 Kernel"）
+すら一度も表示されない**。表示されるのは`"no time event is
+processed in hrt interrupt."`（カーネル共通の`kernel/time_event.c`
+`signal_time()`が発するsyslogメッセージ．設計上は「処理すべき
+タイムイベントが無い場合に頻発しうる」正常だが冗長な診断）のみが
+**単一種のメッセージとして無限に連続出力される**（45秒間の観測で
+一度も別の内容が現れず，`sort -u`で1種類のみと確認．デバイス発
+出力は完全にこのメッセージのみ）。
+
+**再現性**：独立した3回のフラッシュ書込み＋リセット（各回esptool
+フル4MB書込み→pyserial openによるチップリセット→最大45秒観測）で
+毎回同一現象を確認。
+
+**A/B対照実験（決定的）**：WiFi/BT両方OFFの最小ベースライン
+（`asp3/asp3_core/sample/sample1`，FLASH 25984B 0.62%・RAM 12848B
+3.27%）を同一C5#1・同一手順でビルド・書込み・観測した結果，
+**バナー・`task1 is running (NNN).`の周期出力とも正常**（1秒周期で
+確認）。`"no time event..."`メッセージも時折**混在して**現れるが
+（`signal_time()`の設計通りの正常な頻発），task1の進行を妨げない。
+＝**この壁はBT機能そのものが原因ではなく，BTビルド固有の何らかの
+副作用**（WiFi/BT共有shim基盤の変更でないことは上記回帰確認で
+別途裏付け済み）。
+
+**JTAG診断（OpenOCD，`adapter serial D0:CF:13:F0:A7:44`）**：
+- Halt時のPCが常に`0x420052ac`〜`0x420052b0`（`dispatcher_1`/
+  `dispatcher_2`＝カーネルのディスパッチ処理．3回の独立
+  halt/resume/haltでも不変）に張り付く。`mepc=0x42007812`
+  （`irc_begin_int_demote`＝割込み入口処理）。`mcause=0x88000020`
+  （interrupt bit立＋cause=32＝CLIC内部線32＝ASP3 INTNO16。
+  `target_timer.h`のコメント「割込み番号（Wi-Fi shimの線1-15予約
+  により線16へ退避）」の通り，**これはBT/WiFiの動的割込みではなく
+  カーネル自身のHRT（SYSTIMER）タイマ割込み**）。
+- `SYSTIMER_INT_ST_REG`（`0x6000A070`）が**クリア呼出し
+  （`target_hrt_handler`内の`systimer_ll_clear_alarm_int`）後も
+  1のまま**——CLIC line 32のpendingバイト（`0x20801080`+0の
+  1バイト目）も1のまま。これがCLIC level割込みの即時再発火の
+  直接的な状態証拠。
+- **反証実験1**：`LOGTASK_STACK_SIZE`を1024→4096（4倍）へ拡大して
+  再ビルド・再現確認したが**症状不変**（同一メッセージ・同一PC）。
+  ＝ログタスクのスタックオーバーフロー説は反証。
+- **反証実験2**：`ESP_SHIM_HEAP_SIZE`を192KB→32KBへ縮小して
+  再ビルド（RAM使用率70.77%→29.10%）・再現確認したが**症状不変**
+  （PC/mcauseとも完全一致，SPのみRAMレイアウト変化に応じて平行
+  移動）。＝RAM/ヒープ量・静的データ配置オーバーラップ説は反証
+  （SP位置以外の挙動が量に非依存＝タイミング/シーケンス起因の
+  可能性が高い）。
+- ROM ld（`esp32c5.rom.phy.ld`・`esp32c5.rom.coexist.ld`）由来の
+  シンボル衝突は，(i) これらは既にWiFiビルドで同一ファイルが実績
+  稼働中（実施47等，600秒級負荷試験で健全動作を確認済みの資産）で
+  あること，(ii) リンクが「multiple definition」エラー無く成功して
+  いること（`symbol = 0xADDR;`形式の絶対割当てで衝突があれば必ず
+  エラーになる），の両方から否定的（棄却はしないが優先度低）。
+
+**申し送り（次段の最有力仮説）**：`kernel/time_event.c`の
+`set_hrt_event()`は，保留中のタイムイベントが無い場合
+（`LAST_INDEX()==0`，カーネル起動直後で本来正常に通る経路）に
+`target_hrt_set_event(HRTCNT_BOUND)`（`HRTCNT_BOUND=4000000002U`
+μs≈66.7分後）を呼ぶ設計になっている。ベースラインでは最初の
+実タスク（`task1`の`tslp_tsk`等）が実際のタイムイベントを即座に
+登録するため，この「イベント無し」経路は起動直後の一瞬しか通らない
+（多くの場合，観測ウィンドウの外側）。**BTビルドでは`main_task`が
+一度も走らない＝実イベントが永久に登録されないため，カーネルは
+`HRTCNT_BOUND`経路に恒久的に留まる**。反証実験1/2（スタック・
+ヒープ量に非依存）と符合する仮説は，**この経路自体（またはその
+実行タイミング）に，通常は他のタスクの実イベントによって即座に
+上書きされるため顕在化しない潜在バグがある**というもの——
+`esp32c5_systimer_read()`の初回読出しタイミング（起動直後の
+XTAL/PLL安定化ウィンドウ等）が絡む可能性を含め，次段の実機JTAG
+ラウンドで`target_hrt_set_event()`実行直後に生カウンタ値・
+`target_val`レジスタを直接読み，計算結果が本当に66分後を指して
+いるかを検証すべき（本ラウンドでは時間予算の制約によりここまで
+未実施）。**D-1のBT機能自体（`esp_bt_controller_init`以降）は
+一度も実行されておらず，(a)-(e)・APM確認は全て「到達不能」で
+評価不能**——これはBTコントローラ設計・ライブラリ選定の問題では
+なく，カーネル共通コードとBTビルドの静的footprint／リンク結果の
+何らかの相互作用によるカーネル起動阻害である。
+
+### 変更ファイル
+
+- `asp3/target/esp32c5_espidf/esp_bt.cmake`（新規）：BT statement一式
+  （IDF v6.1由来のbt/phy/coexソース・include・link，hal由来の
+  support層）
+- `asp3/target/esp32c5_espidf/bt/`（新規）：`bt_shim.c`（CLIC対応版，
+  C3型直接FreeRTOS shim）・`bt_cfg.h`・`bt.cfg`（chip非依存，C6から
+  無変更移植）。**C5独自の`bt/stub/include`は作らない**——C3の
+  `bt/stub/include`をesp_bt.cmakeのインクルードパスでそのまま参照。
+- `asp3/target/esp32c5_espidf/target.cmake`：`ESP32C5_BT`オプション
+  追加，WiFi/BT共有shim基盤の切出し（`(ESP32C5_WIFI OR
+  ESP32C5_BT)`ゲートへ拡張）
+- `asp3/target/esp32c5_espidf/wifi/esp_shim.c`：
+  `esp_shim_enter/exit_critical`・`esp_shim_sem_get_count`・
+  `esp_shim_queue_reset`を追加（C3/C6と同一実装）。
+  `esp_shim_modem_icg_init`を`wifi/esp_wifi_adapter.c`から移設
+  （非static化・WiFi/BT共有，中身・呼出し箇所は無変更）。
+- `asp3/target/esp32c5_espidf/wifi/esp_wifi_adapter.c`：
+  `esp_shim_modem_icg_init`のextern参照化（実体は上記へ移設）。
+- `asp3/target/esp32c5_espidf/esp32c5.ld`：
+  `.high_perf_code_iram1.*`・`.adv_fast_execute_code_iram1.*`の配置
+  ルール追加（WiFi非影響，回帰確認済み）。
+- `apps/bt_smoke_c5/`（新規）：`bt_smoke_c5.c`・`.h`・`.cfg`
+  （`apps/bt_smoke_c6`から移植，C5用アドレス・文字列調整のみ）。
+
+### C5#1最終状態
+
+BLE実験終了後，C5#1には**本ラウンドの`ESP32C5_BT=ON`ビルド
+（`build/bt_smoke_c5/asp_flash.bin`，`ESP_SHIM_HEAP_SIZE`既定値192KB・
+`LOGTASK_STACK_SIZE`既定値1024）をフル4MB `write-flash 0x0`済み**の
+まま残置した（起動がD-1未到達でBLOCKEDのため，`load_test_c5_r47`
+（実施47の最終状態）への復元は行っていない——次段の調査を同一条件
+で即座に継続できるようにする判断。書き戻しコマンドは実施47節参照，
+必要であれば`docs/c5-bringup.md`記載の手順でいつでも復元可能）。
+
+**申し送り**：`load_test_c5_r47`（WiFi/TCP/UDP動作の恒久ビルド）へ
+戻すには，
+```
+esptool --chip esp32c5 --port <C5#1のJTAG by-idパス> \
+  --before usb-reset --after watchdog-reset write-flash 0x0 \
+  build/load_test_c5_r47/asp_flash.bin
+```
+（ビルドディレクトリが残っていない場合は`docs/c5-bringup.md`実施47の
+cmakeコマンドで再ビルドが必要）。
+
+## BLE実施02：C6 D-2a（NimBLE host sync）＋D-2b（接続可能アドバタイズ）
+
+**日付**：2026-07-14　**対象**：ESP32-C6 board C（`14:C1:9F:E0:5A:9C`，
+`asp3/target/esp32c6_espidf`）　**目的**：BLE実施01のD-1（controller init
+＋VHCI疎通）の上にNimBLEホストを載せてsync到達（D-2a）を狙い，届けば
+接続可能アドバタイズ（D-2b）まで進める。
+
+### 結論（先出し）
+
+- **D-2a＝達成**：`g_ble_sync_done`＝ble_hs syncコールバック到達を
+  LP_AON STORE0マーカ（`0x600B1000`=`0x5ade51c0`）で2ブート独立に確認。
+- **D-2b＝達成**：`ble_gap_adv_start`が**rc=0**で完走（STORE3
+  `0x600B100C`=`0xad000000`），割込みレートは線1/線2とも正常域（線2で
+  20秒あたり数百〜数千＝十〜数百/秒オーダー，C3のストーム時
+  ~33万/秒とは4〜5桁違う），host側リセット（`ble_hs_cfg.reset_cb`）は
+  0回，**ホストhci0の`bluetoothctl scan le`で`ASP3-C6-BLE`
+  （`14:C1:9F:E0:5A:9C`，RSSI -82）を実機検出**——C6 BLE史上初の
+  over-the-air adv到達。
+- 2ブートとも上記が完全再現。D-1で先読み実装済みだったsource多重登録
+  対策（スロット配列，実施01）がNimBLE host＋adv負荷下でも機能し，
+  C3が実施01→(1)(o)で踏んだストームは**再発しなかった**。
+- 副産物：本ラウンドで**GCC 14.2.0の既定挙動変化
+  （implicit-function-declaration／int-to-pointer変換がハードエラー）
+  により，D-1（`bt_smoke_c6`）・WiFi（`wifi_scan`）とも「無改造では
+  ビルド不能」という状態を検出・修正した**（後述）。これは本ラウンドの
+  変更が原因ではなく，環境のツールチェーン差分による既存コードの
+  潜在不具合の顕在化——同じ状態のまま気付かずにいた場合，次に誰かが
+  このリポジトリを別環境でビルドした瞬間に同じ壁を踏む。
+
+### 設計：C3のD-2a/D-2bとの決定的な違い（★最重要）
+
+C3（旧世代コントローラ．`SOC_ESP_NIMBLE_CONTROLLER`非該当）は
+`esp_nimble_hci.c`＋`hci_esp_ipc_legacy.c`（LEGACY VHCI経由でD-1の
+`esp_vhci_host_*`へブリッジ）を使う。C6/C5（新世代．
+`SOC_ESP_NIMBLE_CONTROLLER=1`）はこの経路が**存在しない**：
+`hal/components/bt/host/nimble/nimble/porting/nimble/src/nimble_port.c`
+の`esp_nimble_init()`内部で`esp_nimble_hci_init()`の呼出し自体が
+`#if !SOC_ESP_NIMBLE_CONTROLLER || !CONFIG_BT_CONTROLLER_ENABLED`で
+コンパイルアウトされるため，C3方式をそのまま移植しても呼ばれない。
+
+実際に必要なトランスポートは**新HCIトランスポート**（D-1で既にリンク
+済みの`hci_transport.c`に加え，`porting/transport/driver/vhci/
+hci_driver_nimble.c`＋`host/nimble/nimble/nimble/transport/esp_ipc/src/
+hci_esp_ipc.c`）で，これはblob内部の`r_ble_hci_trans_*`／
+`ble_transport_to_hs_*`へ直結する。D-1が使っていた
+`hci_driver_standard.c`とは`hci_driver_vhci_ops`という同一シンボルを
+取り合う関係＝二者択一（同時リンク不可）で，`ESP32C6_BT_NIMBLE`が
+ONのときだけ`hci_driver_nimble.c`＋`hci_esp_ipc.c`へ差し替える。
+
+アプリ配線は`nimble_port_init()`（内部でコントローラをデフォルト設定
+で二重初期化してしまう）を避け，C3と同じ設計判断——
+`esp_bt_controller_init(&cfg)`（D-1と同じ`BT_CONTROLLER_INIT_CONFIG_
+DEFAULT()`マクロ）→`esp_bt_controller_enable(BLE)`→**`esp_nimble_init()`**
+（ホストのみ．C6では上記の理由で`esp_nimble_hci_init()`は呼ばれない＝
+新トランスポートは`ble_transport_ll_init()`経由で別途配線される）→
+`ble_hs_cfg.sync_cb`／`reset_cb`登録→`nimble_port_freertos_init()`。
+
+`CONFIG_BT_NIMBLE_LEGACY_VHCI_ENABLE`はC6では**0にすることが必須**
+（advisorレビューで指摘・実装前に確定）：単なるビルド選択フラグでは
+なく，`ble_hs_hci.c`／`ble_hs_mbuf.c`のmbufヘッダ余白計算
+（`BLE_HS_CTRL_DATA_HDR_SZ`を足すか否か）を分岐する——実際の
+トランスポートと不整合だと実行時にバッファオフセットずれを起こし
+うる。C3のbt_nimble_config.hはこれを1にしているため**流用不可**と
+判断し，C6専用の`bt/stub/include/bt_nimble_config.h`を新規に書いた。
+
+### 実装した変更
+
+#### 新規ファイル
+
+- `apps/ble_host_smoke_c6/`：`ble_host_smoke_c6.c`/`.h`/`.cfg`
+  （`apps/ble_host_smoke`のC3版を土台に，C6の新世代cfg構造体
+  （`BT_CONTROLLER_INIT_CONFIG_DEFAULT()`マクロ使用．C3の手書き構造体
+  とは形状が別）・LP_AON STOREマーカ番地（後述）・デバイス名
+  `ASP3-C6-BLE`へ調整。C3のHRT/SYSTIMER凍結検証プローブ（CPU飽和仮説は
+  C3側で既に決着済み）は持ち込まず，割込みレート監視タスク
+  （`storm_monitor_task`，`esp_shim_int_count[1]/[2]`をLP_AON STORE4/5
+  へ200ms周期でミラー）のみ最小限で追加）。
+- `asp3/target/esp32c6_espidf/bt/stub/include/bt_nimble_config.h`
+  （新規．C3版を流用せず独自作成——理由は上記「決定的な違い」節，
+  ファイル冒頭にも同内容のコメントを記載）。
+- `asp3/target/esp32c6_espidf/bt/stub/include/npl_os_bridge.h`
+  （新規．GCC14.2.0対応．後述「ツールチェーン差分」節）。
+
+#### `asp3/target/esp32c6_espidf/esp_bt.cmake`
+
+- `ESP32C6_BT_NIMBLE`オプション追加（`ASP3_APPLNAME==ble_host_smoke_c6`
+  で自動ON．D-1の`bt_smoke_c6`は影響なし）。判定はファイル冒頭で先出し
+  （「2. ソースファイル」節のhci_driver二者択一に使うため）。
+- NimBLEホスト本体のソース集合はC3のesp_bt.cmakeのD-2節と**ほぼ同一
+  トリム**（`ble_svc_gap/gatt`のみ採用．ans/bas/dis/hr/htp/ias/ipss/
+  lls/prox/cts/tps/hid/sps/cte/ras等の他サービス，
+  `ble_store_config/nvs`（永続ボンディング），`ble_cs`/`ble_ead`/
+  `ble_aes_ccm`/`ble_gattc_cache*`/`ble_eatt`（新機能）は不採用——
+  sync/adv到達には不要）。C3との違いは上記の通りトランスポート層のみ。
+- `MYNEWT_VAL_BLE_SM_LEGACY/SC=0`でble_sm\*.cをnear-empty化し
+  mbedTLS/tinycryptのリンクを回避（C3のD-2aと同じ判断．sync/adv単体に
+  暗号は不要）。
+- `CONFIG_BT_CONTROLLER_ONLY=1`をD-1限定（`if(NOT ESP32C6_BT_NIMBLE)`）
+  へ変更（★advisorレビュー指摘）。実ESP-IDFのKconfigでは
+  `CONTROLLER_ONLY`と`NIMBLE_ENABLED`は排他選択であり，両方1のまま
+  動かすのは未検証の組合せ。唯一発見できた参照箇所
+  （`hci_transport.c`のACL rxガード）は`NIMBLE_ENABLED && (ROLE_
+  CENTRAL||ROLE_PERIPHERAL)`のORで別途真になり無害と確認済みだが，
+  C6実機のBLE初回結果を「未検証の組合せ」の疑いから切り離すため
+  原則通りに分離した。
+- `TRUE=1`／`BT_HCI_LOG_INCLUDED=0`を`ESP32C6_BT_NIMBLE`限定で追加
+  （後述「壁」節）。
+- `bt_nimble_config.h`にCONFIG_BT_NIMBLE_GATT_SERVER=1ほか，
+  GATT_SERVER=1化で新規に直接参照されるようになったCONFIG_BT_NIMBLE_*
+  一式を追加（後述「壁」節）。
+
+#### 共有ファイルの変更（C3/C6双方に影響．strictly additive）
+
+`asp3/target/esp32c3_espidf/wifi/esp_shim_cfg.h`・`esp_shim.cfg`：
+NimBLEホスト用の静的プール拡張ゲート（`#ifdef TOPPERS_ESP32C3_BT_
+NIMBLE`）を`#if defined(TOPPERS_ESP32C3_BT_NIMBLE) ||
+defined(TOPPERS_ESP32C6_BT_NIMBLE)`へOR拡張。SEM24→28／MTX8→12／
+DTQ4→8／TSK6→8（C3のD-2a節が既に検証済みの値をそのまま流用）。C3の
+既存条件・値は一切変更していない（regression確認：`bt_smoke_c6_regress`
+のRAM使用率がBLE実施01の記録値`65.77%`と完全一致することで，D-1側の
+非回帰も確認済み）。
+
+### ★ツールチェーン差分の発見と対処（GCC 14.2.0）
+
+本ラウンドの実機ビルドで，**BLE実施01の`bt_smoke_c6`（無改造）と
+`wifi_scan`（無改造）が現在の環境ではどちらもビルド不能**であることが
+判明した。原因はGCC 14.2.0が`implicit-function-declaration`／
+`int-to-pointer`変換を既定でハードエラーにする挙動変更（実施01時点の
+ツールチェーンでは警告どまりで実害が無かった）。hal/（submodule）は
+編集できないため，target側でプロトタイプ／CONFIG値を補い
+`-include`で強制する既存パターン（esp_intr_alloc.h等）をそのまま
+踏襲して以下を追加した（すべて追加のみ，既存動作を変更しない）：
+
+| 症状（実機ビルドで発覚順） | 原因 | 対処 |
+|---|---|---|
+| `bt.c`の`npl_os_funcs_init/get/deinit`等5関数が暗黙宣言エラー | 実体は`bt_shim.c`のブリッジだがプロトタイプ無し（実施01からの既知の上流ドリフト，ツールチェーン差でエラー化） | 新規`npl_os_bridge.h`をD-1区間から`-include`（D-1/D-2a共通） |
+| `npl_os_freertos.c`の`esp_timer_is_active`/`esp_timer_get_expiry_time`が暗黙宣言エラー | `esp_timer.h`は`asp3/target/esp32c3_espidf/hal_stub/include/esp_timer.h`（WiFi統合時の簡略スタブ）が本物より先にインクルードパスで見つかり，この2関数だけ未宣言 | 同じ`npl_os_bridge.h`へ2関数のプロトタイプを追加（スタブ自体は非改変） |
+| `esp_phy/src/phy_init.c`の`_lock_acquire`/`_lock_release`が暗黙宣言エラー（**D-1・WiFi共通**） | `sys/lock.h`スタブ（`hal_stub/include/sys/lock.h`）が`_lock_t`型のみ供給しプロトタイプ無し．実体は`esp_shim_libc.c`に既存 | スタブへ10関数のプロトタイプ追加（`_lock_init/close/acquire/release`系） |
+| mbedtls `bignum.c`の`fgets`，`ctr_drbg.c`の`setbuf`が暗黙宣言エラー（**WiFiのみ**） | `hal_stub/include/stdio.h`に無い（mbedtlsのMBEDTLS_FS_IO経路．`setbuf`は既に実体があったが本ラウンドで発覚するまでプロトタイプが無かった） | `fgets`は実体＋プロトタイプを新規追加（常に失敗を返すスタブ．他のfopen系と同型）．`setbuf`は既存実体にプロトタイプのみ追加 |
+| wpa_supplicant等の`bzero`/`strchr`/`strncpy`/`strncat`/`strrchr`/`strspn`/`strcspn`/`qsort`/`strdup`/`strlcpy`/`strcpy`/`strcat`が暗黙宣言エラー（**WiFiのみ**） | `hal_stub/include/string.h`に無い | ROM提供（`esp32c6.rom.libc.ld`等，既存ldに実体あり）はプロトタイプのみ追加。`bzero`のみROM非提供のため`esp_shim_libc.c`へ`memset`委譲の実体を新規追加 |
+| `nimble_port.c`の`#if (BT_HCI_LOG_INCLUDED == TRUE)`が，定義元`bt_common.h`のinclude（同じ関数内でこの後に来る）より前に評価され，存在しない`hci_log/bt_hci_log.h`をincludeしようとしてfatal error（**D-2aのみ**） | `TRUE`はstdbool.hの`true`ではなく`bt_common.h`独自定義（大文字）．最小includeチェーンでは評価時点でTRUEもBT_HCI_LOG_INCLUDEDも未定義＝共に0＝`0==0`＝真という上流の順序バグ | `-DTRUE=1 -DBT_HCI_LOG_INCLUDED=0`をESP32C6_BT_NIMBLE限定で追加（`0==1`＝偽へ強制．後段でbt_common.hが同じ値へ再定義するため無矛盾） |
+| `ble_gattc.c`内`ble_gattc_process_status`が定義側（`MYNEWT_VAL(BLE_GATTS)\|\|MYNEWT_VAL(BLE_GATTC)`）で不在なのに使用側（`MYNEWT_VAL(BLE_GATTS)`単独）で存在という不整合でimplicit宣言エラー（**D-2aのみ**） | `CONFIG_BT_NIMBLE_GATT_SERVER`未定義＝`esp_nimble_cfg.h`が`MYNEWT_VAL_BLE_GATTS`を0にフォールバックするはずが，実測では使用側ブロックが生き残っていた（根本原因は完全には特定し切れていない——esp_nimble_cfg.h以外の設定経路が介在している可能性が残るが，実害を止める対処を優先） | `CONFIG_BT_NIMBLE_GATT_SERVER=1`を明示（本ビルドは実際に`ble_gatts.c`等をリンクしており矛盾しない選択） |
+| `esp_nimble_cfg.h`が`#ifndef`フォールバック無しで直接参照する残りのCONFIG_BT_NIMBLE_\*（`ATT_MAX_PREP_ENTRIES`等9個） | GATT_SERVER=1化で到達する分岐が増えた | 実ESP-IDFのKconfig既定値相当を`bt_nimble_config.h`へ追加 |
+
+**非回帰の確認**：`bt_smoke_c6_regress`（D-1）は全修正後もRAM使用率
+`65.77%`（実施01記録値と完全一致）で0エラービルド。`wifi_scan`は
+後述の通り実機で14 APs検出（実施01記録値と同数）を確認——検出数の
+完全一致は，これらの追加が純粋にコンパイル可否のみに作用し
+（プロトタイプ宣言の追加はコード生成に影響しない），実行時挙動を
+一切変えていないことの独立した実測的裏付けになっている。
+
+### D-2a判定基準の結果（2ブート独立）
+
+sync到達は`g_ble_sync_done`（グローバル）／LP_AON STORE0
+（`0x600B1000`，usb-reset生存）の両方で観測。JTAGはadv開始前
+（RF活動前）なら安全だが，syslog出力がHRTの正常系ログ
+（後述）で輻輳するため，本ラウンドは**esptool `--no-stub read-mem`
+（JTAG不要）でSTORE系レジスタを読む方式**を主とした
+（advの実RF活動下ではJTAGが死ぬ可能性があるというC3の教訓を踏まえ，
+最初からJTAG非依存の計装で統一）。
+
+| 指標 | boot1（syslog経由） | boot2（20秒run，STORE経由） |
+|---|---|---|
+| sync到達 | syslog: "ble_host_smoke_c6: ble_hs SYNC, host up"（暗黙。"advertising started"の出力自体がon_sync→start_advertisingの呼出し連鎖の証拠） | STORE0=`0x5ade51c0`（一致） |
+| host reset回数 | 未計測 | STORE6=`0x00000000`（0回＝ble_hsは一度もresetされていない） |
+
+（boot1はsyslogバッファ輻輳で個々のログ行が欠落したため，boot2以降は
+STORE系の直接読出しへ切替えた。boot1でも"advertising started"という
+adv成功メッセージ自体がsync到達の動かぬ証拠——on_syncからのみ到達する
+経路のため。）
+
+### D-2b判定基準の結果（2ブート独立，判定基準は実施前に固定）
+
+判定基準：①`ble_gap_adv_start`のrc　②割込みレート（線1/線2，閾値
+`>>1000/s`＝ストーム域）　③ホストhci0での実機検出，の3点を独立事実
+として記録する（advisorレビュー指摘：rc=0かつレート正常でも
+hci0未検出はC6のdeaf-RX/TX非放射歴からは「起こりうる正当な結果」で
+あり，機械的に「adv失敗」と混同しないこと）。
+
+| 指標 | boot C（~20秒以上run，時間不明） | boot D（20秒固定run） |
+|---|---|---|
+| adv attemptマーカ(STORE2) | `0x0ade5000`（一致） | `0x0ade5000`（一致） |
+| adv-return(STORE3) | `0xad000000`＝**rc=0** | `0xad000000`＝**rc=0** |
+| 割込みレート・線1(STORE4) | 0 | 0 |
+| 割込みレート・線2(STORE5) | 3897（推定20秒弱で約195/秒） | 936（20秒で約47/秒） |
+| host reset回数(STORE6) | 0 | 0 |
+| 多重登録トレース(STORE7) | `0xa1020704`（nalloc=2,src1=7,src2=4．実施01のD-1結果と完全一致） | `0xa1020704`（同左） |
+| ①rc | **0** | **0** |
+| ②割込みレート | 線1=0/s・線2=47〜195/s＝**正常域**（C3のストーム時~33万/秒とは4〜5桁の差） | 同左 |
+
+**③hci0実機検出**：ホストの`bluetoothctl scan`で
+`[NEW] Device 14:C1:9F:E0:5A:9C ASP3-C6-BLE`を確認（RSSI -82）。
+同時に`ASP3-C3-BLE`（`60:55:F9:57:C2:60`，別セッションの既存advertise
+状態）も検出できており，hci0スキャン自体の陽性対照としても機能した。
+
+**★判定＝D-2a達成・D-2b達成**。実施01がD-1で先読みしていた
+source多重登録対策（S3/C3の教訓＝スロット配列化）が，NimBLEホスト＋
+実際のadv RF活動という初めての負荷下でも機能し，C3が実施01→(1)(o)で
+辿った「単一handle上書き→ストーム」の再発を防いだ——事前の予防設計が
+実機で実証された。
+
+**注**：線1(source7)が2ブートとも0のまま（線2(source4)のみ活動）は
+未解明（実害無し・rc=0/adv検出済みのため深追いしていない）。C3の
+D-1では両線とも0（HCI疎通のみでadv無し），本ラウンドはadv活動下での
+初観測のため単純比較はできない。C5移植時に同じ非対称が出るか要確認。
+
+### 遭遇した壁と対処（まとめ）
+
+1. **GCC14.2.0によるD-1・WiFiの潜在ビルド不能化**（上記ツールチェーン
+   節，最大の想定外）。
+2. **npl_os_\*ブリッジ関数・esp_timer 2関数のプロトタイプ欠落**
+   （同上）。
+3. **`_lock_acquire`/`_lock_release`欠落**（D-1・WiFi共通）。
+4. **mbedtls/wpa_supplicantのlibc関数群の欠落**（WiFi再ビルド限定）。
+5. **`BT_HCI_LOG_INCLUDED`評価順序バグ**（D-2a限定）。
+6. **GATT_SERVER設定の不整合**（D-2a限定）。
+7. **CONFIG_BT_CONTROLLER_ONLYとNIMBLE_ENABLEDの排他違反**
+   （advisorレビュー指摘．実害未確認だが原則通り分離）。
+
+いずれも本体（sync/adv到達）を阻む壁ではなく，**ビルドを通すための
+壁**だった点が実施01（D-1，実機挙動そのものの壁）と対照的。sync/adv
+自体は初回のビルド成功・初回の実機書込みで両方とも一発で達成した。
+
+### board C最終状態
+
+BLE実験終了後，board Cへ`apps/wifi_scan`（`ESP32C6_WIFI=ON`，
+`ESP32C6_CONSOLE=usbjtag`，本ラウンドの共有ファイル修正を含む
+**新規フルビルド**）を書き戻した。
+
+**★重要な経緯**：当初は実施01の記録に基づき既存のビルド成果物
+（`build/wifi_scan_c6_hw/asp_flash.bin`，2026-07-10ビルド）を再利用
+しようとしたが，**実機で2ブートとも「0 APs found」**（環境には
+`<SSID-2G>`ほか多数のAP実在をホスト側`nmcli`で確認済み＝環境要因
+ではない）となり異常を検出。原因は追跡していない（本ラウンドの
+スコープ外と判断——WiFi側の独立した回帰の可能性があるが，深追いせず
+確実な代替手段を取った）。**上記のGCC14.2.0対応を含む`wifi_scan`の
+新規フルリビルドで解決**——2ブート独立で14〜18 APs検出（実施01の
+記録値`14 APs`と同数を初回で再現）を確認した。
+
+```
+wifi_scan: 14 APs found (err=0)
+wifi_scan: RESCAN 15 APs (err=0)
+wifi_scan: RESCAN 14 APs (err=0)
+...（以下RESCAN 10〜18 APsで変動，2ブートとも同様のパターンで安定）
+```
+
+**申し送り**：`build/wifi_scan_c6_hw`等，本ラウンド以前の日付の
+ビルド成果物（asp_flash.bin）は，今回の実機検証で少なくとも1つが
+不具合を示した。真因未特定のため，**今後board Cを復元する際は
+必ず新規ビルドを使うこと**（cmakeコマンドはBLE実施01節と同一．
+`-DASP3_APPLDIR=apps/wifi_scan -DASP3_APPLNAME=wifi_scan
+-DESP32C6_WIFI=ON`，ESP32C6_CONSOLEは既定のusbjtagのまま）。
+
+### C5への転移事項
+
+1. **トランスポート層はC3ではなくC6の本ラウンドを参照すること**
+   （`hci_driver_nimble.c`＋`hci_esp_ipc.c`，`LEGACY_VHCI_ENABLE=0`，
+   `nimble_port.c`のSOC_ESP_NIMBLE_CONTROLLER分岐）——C5もC6と同じ
+   新世代コントローラのため，同型の壁になる可能性が高い。
+2. **GCC14.2.0対応の全項目**（npl_os_bridge.h／sys-lock.h／
+   string.h／stdio.h／`TRUE=1`+`BT_HCI_LOG_INCLUDED=0`／
+   `CONFIG_BT_NIMBLE_GATT_SERVER=1`ほか）はC5の同型ビルドでも
+   ほぼ確実に同じ形で発生する。C6側の修正（共有ファイル＋C6固有
+   ファイル）を先読み適用すればC5はビルド面で高速化できる見込み
+   （BLE実施01の申し送りと同じ構図）。
+3. **`CONFIG_BT_CONTROLLER_ONLY`はNimBLEビルドで1にしないこと**
+   （D-1限定に閉じ込める設計をそのまま踏襲）。
+4. **LP_AON STOREマップの重複に注意**：C6は`0x600B1000`
+   （STORE0=sync／STORE2=adv attempt／STORE3=adv rc／STORE4-5=割込み
+   レート／STORE6=reset／STORE7=intr_alloc trace，STORE1は既知の
+   ノイズにつき使用禁止）。C5の同種計装は別デバイス・別レジスタ
+   ベースになるはずだが，番地の使い回し設計思想は流用可。
+5. **`build/`配下の古いビルド成果物を無条件に信用しない**
+   （wifi_scanで実際に踏んだ罠．C5でも同様に，復元用バイナリは
+   可能な限り当該セッションで再ビルドしたものを使うこと）。
+
+### 変更ファイル（総括）
+
+| ファイル | 内容 |
+|---|---|
+| `apps/ble_host_smoke_c6/`（新規） | `ble_host_smoke_c6.c`/`.h`/`.cfg`：D-2a/D-2bアプリ |
+| `asp3/target/esp32c6_espidf/bt/stub/include/bt_nimble_config.h`（新規） | C6専用NimBLEホスト設定（C3版を流用しない） |
+| `asp3/target/esp32c6_espidf/bt/stub/include/npl_os_bridge.h`（新規） | GCC14.2.0対応：npl_os_*ブリッジ＋esp_timer 2関数のプロトタイプ |
+| `asp3/target/esp32c6_espidf/esp_bt.cmake` | `ESP32C6_BT_NIMBLE`ブロック追加，hci_driver二者択一，CONTROLLER_ONLYのD-1限定化，TRUE/BT_HCI_LOG_INCLUDED定義 |
+| `asp3/target/esp32c3_espidf/hal_stub/include/sys/lock.h` | `_lock_*`系10関数のプロトタイプ追加（C3/C6/C5共有，strictly additive） |
+| `asp3/target/esp32c3_espidf/hal_stub/include/stdio.h` | `fgets`/`setbuf`/`remove`/`rename`のプロトタイプ追加（同上） |
+| `asp3/target/esp32c3_espidf/hal_stub/include/string.h` | `strcpy`/`strcat`/`strchr`/`strncpy`/`strncat`/`strrchr`/`strspn`/`strcspn`/`qsort`/`strdup`/`strlcpy`/`bzero`のプロトタイプ追加（同上） |
+| `asp3/target/esp32c3_espidf/wifi/esp_shim_libc.c` | `fgets`（新規スタブ）・`bzero`（新規，memset委譲）の実体追加 |
+| `asp3/target/esp32c3_espidf/wifi/esp_shim_cfg.h`・`esp_shim.cfg` | NimBLEプール拡張ゲートに`TOPPERS_ESP32C6_BT_NIMBLE`をOR追加（strictly additive） |
+
+submodule（`asp3/asp3_core`・`hal/`）変更なし。C5系ファイル
+（`asp3/target/esp32c5_espidf/`・`apps/bt_smoke_c5/`等）は未接触。
+
+### Git情報
+
+- ベースコミット：`fc296a1`（BLE実施01完了時点）
+- ブランチ：`claude/c6-wifi-c5-dev-5vc6x9`
+- 本ラウンドは**git commitしていない**（作業指示通り）。

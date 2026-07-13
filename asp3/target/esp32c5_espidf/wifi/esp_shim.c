@@ -43,6 +43,14 @@
 #include "esp_shim.h"
 #include "esp_shim_cfg.h"
 #include "target_timer.h"		/* esp32c5_systimer_read */
+/*
+ *  BLE実施03：esp_shim_modem_icg_init()（元はwifi/esp_wifi_adapter.c）を
+ *  WiFi/BT共有ファイルへ移設するために必要な追加include．C6のBLE実施01
+ *  （esp_shim_modem_icg_init移設）と同じ理由・同じパターン．
+ */
+#include "hal/modem_lpcon_ll.h"
+#include "hal/modem_syscon_ll.h"
+#include "hal/pmu_ll.h"
 #if defined(TOPPERS_ESP32C3_WIFI) || defined(TOPPERS_ESP32C6_WIFI) \
 	|| defined(TOPPERS_ESP32C5_WIFI)
 #include "psa/crypto.h"			/* psa_crypto_init（後述．Wi-Fi固有＝
@@ -71,8 +79,71 @@ esp_shim_int_restore(uint32_t state)
 	}
 }
 
+/*
+ *  ネスト対応クリティカルセクション（BLE実施03＝C6のesp_shim_enter/
+ *  exit_criticalをそのまま移植．chip非依存＝mstatus.MIEビット操作の
+ *  みでC3/C6/C5共通．bt/stub/include/freertos/FreeRTOS.hの
+ *  portENTER_CRITICAL系が要求．esp_shim_int_disable/restoreとは別に
+ *  「入れ子で呼んでも最外でのみ退避・復元する」ことを保証する必要が
+ *  あるため専用のネストカウンタを持つ）．
+ */
+static volatile uint32_t	esp_shim_crit_nest = 0U;
+static volatile uint32_t	esp_shim_crit_saved = 0U;
+
+void
+esp_shim_enter_critical(void)
+{
+	uint32_t state;
+
+	Asm("csrrci %0, mstatus, 8" : "=r"(state));
+	if (esp_shim_crit_nest == 0U) {
+		esp_shim_crit_saved = state & 8U;
+	}
+	esp_shim_crit_nest++;
+}
+
+void
+esp_shim_exit_critical(void)
+{
+	if (esp_shim_crit_nest > 0U) {
+		esp_shim_crit_nest--;
+		if ((esp_shim_crit_nest == 0U) && (esp_shim_crit_saved != 0U)) {
+			Asm("csrsi mstatus, 8");
+		}
+	}
+}
+
 #define SHIM_LOCK()		uint32_t shim_lock_ = esp_shim_int_disable()
 #define SHIM_UNLOCK()	esp_shim_int_restore(shim_lock_)
+
+/*
+ *  ------------------------------------------------------------------
+ *  esp_shim_modem_icg_init（BLE実施03で wifi/esp_wifi_adapter.c から
+ *  本ファイルへ移設．WiFi/BT共有ファイルへ移すことで，BT単体ビルド
+ *  （ESP32C5_WIFI=OFF）でもリンクできるようにする．C6のBLE実施01
+ *  （実施91のICGアンロックをwifi/esp_shim.cへ移設）と同じ理由・同じ
+ *  パターン．関数の中身自体は無変更（実施13．C5実機のJTAG実測で
+ *  PMU HP_ACTIVE ICG_MODEM_REGのcode=0のままだとBBレジスタブロック
+ *  （MODEM0=0x600A0000）への書込みが一切効かないことを確認した恒久
+ *  修正）．呼出し元はesp_wifi_adapter.cのwifi_clock_enable_wrapper
+ *  （WiFi．無変更）とbt/bt_shim.cのesp_shim_bt_clock_init（BT．新規）．
+ * ------------------------------------------------------------------
+ */
+void
+esp_shim_modem_icg_init(void)
+{
+	pmu_dev_t			*pmu = (pmu_dev_t *)0x600B0000U;
+	modem_lpcon_dev_t	*lpcon = (modem_lpcon_dev_t *)0x600AF000U;
+	modem_syscon_dev_t	*syscon = (modem_syscon_dev_t *)0x600A9C00U;
+	uint32_t			code_bit = 1U << 2;	/* BIT(PMU_HP_ICG_MODEM_CODE_ACTIVE=2) */
+
+	pmu_ll_hp_set_icg_modem(pmu, PMU_MODE_HP_ACTIVE, 2U);
+	modem_syscon_ll_set_modem_apb_icg_bitmap(syscon, code_bit);
+	modem_lpcon_ll_set_i2c_master_icg_bitmap(lpcon, code_bit);
+	modem_lpcon_ll_set_lp_apb_icg_bitmap(lpcon, code_bit);
+	pmu_ll_imm_update_dig_icg_modem_code(pmu, true);
+	pmu_ll_imm_update_dig_icg_switch(pmu, true);
+}
 
 /*
  *  tick（1ms）→ASP3タイムアウト（μs）変換
@@ -331,6 +402,22 @@ esp_shim_sem_take(void *sem, uint32_t block_time_tick)
 {
 	return(twai_sem((ID)(intptr_t)sem,
 					esp_shim_tick_to_tmo(block_time_tick)) == E_OK ? 1 : 0);
+}
+
+/*
+ *  現在のセマフォ資源数（FreeRTOS uxSemaphoreGetCount相当．BLE実施03＝
+ *  NimBLE NPL用．bt/stub/include/freertos/semphr.hが要求．C3/C6と同一
+ *  実装＝ASP3標準API ref_semのsemcntをそのまま返すだけでchip非依存）．
+ */
+uint32_t
+esp_shim_sem_get_count(void *sem)
+{
+	T_RSEM		rsem;
+
+	if (ref_sem((ID)(intptr_t)sem, &rsem) != E_OK) {
+		return(0U);
+	}
+	return((uint32_t)rsem.semcnt);
 }
 
 int32_t
@@ -623,6 +710,27 @@ esp_shim_queue_recv(void *que, void *item, uint32_t block_time_tick)
 	shim_que_slot_free(q, (uint32_t)data);
 	SHIM_UNLOCK();
 	return(1);
+}
+
+/*
+ *  キューを空にする（FreeRTOS xQueueReset相当．BLE実施03＝NimBLE NPL
+ *  eventq_reset用．bt/stub/include/freertos/queue.hが要求．C3/C6と
+ *  同一実装＝格納中の全itemをprcv_dtq（ポーリング受信）で取り出し，
+ *  スロットをプールへ返却する）．
+ */
+void
+esp_shim_queue_reset(void *que)
+{
+	SHIM_QUE	*q = (SHIM_QUE *)que;
+	intptr_t	data;
+
+	if (q != NULL) {
+		while (prcv_dtq(q->dtqid, &data) == E_OK) {
+			SHIM_LOCK();
+			shim_que_slot_free(q, (uint32_t)data);
+			SHIM_UNLOCK();
+		}
+	}
 }
 
 uint32_t

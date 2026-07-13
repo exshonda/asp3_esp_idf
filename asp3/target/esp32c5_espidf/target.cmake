@@ -164,14 +164,28 @@ set(ASP3_RUN_COMMAND
 #
 get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf ABSOLUTE)
 
+#
+#  Bluetooth（BLE．esp32c6/c5世代コントローラ＋C3型直接FreeRTOS shim．
+#  既定OFF．Phase D-1＝controller init+VHCI，BLE実施03）
+#
+#  ESP32C3_BT/ESP32C6_BTと同じ理由でESP32C5_WIFIとの同時ONは現状
+#  未対応（RAM予算．esp_bt.cmake参照）．shim基盤（wifi/esp_shim.[ch]／
+#  esp_shim_blobglue.c）はWi-Fi・BT共有のためESP32C5_WIFI単独ゲートから
+#  (ESP32C5_WIFI OR ESP32C5_BT)へ拡張する（C6のtarget.cmakeと同じ
+#  パターン．docs/ble-c5c6.md「BLE実施03」節）．
+#
+option(ESP32C5_BT "Enable Bluetooth (BLE embedded controller V1 + direct-FreeRTOS shim, Phase D-1)" OFF)
+if(ESP32C5_BT AND ESP32C5_WIFI)
+    message(FATAL_ERROR "ESP32C5_BT + ESP32C5_WIFI is not supported yet (RAM budget; C3/C6の前例踏襲)")
+endif()
+
 option(ESP32C5_WIFI "Enable Wi-Fi (esp_wifi blob + os_adapter shim, Phase B-2a scan)" OFF)
-if(ESP32C5_WIFI)
-    if(NOT EXISTS ${TARGETDIR}/esp_wifi.cmake)
+if(ESP32C5_WIFI OR ESP32C5_BT)
+    if(ESP32C5_WIFI AND NOT EXISTS ${TARGETDIR}/esp_wifi.cmake)
         message(FATAL_ERROR
             "ESP32C5_WIFI=ON was requested, but ${TARGETDIR}/esp_wifi.cmake "
             "was not found. See docs/c5-port-design.md.")
     endif()
-    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_WIFI)
     list(APPEND ASP3_INCLUDE_DIRS
         ${TARGETDIR}/wifi
         ${C3_TARGETDIR}
@@ -180,9 +194,21 @@ if(ESP32C5_WIFI)
     list(APPEND ASP3_CFG_FILES ${C3_TARGETDIR}/wifi/esp_shim.cfg)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
         ${TARGETDIR}/wifi/esp_shim.c
+        #  esp_shim_blobglue.cはWiFi blob（net80211/pp/core）専用の
+        #  グルーが大半だが，esp_sleep_pd_config／esp_sleep_clock_config／
+        #  esp_deep_sleep_register_phy_hook／_esp_error_check_failed等
+        #  BTも要求する汎用スタブ（modem_clock.c／phy_init.cが参照）を
+        #  同居させているため，BT単体ビルドでもリンクする（--gc-sections
+        #  でWiFi専用の未参照部分は落ちる．C6のBLE実施01で確認済みの
+        #  パターンをC5でも踏襲）．
         ${TARGETDIR}/wifi/esp_shim_blobglue.c
-        ${TARGETDIR}/wifi/esp_wifi_adapter.c
         ${C3_TARGETDIR}/wifi/esp_shim_libc.c
+    )
+endif()
+if(ESP32C5_WIFI)
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_WIFI)
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${TARGETDIR}/wifi/esp_wifi_adapter.c
         ${C3_TARGETDIR}/wifi/esp_event_shim.c
         ${C3_TARGETDIR}/wifi/esp_coex_adapter.c
     )
@@ -206,6 +232,7 @@ if(ESP32C5_WIFI)
 
     include(${TARGETDIR}/esp_wifi.cmake)
 endif()
+include(${TARGETDIR}/esp_bt.cmake)
 
 #
 #  TCP/IP統合（lwIP．Wi-Fi必須＝ESP32C5_WIFIが前提。実施44）
