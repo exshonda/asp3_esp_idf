@@ -13780,3 +13780,244 @@ board Cでも同一のコードパス（`esp_wifi`共通のconnection manager，
    観測経路を確立する。
 3. `docs/c5-bringup.md`実施44の申し送り1（s1実測のための
    ブレークポイント手法の見直し）はC6にも適用可能。
+
+## 実施90：★2つの主要成果★ (1) C6のTCP/UDP検証マトリクス全開通（connect→DHCP→ping→TCP/UDPエコー，g_misc_nvs修正のC6移植込み）＋C6負荷試験——★C3/C5の負荷誘発リンク停止はC6では再現せず★ (2) 実施89のUART文字化けの真相解明——観測問題ではなく**cold状態でのphy-init実ハング**（`wait_i2c_sdm_stable`無限ループ＝タイムアウトカウンタ0x600ad000凍結）で，実施88の成功は**NuttX直後のwarm handoffに依存していた**ことを実証
+
+### 背景・目的
+
+実施89の申し送り（C6のlwIP配線は完了・実機検証はUART文字化けで
+未達）と，C5実施45（`g_misc_nvs`修正でconnect根治・全マトリクス
+完走）の水平展開，およびC3実施1（docs/load-test-c3c5c6.md）で
+発見された負荷誘発リンク停止のC6での再現有無確認（横断判別材料）。
+DUT＝board C（`14:C1:9F:E0:5A:9C`，UARTブリッジ`125a266b…`＝
+ttyUSB1，全操作は`/dev/serial/by-id/`のby-idパスで実施）。
+
+### 1. g_misc_nvs修正のC6移植（C5実施45の水平展開）
+
+- **C6のROM ld一式に`g_misc_nvs`絶対シンボル定義は存在しない**
+  （`grep -rl g_misc_nvs hal/components/esp_rom/esp32c6/ld/`＝0件）。
+  実施45申し送り1の「C6 ROM ldに同シンボルあり
+  （`g_misc_nvs=0x4084ff7c`）」という記述は**未検証の推測であり
+  実測で誤りと判明**。C6ではシムのC定義`void *g_misc_nvs`が
+  そのままリンクされる（nm実測：`B g_misc_nvs`＝.bss解決）。
+- **blob側の無ガードデリファレンスはC6にも同一に実在**：C6の
+  `libnet80211.a`を逆アセンブルし，`esp_wifi_get_wps_status_internal`
+  が `lw a5,g_misc_nvs; lw a0,8(a5)`（NULLチェック無し+8読み）である
+  ことを確認（C5実施45の9箇所と同一パターン，同一blob世代）。
+- 対処はC5と同一ロジックに統一：`asp3/target/esp32c6_espidf/wifi/
+  esp_shim_blobglue.c`の`misc_nvs_init()`で静的ゼロ構造体
+  `misc_nvs_storage[16]`を`g_misc_nvs`へ代入（C定義はNULL初期化の
+  まま残置＝C6ではリンクされるため二重防御）。objdumpで
+  `sw a5,...(gp) # g_misc_nvs`＝storage実体書込みを着弾確認。
+
+### 2. ★実施89「UART文字化け」の真相：cold状態でのphy-init実ハング★
+
+実施89は文字化けを「観測手段の限界」と整理したが，本ラウンドの
+JTAG調査で**デバイス側の実ハング**と判明した：
+
+- **症状**（`ESP32C6_LWIP`無しのscan回帰ビルド／実施88の検証済み
+  同一バイナリ（`Jul 10 2026, 02:44:19`，無変更再書込み）の両方で
+  独立に再現）：起動→バナー正常→`wifi driver task`行の直後から
+  文字化け→出力停止。RTC-RAMのOSIカウンタ（0x50000008〜）が
+  **ブートあたり+5で恒久凍結**（wifiタスクがOSA呼出しを5回した
+  ところで停止），scan到達マーカ[10]は100秒以上経過しても0のまま。
+- **ハング箇所の特定**（JTAG PC/raサンプリング＋スタック読み）：
+  `register_chipv7_phy`→`rf_init`→**`wait_i2c_sdm_stable`**（blob）
+  →`wifi_regi2c_traced_read`（block=0x63）の無限ループ。スタックに
+  期待値`0x5b`と番地`0x600ad000`を確認＝実施53-56で完全解析済みの
+  「タイムアウト付き0x5b待ちループ」そのもの。
+- **無限ループ化の直接機構**：タイムアウト判定用フリーラン
+  カウンタ`0x600ad000`（modemドメイン，実施56解析）が
+  **0x00000000で持続凍結**（resume挟み3回サンプル一定・複数ブート
+  再現）。カウンタが進まないため9999カウントのタイムアウト脱出も
+  効かず，SDM読み（0x00が返り続ける）の受理も起きない＝二重に
+  詰む。実施55が観測し実施56が「JTAG halt瞬間アーチファクト」と
+  再解釈した同じ凍結が，今回は**数分間×複数ブート×2バイナリで
+  持続する真の状態**として再現した（実施56の再解釈は当時の観測に
+  ついては正しいが，凍結が実在する板状態も存在する）。
+- **文字化け自体もハングの症状**：後述のwarm handoff後は同一
+  バイナリ・同一ブリッジ・同一手法で文字化けが消えクリーンな
+  `RESCAN N APs`が出た（＝ブリッジ/ボーレート等の観測系原因説を
+  実測で棄却。WiFi稼働中の部分的な行化けは残るが（blobのROM
+  printfとsyslogのUART共有），行の欠落を伴う全面化け→停止は
+  ハング状態でのみ起きる）。
+
+### 3. ★決定実験：NuttX warm handoffでハング解消＝実施88の成功は残留状態依存だった★
+
+**事前予測を固定**した上で（仮説真→scan完走・カウンタ稼働／
+仮説偽→同一ハング），以下を実施：
+
+1. NuttX（`nuttx.bin`，md5=`f6295bd3…`＝実施76以来の原本）を
+   board Cへ書込み→NSHで`ifconfig wlan0 up`＋`wapi scan wlan0`
+   →`wifi_trace`でphy較正完走（`phy_bbpll_cal ret=1`，
+   `set_rfpll_freq`正常）を確認。**NuttX下では`0x600ad000`が
+   フリーラン**（`0x037b44e0`→`0x039a0874`→`0x03b8cd4b`）。
+2. **電源断なし**（esptool usb-reset＝チップリセットのみ）で
+   ASP3（本ラウンドのg_misc_nvs修正込みscanビルド）を書込み。
+3. 結果：★**30分前に同条件でハングした同一系ビルドが完走**★——
+   `wifi_scan: RESCAN 17-21 APs (err=0)`連続，到達マーカ[10]=3，
+   AP件数[8]=17，`0x600ad000`もASP3下でフリーラン化
+   （`0x0370fe5f`→`0x03ae49b6`），UART文字化けも消滅。
+
+**解釈**：ASP3のC6 Direct Bootは，cold状態（電源イベント後等で
+modem/アナログドメインが素の状態）から`wait_i2c_sdm_stable`を
+通過するのに必要な何らかの初期化（`0x600ad000`カウンタを駆動する
+modemクロック，またはSDM安定の前提となるアナログ設定）を欠いて
+おり，**NuttX（またはstock FW）が一度動いた後の残留状態が
+チップリセットを跨いで生き残ることに暗黙依存して動作してきた**。
+これは以下を統一的に説明する：
+
+- 実施88がboard Cで即成功した（直前までNuttXだった＝warm）。
+- 実施89以降，同一バイナリで再現しなくなった（数日と電源イベントを
+  挟みcold化した）。
+- 実施87のboard B「phy-initハング10/10」（board Bは長期ASP3運用
+  ＝cold。「board B個体固有」と解釈されていたが，実際は
+  **cold-state系の共通症状**の可能性が高い——ただしboard Bの
+  NuttX下でも受信不能という個体難聴は別問題のまま）。
+- 実施43「USBケーブル抜き差し後に完走しなくなる」・実施44-45
+  「block=0x63の0x5b→0x00変化（ボード劣化ではなかった）」。
+
+**未解決（申し送り）**：cold状態からASP3単独でphy-initを完遂する
+ための欠落初期化の特定（`0x600ad000`を駆動するクロックの正体と
+enable経路の同定が第一手。NuttXの`esp_wifi_bt_power_domain_on()`
+やPMU/MODEM_SYSCONのcold-init差分が候補）。本ラウンドは
+マトリクス開通を優先し深追いしなかった。
+
+### 4. 検証マトリクス（board C，2.4GHz `<SSID-2G>`，warm状態）
+
+`ESP32C6_LWIP=ON`・デフォルトツールチェーン（GCC13.2，実施89の
+教訓通り）・認証情報はCMake `ASP3_EXTRA_COMPILE_DEFS`で注入
+（非コミット）。
+
+| 項目 | 結果 |
+|---|---|
+| connect（STA_CONNECTED） | **PASS**（channel=1, rssi=-63。wifi_dhcp/tcp/udp/load_testの4ビルドで独立に再現） |
+| DHCP | **PASS**（192.168.1.69, gw=192.168.1.1） |
+| gateway ping（DUT発） | **PASS**（`net: ping gateway -> OK`連続） |
+| ping（ホスト発） | **PASS**（3/3, 以後の負荷試験でも継続成功） |
+| TCPエコー（port 8, nc） | **PASS**（3＋4メッセージ完全一致） |
+| UDPエコー（port 9） | **PASS**（3/3データグラム完全一致） |
+| scan回帰 | **PASS**（RESCAN 17-21 APs） |
+| フォルト捕捉 | magic不発生（DEF_EXC網はwifi_dhcpに実装済みのC5実施45資産） |
+
+connect経路（`cnx_sta_associated`）はC5でフォルトした地点を
+含めて全て通過＝g_misc_nvs修正込みでの健全動作を確認（C6は
+アドレス4読みがトラップしない可能性が高い（C3同型）ため
+「修正が無いと必ず落ちる」ことのA/Bは行っていない——修正の意義は
+C5実施45で確立済みの予防的水平展開）。
+
+### 5. C6負荷試験（apps/load_test_c6新設＋欠陥A修正のC6移植）
+
+- **欠陥A（キューmalloc/ISR内malloc）はC6独自の`esp_shim.c`にも
+  実在した**：C6は`esp_shim.c`をC3と共有せず独自コピーを持つ
+  （target.cmakeで共有しているのは`esp_shim_libc.c`等のみ），
+  そのキュー実装は`_send`/`_send_from_isr`が送信毎
+  `esp_shim_malloc`・`_recv`が受信毎`esp_shim_free`のS3修正前
+  パターンだった。C3のdd7a76d移植（固定プール化，commit 5c9ff81）を
+  `asp3/target/esp32c6_espidf/wifi/esp_shim.c`へ忠実移植
+  （C3独自の`esp_shim_queue_reset`はC6に元々無いため対象外）。
+- `apps/load_test_c6`＝`apps/load_test_c3`のコピー（ヘッダ
+  コメントとinclude名のみ変更。net/層チップ非依存のためソース
+  無改変）。ビルドRAM 96.57%。
+- ホスト側ハーネス＝C3ラウンドと同一方法論（TCP持続ストリーム
+  1400Bチャンク・エコー内容検証＋UDP 512B・50pps・シーケンス番号
+  検証＋2秒周期ping疎通＋シリアル持続ログ）。
+
+### 6. ★C6負荷試験結果：C3/C5の負荷誘発リンク停止はC6では再現しない★
+
+**判定基準（事前固定，C3実施1と同一）**：スループット経時劣化
+なし／ヒープ単調減少なし／エコー完全一致／10分完走。
+
+**600秒（10分）持続負荷run（board C，2.4GHz，DHCP完了後に開始）**：
+
+| 指標 | 結果 |
+|---|---|
+| ★リンク停止 | **発生せず（600秒完走）**。C3=15〜30秒で停止（3変種3/3），C5=2〜10秒で停止（3run3/3，c5-bringup.md実施46）に対し，C6は同一方法論・同一ハーネス・同一AP・同等負荷で**一度も停止しない** |
+| TCP | 11,120,200バイト送信＝**デバイス側`tcp_bytes`と1バイト単位で一致**，エコー内容mismatch=0，再接続0（600秒間単一セッション維持），デバイス側`tcp_errs`=0 |
+| UDP | 9,875送信／9,677エコー受領（98.0%．タイムアウト197は経時一様＝RF起因の散発ロス，停止パターンなし） |
+| ping疎通（2秒周期） | 269 OK／19 FAIL（93.4%．失敗は散発1回単位で連続せず＝停止ではない） |
+| ヒープ | `heap_free`：負荷前159,952→負荷中159,368→**負荷後159,952に完全回復**（単調減少なし・リークなし） |
+| デバイス健全性 | MONログ5秒周期で600秒間途切れず，負荷後のTCP/UDP/pingエコー全て正常 |
+
+**解釈**：C3/C5で確定した負荷誘発リンク停止（双方向死・
+DISCONNECTEDなし・不回復）は**C6では発生しない**。C3/C5/C6は
+同一のシム系統・同一のlwIP/net層（`C3_TARGETDIR/net`共有）・
+同等のアプリを使うため，停止バグの所在は「C3/C5に共通してC6に
+無いもの」に絞られる（例：blob世代／MAC・PHY HWの世代差／
+`esp_wifi_internal_tx`経路のチップ依存部）。C5実施46の候補
+リスト（C3実施1候補(a)-(c)）の探索で，C6との差分に注目する
+価値が高い。
+
+**注意（環境）**：C6 runの実施時間帯はC3/C5 runと別（本ラウンド。
+同一LAN・同一APだが並行RF負荷の状況は異なりうる）。ただしC5
+実施46が5GHzでも停止を再現しRF妨害説をほぼ棄却済みのため，
+「C6だけ環境が良かった」説は考えにくい。
+
+**単発の未帰属クラッシュ（記録）**：load_testビルドの初回ブートで
+1回だけ`Guru Meditation Error: Illegal instruction`（PC=SP=
+0x40864e90＝データ領域内へのワイルドジャンプ）が発生した。同じ
+バイナリの再ブート以降は600秒負荷を含めて一切再現せず（計4回以上
+のブートで健全）。発生時点のブートは観測外のため帰属不能。再発時は
+`_kernel_mtxcb_table`近傍への飛び込みという特徴で照合できる。
+
+### 7. 回帰確認
+
+- **scan回帰（最終ツリー＝キュー修正込み）**：`build/
+  c6_r90_scan_regress`再ビルド→board Cで`RESCAN 15-20 APs`連続
+  （warm状態）。
+- **test_porting_c6**：`scripts/ci/run_board_esp32c6.py`で実機
+  **6/6 passed**（syslog_output/tick_timer_basic/
+  task_create_activate/semaphore_signal_wait/eventflag_set_wait/
+  alarm_handler）。
+- C3/C5ビルドへの影響なし：本ラウンドの変更ファイルは
+  `asp3/target/esp32c6_espidf/wifi/`配下2件＋新規`apps/load_test_c6`
+  のみ（C6のesp_shim.c/esp_shim_blobglue.cはC6ビルド専用参照で
+  あることをtarget.cmakeのgrepで確認）。C5関連ファイル・C5ボード・
+  C3ボードは全工程無接触（by-idタイムスタンプで裏付け）。
+
+### 変更ファイル（実施90）
+
+- `asp3/target/esp32c6_espidf/wifi/esp_shim_blobglue.c`：
+  g_misc_nvs修正（misc_nvs_init→静的ゼロ構造体代入）＋C6のROM ld
+  実測結果のコメント。
+- `asp3/target/esp32c6_espidf/wifi/esp_shim.c`：キュー固定プール化
+  （S3欠陥A対策のC3移植をC6独自コピーへ水平展開）。
+- `apps/load_test_c6/`（新規）：`apps/load_test_c3`のコピー
+  （include名・ログ接頭辞のみ変更。load_test_c3自体は無変更）。
+- `docs/wifi-shim-c6.md`：本節。`docs/load-test-c3c5c6.md`：
+  C6セクション記入。
+- git commitは行っていない（親のレビュー後commit&push運用）。
+- スクラッチ（`260d98fa…/scratchpad/`）：`r90/`配下にUART/JTAG
+  ログ一式，`load_c6_run1.log`（ハーネス出力），`load_test.py`／
+  `uart_capture.py`／`nsh_drive.py`（ハーネス・治具）。
+
+### board C最終状態
+
+`build/c6_r90_load_test/asp_flash.bin`（**全修正込み**：APM恒久化
+（実施88）＋g_misc_nvs修正＋キュー固定プール化。`load_test_c6`
+アプリ＝TCP port8/UDP port9エコー＋MONログ）をフル4MB書込み・
+hash verified。書込み後ブートでCONNECTED→DHCP（192.168.1.69）→
+TCP/UDPエコー・ping疎通を確認した**warm状態**のまま残置。
+
+**★重要な注意★**：本ラウンドで発見したcold-boot phy-initハングの
+ため，**board Cが電源断・長期放置等でcold化すると，このバイナリは
+phy-init（`wait_i2c_sdm_stable`）で無限ループする**。復旧手順＝
+NuttX原本（`/home/honda/.claude/jobs/494f98a3/tmp/nuttx-c6/nuttx/
+nuttx.bin`，md5=`f6295bd3…`）を書込み→NSHで`ifconfig wlan0 up`＋
+`wapi scan wlan0`→電源断なしでASP3を再書込み（本ラウンドで実証
+済みの手順）。
+
+### 申し送り
+
+1. **★cold-boot phy-initハングの根治★**（最優先）：`0x600ad000`
+   （modemドメインのフリーランカウンタ，実施56解析）をcold状態で
+   駆動するために欠けている初期化の特定。第一手＝NuttX/stockの
+   ブート列のうちmodem電源/クロックドメインをcoldから立ち上げる
+   経路（`esp_wifi_bt_power_domain_on()`・PMU/MODEM_SYSCON関連）の
+   A/B。ハングはJTAGで即判定できる（OSIカウンタ凍結＋PC=
+   `wait_i2c_sdm_stable`＋`0x600ad000`=0固定）。
+2. C3/C5リンク停止調査で「C6には無い差分」に注目する（本ラウンドの
+   C6陰性が探索空間を大幅に絞る）。
+3. 単発Guru Meditation（PC=データ領域0x40864e90）の再発監視。
+4. `no time event is processed in hrt interrupt.`はC6でも通信中
+   多発（C5実施45と同じ．実害は未観測——600秒負荷でも問題なし）。
