@@ -44,26 +44,58 @@
  *  ------------------------------------------------------------------
  *
  *  docs/wifi-shim.md記載のとおりNVSは本フェーズでは未実装．
- *  g_misc_nvsはblob（ieee80211_*.o）がNULLチェック後にNVSハンドルとして
- *  使うポインタと推定（ヘッダ宣言が無いため型は要旨から妥当な範囲で
- *  決定）．NULL固定のため，blobのNVS依存経路（プロファイル保存・
- *  スキャン履歴の永続化等）は実行時に「NVS無し」として振る舞う想定．
- *  もし実際にはNULL非チェックで無条件デリファレンスする経路がある
- *  場合はクラッシュしうる＝実機検証時の既知リスク（未検証）．
+ *
+ *  ★実施45（docs/c5-bringup.md）で確定した重要事実2件：
+ *
+ *  (1) C5では，本ファイルの旧実装が持っていた
+ *      「void *g_misc_nvs = NULL;」というC定義は**リンクされていな
+ *      かった**．esp32c5.rom.net80211.ld（ROM ldスクリプト）が
+ *      `g_misc_nvs = 0x4085ff7c;`（ROMインターフェースデータ領域＝
+ *      実施27の0x4085fb80〜0x4085ffc4帯）を絶対シンボルとして供給し，
+ *      リンカスクリプト定義がオブジェクト定義より優先されるため
+ *      （nm実測でA=絶対シンボルとして解決されていることを確認済み）．
+ *      よってこのセルの初期化は**実行時の代入でしか行えない**．
+ *
+ *  (2) 旧コメントの推定「blobはNULLチェック後に使う」は**v9 blobでは
+ *      成立しない**：cnx_sta_associated／scan_profile_check／
+ *      esp_wifi_get_wps_status_internal／cnx_auth_done／
+ *      ieee80211_sta_new_state（2箇所）／sta_rx_eapol／
+ *      ieee80211_assoc_req_construct／scan_parse_beacon の計9箇所が
+ *      g_misc_nvsをNULLチェック無しで+4/+8（WPSステータス語）を
+ *      lwする．g_misc_nvs=NULLだとアドレス4のロードとなり，C5では
+ *      Load access fault（mcause=5, mtval=4）＝実施44のconnect
+ *      クラッシュの真因．C3のblobも同一コード（逆アセンブル照合済み）
+ *      だが，C3ではアドレス4のロードがトラップせずバスが黙って値を
+ *      返すため露見しなかった（＝C3は潜在バグのまま動作していた）．
+ *
+ *  対処：blobが esp_wifi_init 内（wifi_init_in_caller_task）で必ず
+ *  呼ぶ misc_nvs_init() で，静的なゼロ初期化済み構造体を指させる．
+ *  全参照サイトは+4（WPS有効フラグ相当）と+8（WPSステータス，2/3と
+ *  比較）しか読まないため，全ゼロ＝「WPS無効・NVS無し」として安全に
+ *  振る舞う．領域は余裕を持って64バイト確保する．
  */
-void *g_misc_nvs = NULL;
+extern void *g_misc_nvs;	/* 実体はROM ld（0x4085ff7c）が供給 */
+
+static uint32_t misc_nvs_storage[16];	/* .bss＝全ゼロ（WPS無効相当） */
 
 int
 misc_nvs_init(void)
 {
-	/*  NVS未実装のため常に「初期化した体」で成功を返す  */
+	/*
+	 *  NVS未実装のため永続化はしないが，blobの無条件デリファレンス
+	 *  対策としてゼロ構造体を指させる（上記コメント参照）．
+	 */
+	g_misc_nvs = (void *) misc_nvs_storage;
 	return(0);
 }
 
 void
 misc_nvs_deinit(void)
 {
-	/*  no-op  */
+	/*
+	 *  deinit後もblob側の残存参照が読む可能性を考慮し，NULLへは
+	 *  戻さない（静的領域なので害はない）．
+	 */
 }
 
 /*

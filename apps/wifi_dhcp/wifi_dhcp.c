@@ -23,6 +23,87 @@
 static ID	main_tskid;
 static volatile int32_t	conn_state;	/* 0=待機 1=接続 -1=切断 */
 
+/*
+ *  実施45診断計装：CPU例外フォルト捕捉ハンドラ
+ *
+ *  docs/c5-bringup.md 実施06/08の手法をwifi_dhcpへ移植．C5のconnect
+ *  経路（実施44でLoad access faultを確認）はJTAG live-bp/live-reset
+ *  が不安定なため，自然ブート（esptool hard-reset）のまま例外を
+ *  ハンドラ側で捕捉し，mepc/mcause/mtval／全汎用レジスタをRTC-RAM
+ *  （0x50000000〜．WDTリセットを跨いで保持，実施06/08/別PC再開メモの
+ *  既知パターン）へ書いてから無限ループで凍結する．JTAGは後から
+ *  非侵襲attach（reset無し）でき，フォルト時点のレジスタをそのまま
+ *  mdwで回収できる．全ターゲット共通のEXCNO_*（アクセス系例外一式）
+ *  に登録するため，フォルトが起きない限り他チップ／正常系には無害。
+ */
+#define FAULTCAP_BASE		((volatile uint32_t *)0x50000000U)
+#define FAULTCAP_MAGIC		0xFA017C05U
+
+void
+fault_capture_handler(void *p_excinf)
+{
+	/*
+	 *  callee-saved(s0-s3)／spはT_EXCINFに含まれない（ASP3の例外フレームは
+	 *  呼出し規約でハンドラ自身が保存すると仮定するcallee-savedを積まない
+	 *  最小構成）．レジスタ変数で関数先頭（プロローグ直後）の値を直接束縛し，
+	 *  cnx_sta_associatedが使う base pointer（s1等）をそのまま回収する。
+	 */
+	register uint32_t reg_sp __asm__("sp");
+	register uint32_t reg_s0 __asm__("s0");
+	register uint32_t reg_s1 __asm__("s1");
+	register uint32_t reg_s2 __asm__("s2");
+	register uint32_t reg_s3 __asm__("s3");
+	T_EXCINF	*p = (T_EXCINF *) p_excinf;
+	uint32_t	mcause, mtval, mepc;
+	uint32_t	sp_v = reg_sp, s0_v = reg_s0, s1_v = reg_s1,
+				s2_v = reg_s2, s3_v = reg_s3;
+
+	__asm__ volatile("csrr %0, mcause" : "=r"(mcause));
+	__asm__ volatile("csrr %0, mtval"  : "=r"(mtval));
+	__asm__ volatile("csrr %0, mepc"   : "=r"(mepc));
+
+	FAULTCAP_BASE[25] = sp_v;
+	FAULTCAP_BASE[26] = s0_v;
+	FAULTCAP_BASE[27] = s1_v;
+	FAULTCAP_BASE[28] = s2_v;
+	FAULTCAP_BASE[29] = s3_v;
+
+	FAULTCAP_BASE[0]  = FAULTCAP_MAGIC;
+	FAULTCAP_BASE[1]  = mcause;
+	FAULTCAP_BASE[2]  = mtval;
+	FAULTCAP_BASE[3]  = mepc;
+	FAULTCAP_BASE[4]  = (uint32_t) p->pc;		/* T_EXCINF保存済mepc */
+	FAULTCAP_BASE[5]  = (uint32_t) p->ra;
+	FAULTCAP_BASE[6]  = (uint32_t) p->a0;
+	FAULTCAP_BASE[7]  = (uint32_t) p->a1;
+	FAULTCAP_BASE[8]  = (uint32_t) p->a2;
+	FAULTCAP_BASE[9]  = (uint32_t) p->a3;
+	FAULTCAP_BASE[10] = (uint32_t) p->a4;
+	FAULTCAP_BASE[11] = (uint32_t) p->a5;
+	FAULTCAP_BASE[12] = (uint32_t) p->t0;
+	FAULTCAP_BASE[13] = (uint32_t) p->t1;
+	FAULTCAP_BASE[14] = (uint32_t) p->t2;
+	FAULTCAP_BASE[15] = (uint32_t) p->tp;
+	FAULTCAP_BASE[16] = (uint32_t) p->mstatus;
+#ifndef __riscv_32e
+	FAULTCAP_BASE[17] = (uint32_t) p->t3;
+	FAULTCAP_BASE[18] = (uint32_t) p->t4;
+	FAULTCAP_BASE[19] = (uint32_t) p->t5;
+	FAULTCAP_BASE[20] = (uint32_t) p->t6;
+	FAULTCAP_BASE[21] = (uint32_t) p->a6;
+	FAULTCAP_BASE[22] = (uint32_t) p->a7;
+#endif /* !__riscv_32e */
+	FAULTCAP_BASE[23] = (uint32_t) p->intpri;
+	FAULTCAP_BASE[24] = p->exncnt;
+
+	for (;;) {
+		/*
+		 *  凍結．リブートさせず，JTAG（非侵襲attach）またはesptool
+		 *  read_memで回収するまでここに留まる．
+		 */
+	}
+}
+
 static void
 wifi_event_handler(void *arg, const char *base, int32_t id, void *data)
 {
@@ -68,6 +149,29 @@ main_task(EXINF exinf)
 
 	(void) exinf;
 	(void) get_tid(&main_tskid);
+
+#ifdef ESP32C5_R45_PROBE_GIC
+	/*
+	 *  実施45診断：cnx_sta_associated内でLoad access fault
+	 *  （s1=g_ic，offset535／mtval=4）を踏む直前と全く同じCPU発行の
+	 *  読み出しを，esp_wifi_init/connectより十分前（WiFi/blob未実行）に
+	 *  単独で行い，フォルトがg_ic自体・このオフセット固有の問題か，
+	 *  connect実行時のシステム状態依存かを切り分ける．フォルトすれば
+	 *  fault_capture_handlerがRTC-RAMへ凍結記録する（同一機構を再利用）。
+	 *  フォルトしなければPROBE_OK＋読んだ値をRTC-RAMへ書く．
+	 */
+	{
+		extern char g_ic[];
+		volatile uint32_t *rtc_probe = (volatile uint32_t *)0x500000A0U;
+		volatile uint8_t v;
+
+		rtc_probe[0] = 0xB0BE0450U;	/* PROBE開始マーカ（フォルトなら上書きされない）*/
+		v = ((volatile uint8_t *)g_ic)[535];
+		rtc_probe[0] = 0x600DB045U;	/* PROBE完走マーカ（フォルトしなかった証拠） */
+		rtc_probe[1] = (uint32_t) v;
+		rtc_probe[2] = (uint32_t) g_ic;
+	}
+#endif /* ESP32C5_R45_PROBE_GIC */
 
 #ifdef WIFI_IDLE_SECS
 	/*
@@ -120,6 +224,28 @@ main_task(EXINF exinf)
 		return;
 	}
 
+#ifdef ESP32C5_R45_PROBE_GIC
+	/*
+	 *  実施45診断・第2弾：起動直後(esp_wifi_init前)のプローブは成功した
+	 *  （フォルトせず値0を読めた）。今回はesp_wifi_init/start完了後・
+	 *  connect直前（同じmain_taskコンテキスト，ただし時間・WiFi内部状態は
+	 *  進行済み）で同じ読み出しを行い，「時間・WiFi内部状態」要因と
+	 *  「cnx_sta_associatedのタスク/割込みコンテキスト」要因のどちらに
+	 *  近いかを切り分ける．
+	 */
+	{
+		extern char g_ic[];
+		volatile uint32_t *rtc_probe2 = (volatile uint32_t *)0x500000B0U;
+		volatile uint8_t v;
+
+		rtc_probe2[0] = 0xB0BE0451U;
+		v = ((volatile uint8_t *)g_ic)[535];
+		rtc_probe2[0] = 0x600DB051U;
+		rtc_probe2[1] = (uint32_t) v;
+		rtc_probe2[2] = (uint32_t) g_ic;
+	}
+#endif /* ESP32C5_R45_PROBE_GIC */
+
 	/*
 	 *  STA_START後にmain_task文脈からconnectする（イベントハンドラ＝
 	 *  WiFiタスク文脈からのconnect呼出しを避ける．Phase B-2bの知見）
@@ -147,6 +273,20 @@ main_task(EXINF exinf)
 	if (conn_state != 1) {
 		syslog(LOG_NOTICE, "wifi_dhcp: FAILED (timeout)");
 		return;
+	}
+
+	/*
+	 *  接続先APの実測情報（チャンネル・RSSI）を記録する（5GHz実証の
+	 *  証跡用．2.4GHzでも無害）．実施45で追加．
+	 */
+	{
+		wifi_ap_record_t	ap;
+
+		if (esp_wifi_sta_get_ap_info(&ap) == 0) {
+			syslog(LOG_NOTICE,
+				   "wifi_dhcp: AP info: channel=%d rssi=%d",
+				   (int_t) ap.primary, (int_t) ap.rssi);
+		}
 	}
 
 	/*
