@@ -8750,3 +8750,305 @@ mismatch=1`＝esp_wifi_init直前（CPUクロック切替え・実施31のRNGサ
 4. C6の85ラウンド調査が到達した「シーケンス/タイミング/レジスタに
    現れないアナログ特性」という軸への統合は，rigor docの教訓どおり
    引き続き避け，候補3（C5固有の未踏領域）を先に潰すこと。
+
+---
+
+## 実施42：候補3（外部AI回答・MACブロック実行時diff＋LP RAM＋LP_AON STORE＋補足のEFUSE/APM/TEE）——**根本原因を特定・因果注入で症状を完全に反転（0AP→16-23AP・TX無→TX有，2/2再現）**：ASP3のDirect Bootはstockのアプリスタートアップが必ず実行する`bootloader_init_mem()`（APM全コントローラのctrl filter解除＋全バスマスタをTEEモードへ昇格）を一度も呼ばない。結果，WiFi/BTモデム・ハードウェア自身（APM master id=4=MODEM）がPOR既定のREE2モードのまま，HP_APMのctrl filter（POR既定で有効）がモデムのバスマスタとしてのHP SRAM（TX/RXパケットバッファ）アクセスを恒常的にブロックしていた——CPU側のMMIO/regi2c設定・較正はブロック対象外（HPCOREは常にTEEモード）のため全て正常に見え，35ラウンドの静的レジスタ診断を完全にすり抜けていた。stock相当のAPM解除処理を`hardware_init_hook()`末尾に追加注入したところ，**他は一切変更していない同一の冷間Direct Bootビルドで**AP検出・TX放射とも完全に復活した（診断用ガード付き実装のまま，昇格は次段の判断に委ねる）。C6 deaf-RX調査（実施85で凍結，held-over gapの一つが「APM/TEE+PMP/PMA/cacheが85ラウンド未比較」）にも同型の適用余地がある。
+
+### 背景・目的
+
+コーディネータ指示＝外部AI回答（`tmp/external_ai_c5_answer_fable.md`）候補3
+（実施41時点で「静的レジスタ値としての消尽」を宣言した後の最終未消化項）：
+scan実行中の同一地点でWiFi MAC制御ブロック全域・LP RAM 16KB全域・LP_AON
+STORE全域をdiffし，未包含ならEFUSE/APM/TEEブロックも追加する。
+
+### 1. 机上準備：対象アドレスの確定
+
+advisorレビュー（実験前）の指摘に従い，盲目の16KB全域ダンプではなく，
+実施41のblob全disasm資産（`r41/full_disasm.txt`，7.9MB）から`lui rX,imm`
+＋直後の`addi/ori/lw/sw`のペアリングで実アドレス計算を機械的に再構成する
+スクリプト（`r42/pair_lui.py`）を新規作成し，各候補領域への実アクセスを
+機械的に列挙してから対象を確定した（4739件のアドレス計算を復元）。
+
+- **WiFi MACブロック候補**（外部AI回答が言及する「C6の0x600A4000域16KB
+  相当」）：0x600a4000-0x600a7fffへのlui参照が172件・**89個の実アクセス
+  先**を確認（0x600a0000域＝実施15-20で調査済みのトーン測定チェーン
+  MMIOとは明確に別クラスタ）。この89アドレスのみを対象にした
+  （盲目の16KB全域ではない）。
+- **LP RAM**（0x50000000/16KB）：blobアクセスは**1箇所のみ**
+  （0x50000028）。逆アセンブルで文脈を確認したところ，このアクセスは
+  ROM/blob由来ではなく`apps/wifi_scan/wifi_scan.c`内`main_task`自身の
+  診断計装コード（実施38 RXINSTR系のカウンタ差分計算）がLP RAMを
+  スクラッチ領域として流用していただけと判明——**blobは実質的にLP RAM
+  を使わない**（advisorが事前に指摘した「vacuousの可能性」が的中）。
+  形式上は16KB全域を4-wayで採取したが，解釈は「参考値」に留めた。
+- **EFUSE**：blobアクセスは3語のみ（`0x600b4844`/`0x600b484c`/
+  `0x600b486c`，objdumpが`<EFUSE+0x44>`等とシンボル注釈——
+  `register_chipv7_phy`近傍でのeFuse較正トリム読出しと判明）。この3語
+  のみ対象（EFUSE物理値はチップ固有で系譜非依存のはずだが，読出し経路
+  の生死を確認する意味で採取）。
+- **LP_AON STORE**：実施35/36の11ブロックsweepが既に0x600b1000+
+  0x00-0x7C（STORE0-9含む）をカバー済みと判明。未カバーの尾部
+  （PUF_MEM_SW/ISO/DISCHARGE，+0x80/+0x84/+0x88）のみ追加。
+- **★EFUSE/APM/TEE の"補足"指示への対応**：実施35の11ブロックリスト
+  （`r35/blockdump.py`のBLOCKS）を確認したところMODEM_SYSCON/MODEM_
+  LPCON/MODEM1/MODEM_PWR0/PMU/LP_CLKRST/LP_AON/LP_I2C_ANA_MST/LPPERI/
+  LP_ANA/PVT_MONITORの11個のみで，**EFUSE/APM/TEEブロックはこれまで
+  一度も系譜diffの対象に入っていなかった**ことを確認した（外部AI回答の
+  懸念が的中）。blob自身はAPM/TEEレジスタを直接読み書きしない（disasm
+  0件）が，**ソース監査**でesp-idf-v6.1の
+  `components/bootloader_support/src/bootloader_mem.c`の
+  `bootloader_init_mem()`が`!defined(BOOTLOADER_BUILD)`ガード
+  （＝2nd-stage bootloaderではなくAPP側スタートアップでリンクされる，
+  stockの`call_start_cpu0`相当の経路）で無条件に
+  ```c
+  apm_hal_enable_ctrl_filter_all(false);
+  apm_hal_set_master_sec_mode_all(APM_SEC_MODE_TEE);
+  ```
+  を実行することを発見した。ソースコメント：「デフォルトではこれらの
+  アクセスパスフィルタは有効で，マスタがTEEモードの場合のみアクセスを
+  許可する。HP CPU以外の全マスタはREEモードで起動するため，デフォルト
+  設定ではHP CPU以外の全マスタへのアクセスが拒否される」。`apm_master_
+  id_t`（`esp_hal_security/include/hal/apm_types.h`）に
+  **`APM_MASTER_MODEM = 4`**が明示的に存在し，WiFi/BTモデムがCPUとは
+  別のバスマスタとしてこの許可管理の対象であることを確認した。ASP3の
+  Direct BootはstockのAPPスタートアップを一切経由しないため，この処理
+  は一度も呼ばれない——**候補3の「未踏領域」として最有力**と判断し，
+  机上準備の段階でAPM/TEEを主対象に格上げした（MAC/LP RAM/EFUSE/
+  LP_AONは並行して採取）。
+
+### 2. 採取ハーネス（`r42/r42_sweep.py`，実施36の壁時計固定遅延手法を継承）
+
+- RTSリセット→t=15.0s（実施36と同一，両系譜とも「初回scan完了後の
+  RESCANループ中」という同一ソフトウェア地点）でJTAG halt→対象を
+  読み取り→resume。UARTキャプチャをhalt跨ぎで継続し，**非摂動性**
+  （採取後の同一ブートでRESCANが正常完走すること）を毎回確認した。
+- **advisor指摘の動的レジスタ対策**：MACブロック候補89語は同一halt
+  セッション内で300ms間隔の2回読みを行い，変化した語を「ハードウェア
+  自律更新（CPU halt中も進行するMACステートマシン）」として除外して
+  から系譜比較にかけた——3語（`0x600a40a0`/`0x600a708c`/`0x600a7128`）
+  が動的と判明し除外。
+- 対象：(A) APM/TEE系7ブロック（TEE master mode ctrl 0x60098000+
+  0x00-0x28，HP_APM 0x60099000+0x00-0x120，LP_APM0 0x60099800+
+  0x00-0xe0，CPU_APM 0x6009a000+0x00-0x120，LP_TEE 0x600b3400+
+  0x00-0x100，LP_APM 0x600b3800+0x00-0xf0，LP_AON tail 0x600b1080+
+  0x00-0x08）＋TEE_BUS_ERR_CONF/TEE_CLOCK_GATE単語，(B) MAC候補89語，
+  (C) EFUSE 3語，(D) LP_AON tail（(A)に含む），(E) LP RAM全16KB
+  （4096語）。冷間2ブート・ハンドオフ1ブート（後述4節参照）採取。
+
+### 3. 採取結果
+
+**(A) APM/TEE——系譜決定的差分・genuinely latched exception（本ラウンドの核）**
+
+冷間（2ブート完全一致・再現）：
+```
+HP_APM_FUNC_CTRL_REG   (0x600990c4) = 0x0000001f   （全5経路フィルタ有効＝ROM/POR既定）
+HP_APM_M1_STATUS_REG   (0x600990d8) = 0x00000001   （許可違反ラッチ！bit0=permission restriction）
+HP_APM_M1_EXCEPTION_INFO0 (0x600990e0) = 0x00130001
+  → EXCEPTION_MODE[17:16]=3=REE2, EXCEPTION_ID[22:18]=4=APM_MASTER_MODEM, REGION[15:0]=1
+HP_APM_M1_EXCEPTION_INFO1 (0x600990e4) = 0x40806858  （ブロックされたアクセス先アドレス，HP SRAM内）
+TEE_M4_MODE_CTRL_REG   (0x60098010) = 0x00000003   （master 4=MODEM，REE2モードのまま）
+LP_APM0/LP_APM/CPU_APM の FUNC_CTRL = 0x1/0x3/0x3（いずれも解除されていない）
+```
+
+ハンドオフ（stock ESP-IDFブート列経由，20AP前後で正常動作）：
+```
+HP_APM_FUNC_CTRL_REG   = 0x00000000   （全経路フィルタ解除）
+HP_APM_M1_STATUS_REG   = 0x00000000   （例外なし）
+TEE_M4_MODE_CTRL_REG   = 0x00000000   （master 4=MODEM，TEEモードへ昇格済み）
+```
+
+**解釈**：HP_APMのM1経路例外レコードは「WiFi/BTモデム・ハードウェア
+自身（バスマスタID=4）が，REE2モードのまま，HP SRAM内のアドレス
+`0x40806858`（TX/RXパケットバッファ相当の領域）へアクセスしようとして
+APMにブロックされた」という**ハードウェアが記録した一次証拠**そのもの
+である。CPU（HPCORE，master 0）は常にTEEモードでこのフィルタの対象外
+のため，CPU発行のMMIO read/write・regi2c較正アクセスは冷間でも一切
+影響を受けず全て正常に完了する——だからこそ実施15-41の35ラウンドに
+わたる静的レジスタ診断（値の読み書き一致確認）がことごとくすり抜けて
+いた。「TX無・RX無だが完走報告」という実施38の核心的観測と，「モデムの
+バスマスタとしてのSRAM aアクセスだけが恒常的に拒否される」という本
+機序は完全に整合する。
+
+**(B) MACブロック候補（89語，動的3語除外後86語）**：系譜決定的差分
+6語（`0x600a40e4`/`0x600a40f4`/`0x600a4d6c`/`0x600a7430`/
+`0x600a7848`/`0x600a7ce8`）。後述4節の因果注入実験で「これらを一切
+変更せずにAPMのみ修正した場合に症状が完全復帰する」ことを確認したため，
+**この6語は非因果と結論**（詳細は4節）。
+
+**(C) EFUSE**：3語とも冷間2ブート・ハンドオフ1ブートで完全一致
+（`0x600b4844=0x13f0a744`／`0x600b484c=0x21500310`／
+`0x600b486c=0x7ad0cb30`）——予想どおり系譜非依存（物理eFuse値，
+読出し経路も両系譜で正常）。
+
+**(D) LP_AON tail**：3語とも全条件で完全一致（`00000001,00000000,
+00000000`）——PUF_MEM系は無関係と確認。
+
+**(E) LP RAM 16KB**：形式的に4096語を採取したが，**同一ビルドの冷間
+boot1 vs boot2で3700/4096語（90%超）が既に食い違う**（未初期化SRAM
+残渣そのもの）。冷間 vs ハンドオフの差分も3678/4096語とほぼ同水準——
+「系譜差」ではなく「起動毎に無関係に変動するノイズ」であることが
+数値的に確定した（1節の机上予測どおり，blobが実質使っていない領域の
+形式的採取は解釈不能なノイズしか返さない）。**この領域は本ラウンドで
+正式にvacuousと結論**。
+
+### 4. 因果検証：APM/TEE解除の注入——**2/2で症状完全反転**
+
+`asp3/target/esp32c5_espidf/target_kernel_impl.c`に
+`ESP32C5_R42_APMFIX`ガード（既定無効）で`esp32c5_r42_apm_unblock()`を
+新設し，`hardware_init_hook()`末尾（実施41のBOOTHOOKと同位置，
+esp_wifi_init/PHY較正より前）から呼び出した。処理内容はstockの
+`bootloader_init_mem()`の直接移植：
+
+1. HP_APM/LP_APM0/LP_APM/CPU_APMの`FUNC_CTRL_REG`を全て0へ
+   （4コントローラの経路フィルタを解除）
+2. `TEE_M0..M31_MODE_CTRL_REG`（0x60098000+4×id，32語）を全て0
+   （全バスマスタをTEEモードへ昇格）
+3. `HP_APM_M1_STATUS_CLR_REG`にラッチクリアを書込み（事後の新規例外
+   有無を確認可能にするため）
+
+**事前予測**：APM/TEEのみを修正し，他（MAC候補6語の差分・LP RAM等）は
+一切変更しない「単一変数」注入とし，症状（AP数・スニファTX検出）が
+反転すればAPM/TEEが根本原因，反転しなければ他要因（MAC候補6語等）を
+追加で当たる。
+
+**ビルド**：`build/c5_r42_apmfix`（`ESP32C5_R38_RXINSTR=1;
+ESP32C5_R42_APMFIX=1`，既定の冷間ビルドと同一ソース・同一クロック
+構成・**stockブート列は一切経由しない純粋なDirect Boot**）。フル4MB
+`write-flash 0x0`。
+
+**実測（2独立RTSリセット，各回DUT/スニファ同時二重キャプチャ
+`r39_dualcap.py`流用）**：
+
+| 試行 | 初回scan | RESCAN | promisc/MAC割込み | スニファDUT検出 |
+|---|---|---|---|---|
+| boot1 | （初回ログ未捕捉，RESCANで確認） | **22 APs**→**16 APs** | 生存（promisc 1000+，macint同期） | **DUTtotal=9・DUTprobereq=9**（安定） |
+| boot2 | **20 APs found (err=0)** | **23 APs**×2 | 生存 | **DUTtotal=9・DUTprobereq=9**（安定） |
+
+環境陽性対照（スニファ側total/mgmt/probereq/beacon）は両ブートとも
+継続的に増加——検出系そのものは生きている前提を満たした上での
+DUT検出。**42ラウンドの調査史上初めて，冷間Direct BootでAP検出・TX
+放射の両方が確認された**。
+
+**mechanism closure（advisor指摘により追加，post-fix読み戻し）**：
+修正済みビルド起動後，t=15sでJTAG halt→再読取り：
+```
+HP_APM_FUNC_CTRL_REG = 0x00000000   （注入どおり解除）
+HP_APM_M1_STATUS_REG = 0x00000000   （★新規の許可違反が一度も発生していない）
+TEE_M4_MODE_CTRL_REG = 0x00000000   （MODEM，TEEモードへ昇格）
+LP_APM0/LP_APM/CPU_APM FUNC_CTRL   = 0x00000000（いずれも解除）
+```
+ハンドオフ（stock経由，WORKS）の値と完全一致——「AP数が増えた」という
+結果論ではなく，「モデムのバスマスタとしてのアクセスがブロックされて
+いた経路が，注入後は実際に例外を出さずに通過している」ことをハード
+ウェアの例外ラッチ自体で確認した（結果と機序の両方が閉じた）。
+
+**MAC候補6語の非因果確認**：本注入はMAC候補ブロックの6差分語には
+一切触れていない（`esp32c5_r42_apm_unblock()`はAPM/TEEレジスタのみ
+書込み）。それにもかかわらず症状が完全反転したことから，**3節(B)の
+6語は非因果**と結論する（今回のビルドにもその6語の差分はそのまま
+残存していたはず——別途読み戻し確認はしていないが，注入コードが
+MACブロックへ一切アクセスしないことはソースレベルで自明）。
+
+### 5. 総合評価と申し送り
+
+- **候補3（外部AI回答の最終項）は完全に的中**——「blobが環境値で分岐する」
+  という原型仮説そのものではなく，**「blobより下層のアクセス制御
+  ハードウェア（APM）がモデムのバスマスタ権限を系譜依存で決定していた」**
+  という，より根源的な形で的中した。42ラウンドにわたり静的MMIO/regi2c
+  比較・過渡ラッチ・セルフハンドオフ・19語同時注入等あらゆる「blobが
+  読み書きする値」の探索が尽くされていた一方で，**「blob自身が触れない
+  が，blobの動作結果を裏で決定するハードウェア権限レイヤ」**は一度も
+  対象に入っていなかった——実施39のPMA発見（Direct BootはROM残置
+  PMAでSRAM実行を禁止していた）と同型の「Direct Bootがstockの
+  スタートアップ処理を丸ごとスキップすることで生じる別クラスの
+  抜け」であり，PMAが「CPU自身の命令フェッチ権限」だったのに対し，
+  APMは「CPU以外のバスマスタ（モデム等）のメモリアクセス権限」という，
+  一段階抽象度の異なる抜けだった。
+- **★C6 deaf-RX調査への示唆（最重要の申し送り）**：
+  `memory/project_c6_agc_investigation.md`（実施85でheld-over evidence
+  gapとして明記）に「APM/TEE+PMP/PMA/cacheが85ラウンド未比較」という
+  項目がある。C6もASP3のDirect Bootでstockのapp スタートアップ
+  （＝`bootloader_init_mem()`を含む）を一切経由しない点はC5と共通の
+  構造である。**C6のTEE/APM実装（`apm_master_id_t`にMODEM masterが
+  存在するか，`bootloader_mem.c`のC6分岐が同型か）を確認し，同型の
+  ギャップがあれば同じ修正パターンを試す価値が非常に高い**——本ラウンド
+  で確立した診断ハーネス（`r42_sweep.py`のAPM/TEEレジスタ読取り部分）
+  はC6のレジスタマップに合わせてそのまま移植できる。
+- **昇格判断は次段へ**（advisor指摘）：`esp32c5_r42_apm_unblock()`は
+  診断用ガード（`ESP32C5_R42_APMFIX`，既定無効）のまま据え置いた。
+  `hardware_init_hook()`は**全C5アプリ**（wifi_scan以外も含む）で
+  実行されるため，恒久化（ガード解除）の前に最低限：
+  1. `test/porting`等，WiFi以外のC5アプリでの回帰確認（本ラウンドは
+     wifi_scanのみで検証）。
+  2. 「全4コントローラ解除＋全32マスタTEE昇格」という広い変更が本当に
+     必要か，最小変更（HP_APM解除＋MODEM masterのみTEE昇格等）で足りる
+     かの絞り込み。
+  3. APM/TEEを本来使う想定（将来のセキュア/非セキュア分離，LPコア
+     分離等）がASP3側に無いことの確認（現状は無いと判断しているが
+     明文化）。
+  を満たしてからの恒久化（ガード解除・`asp3/target/esp32c5_espidf`側
+  への統合）を推奨する。
+- **MAC候補6語・LP RAM**：MAC候補6語は3節(B)/4節のとおり非因果と結論。
+  LP RAMは3節(E)のとおりvacuousと結論（同一ブート内変動がノイズの
+  水準を規定）。いずれも追加調査は不要と判断する。
+- **候補0〜5，外部AI回答の全項目が本ラウンドで消化完了**——42ラウンドに
+  わたる冷間0AP/TX無RX無の調査は，**根本原因の特定と因果注入による
+  症状反転の確認**をもって実質的に解決フェーズへ移行した（恒久化は
+  上記3項目の確認後）。Espressifへの問い合わせパッケージ（外部AI回答
+  Q4）は，本ラウンドの結果により**不要**と判断する（原因を自力特定
+  できたため）。
+
+### 6. 両ボード最終状態（終了処理）
+
+- **C5#1**：`build/c5_r34_wifi80`（240MHz出荷構成，実施42の変更点
+  無効＝`ESP32C5_R42_APMFIX`未定義）を`write-flash 0x0`でフル4MB
+  書き戻し。RTSリセット後45秒キャプチャ（`r42/final_state_console.log`）：
+  `rst:0x1 (POWERON)`のみ・`esp_wifi_init -> 0`・`0 APs found (err=0)`→
+  `RESCAN 0 APs (err=0)`×3——**冷間0AP症状の回帰を確認**（恒久修正は
+  意図的に未適用のまま，次段の判断に委ねる）。0x200000は本ラウンドの
+  ハンドオフ検証書込み後，本ステップのフル4MB書込みで意図的に消去済み
+  （実施37罠どおり，次回ハンドオフ検証時は`r38_guest_640k.bin`の
+  再書込みが必要）。
+- **C5#2**：スニファ（2.4GHz ch6版，実施38以来）のまま未書換え・維持。
+- 接触禁止2台（C6 board C `14:C1:9F:E0:5A:9C`／UARTブリッジ
+  `125a266b…`）は全工程で無接触（by-idピン留め徹底）。
+
+### 変更ファイル（実施42）
+
+- `asp3/target/esp32c5_espidf/target_kernel_impl.c`：
+  `esp32c5_r42_apm_unblock()`（`ESP32C5_R42_APMFIX`ガード，既定無効）
+  を新設し，`hardware_init_hook()`末尾から呼出し。既定ビルドは
+  nm symbol table完全一致（0行diff，`build/c5_r34_wifi80`対
+  `build/c5_r42_regress`）・objdump -d完全一致（ビルド時刻文字列
+  5バイトのみの差，10行diff）で無影響を確認済み。
+- 本doc：本節（実施42）追記。
+- スクラッチ（`260d98fa…/scratchpad/r42/`）：`pair_lui.py`（blob
+  disasmからのlui+addi/oriペアリング，MAC/LP RAM/EFUSE/APM/TEE各
+  候補領域への実アクセス列挙）・`r42_sweep.py`（APM/TEE＋MAC候補＋
+  EFUSE＋LP_AON tail＋LP RAM統合採取ハーネス，動的レジスタ2パス
+  フィルタ付き）・`cold_boot1/2.result.json`・`handoff_boot1.result.json`
+  ・各`.uart.log`／`.openocd.log`・`apmfix_test1/2_dut.log`／
+  `apmfix_test1/2_sniff.log`（因果注入実測）・`postfix_check2.openocd.log`
+  （mechanism closure確認）・`final_state_console.log`（終了処理確認）。
+  ビルド：`build/c5_r42_apmfix`（因果注入検証用）・`build/c5_r42_regress`
+  （既定ビルド無影響確認用）。
+- git commitは行っていない（コーディネータのレビュー後のcommit&push運用）。
+
+### 検証（実施42）
+
+- 机上：blob全disasm（`r41/full_disasm.txt`）からのlui+addi/oriペア
+  リングでMAC候補89語・LP RAM 1語（自前計装の流用と判明）・EFUSE 3語
+  を機械的に確定。ソース監査（esp-idf-v6.1）で`bootloader_init_mem()`
+  の存在と`APM_MASTER_MODEM=4`を確認。
+- 採取：冷間2ブート完全一致（HP_APM例外ラッチ含め再現性確認済み）・
+  ハンドオフ1ブートとの系譜決定的差分を確認。非摂動性（採取後の
+  同一ブートでRESCAN正常完走）を全ブートで確認。
+- 因果注入：**2/2独立RTSリセットでAP検出（16-23AP）・スニファTX検出
+  （DUTtotal=9・DUTprobereq=9）とも完全復帰**。mechanism closure
+  （post-fix HP_APM_M1_STATUS=0，新規例外なし）を追加確認。
+- 既定ビルド無影響：nm完全一致・objdump実質完全一致（ビルド時刻文字列
+  のみ差）。
+- 終了処理：C5#1を240MHz出荷構成（`ESP32C5_R42_APMFIX`無効）へ書き戻し，
+  冷間0AP症状の回帰をUART実測で確認。C5#2は未書換え。接触禁止2台は
+  全工程で無接触。
