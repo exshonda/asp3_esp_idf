@@ -20,6 +20,19 @@
 
 if(ESP32C6_BT)
 
+#
+#  ★BLE実施13（docs/ble-c5c6-plan.md §13）：IDF v6.1 matched-set swap
+#  トグル．ON にすると bt/phy/coex/libble_app.a を hal submodule ではなく
+#  IDF v6.1（~/tools/esp-idf-v6.1）から採り，C3型 bt.c（esp_bt_idf61.cmake）
+#  で D-1（controller-only）をビルドする．既定 OFF＝従来の hal 版（本
+#  ファイル本体）．RFシンセ非ロック（§11/§12）が v6.1 で解けるかの実機
+#  判定用．board C を戻すときは OFF で再ビルド or build/c6bt_fix を再フラッシュ．
+#
+option(ESP32C6_BT_IDF61 "Use IDF v6.1 matched-set (bt/phy/coex/libble_app.a) instead of hal submodule for C6 BLE D-1 (BLE実施13)" OFF)
+if(ESP32C6_BT_IDF61)
+    include(${CMAKE_CURRENT_LIST_DIR}/esp_bt_idf61.cmake)
+else()
+
 set(BT_TARGETDIR ${TARGETDIR}/bt)
 get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf ABSOLUTE)
 
@@ -563,6 +576,8 @@ if(ESP32C6_BT_NIMBLE)
         )
     endif()
 
-endif()
+endif()  # ESP32C6_BT_NIMBLE
 
-endif()
+endif()  # ESP32C6_BT_IDF61 (hal 版 else ブロック終端)
+
+endif()  # ESP32C6_BT

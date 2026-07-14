@@ -1228,3 +1228,84 @@ ELFの`objdump -s`で静的に突合せ）．
   「入力差の反証＝クリーンなチェックポイント」で停止し，v6.1 swap本体は
   次段（効く保証なしの前提で）へ申し送る．
 
+
+## 13. IDF v6.1 matched-set swap（2026-07-15）— ビルド/リンク達成（トグル化・非破壊）
+
+§12 の申し送り「フォールバック＝v6.1 matched set swap（効く保証なし）」を
+実装したラウンド．**本節はまずビルド到達度を記録する（実機
+`register_chipv7_phy` 収束判定は §13.3 に追記）**．
+
+### 13.1 決定的事実：v6.1 esp32c6 bt.c は C3型（＝C5構成を範とする）
+
+`~/tools/esp-idf-v6.1/components/bt/controller/esp32c6/bt.c` を実測確認：
+`xTaskCreatePinnedToCore`／`vTaskDelete`／標準 `esp_intr_alloc`/`esp_intr_free`
+を直接呼び，`npl_freertos_*` を直接呼ぶ（**hal版のような
+`platform/os.h` の `esp_os_*`・`npl_os_*` ドリフトは無い**）．つまり
+v6.1 swap の C6 構成は hal版 esp_bt.cmake ではなく **C5 esp_bt.cmake
+（IDF v6.1）の逐語転写**が正解——C5実施03/10 の資産がそのまま効く．
+
+### 13.2 実装（トグル・非破壊・可逆）
+
+`ESP32C6_BT_IDF61`（既定OFF）で hal版と排他選択する構成にした（hal版
+D-2b 到達ビルドを温存＝「hal版との二択はユーザー判断」の申し送りに直結）：
+
+- `asp3/target/esp32c6_espidf/esp_bt.cmake`：`if(ESP32C6_BT)` 直後に
+  `option(ESP32C6_BT_IDF61 ... OFF)`＋`if(ESP32C6_BT_IDF61) include(esp_bt_idf61.cmake)
+  else() <既存hal本体> endif()` を挿入（既存hal本体は無改変で `else()` に内包）．
+- `asp3/target/esp32c6_espidf/esp_bt_idf61.cmake`（新規）：C5 esp_bt.cmake の
+  IDF v6.1 構成を esp32c6 へ転写．**D-1（controller-only＝bt_smoke_c6）限定**で
+  NimBLE ブロックは移植しない（`register_chipv7_phy` は
+  `esp_bt_controller_enable→esp_phy_enable` 内で発火し bt_smoke_c6 が直接踏む＝
+  シンセ・ロック判定にホストは不要．advisor指摘）．`ble_host_smoke_c6`＋IDF61 は
+  FATAL_ERROR で明示的に弾く．origin-split（bt/phy/coex/os_mempool.c は IDF v6.1，
+  hw_support/clock/rtc/efuse/periph/modem_clock は hal）・ld（v6.1 esp32c6，
+  +rom.coexist.ld，−systimer.ld，−net80211/pp）は C5 と同一方針．
+  ★XTAL/CPU は C6 の hal `sdkconfig.h`（`CONFIG_XTAL_FREQ=40`・
+  `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ`→`CONFIG_ESPRESSIF_CPU_FREQ_MHZ` 間接）を
+  流用し `CONFIG_ESPRESSIF_CPU_FREQ_MHZ=160` のみ -D（C5のように XTAL を -D すると
+  sdkconfig.h の後勝ちと競合＝hal版と同判断．esp_bt.h v6.1 の
+  `BT_CONTROLLER_INIT_CONFIG_DEFAULT()` は両マクロを直接参照するため誤値注入は
+  それ自体がシンセ非ロックの偽陰性要因＝ここは慎重に合わせた）．
+- `asp3/target/esp32c6_espidf/bt/bt_shim_idf61.c`（新規）：C3型シム．hal版
+  `bt_shim.c` から §11クロック（regi2c sel_160m＋WIFIPWR＋実施91 ICG）・C6割込み
+  （INTMTX＋PLIC_MX．C5のCLICとは別＝C5シムは流用不可）・`esp_timer_*`/
+  `esp_pm_lock_*`/`bt_timer_task`/`esp_partition_*`/`esp_random` を移植し，
+  `esp_os_*` タスク/割込みと `npl_os_*` 橋渡しを除去（v6.1は C3 stub の
+  `xTaskCreatePinnedToCore`→`esp_shim_task_create` と `npl_freertos_*` 直呼びで
+  解決）．割込みは標準名 `esp_intr_alloc/free`（＋防御的に enable/disable）．
+- `asp3/target/esp32c6_espidf/bt/bt_esp_timer_ext.h`（新規）：後述の壁2対策．
+
+### 13.3 ビルドで踏んだ壁（GCC14.2 hard-error 群．C5実施03は寛容toolchainで通過）
+
+いずれも「実ESP-IDFがビルドシステムで暗黙includeする前提のヘッダ」欠落を
+GCC14.2 が暗黙宣言 hard-error にするもの．target側 force-include で解消：
+
+1. **`xPortInIsrContext` 未宣言**（v6.1 `phy_init.c` の `phy_enter_critical`）：
+   `phy_init.c` は `freertos/FreeRTOS.h`＋`portmacro.h` のみ include し
+   `freertos/task.h`（`xPortInIsrContext`＝`sns_ctx()` の static inline がある）を
+   include しない．C3 stub の `freertos/task.h`（自己完結・編集不可のC3領域だが
+   read/参照は可）を `-include` して可視化．
+2. **`esp_timer_is_active`／`esp_timer_get_expiry_time` 未宣言**（v6.1
+   `npl_os_freertos.c`）：本ビルドの `esp_timer.h` は hal_stub版
+   （`esp32c3_espidf/hal_stub/include/esp_timer.h`．PLL-track用の周期API のみ宣言）に
+   解決され同2関数を持たない（hal版 esp_bt.cmake の `-include esp_timer.h` だけでは
+   同stubを引くため無効＝実測）．hal_stub は C3領域で編集不可のため，C6側に
+   `bt/bt_esp_timer_ext.h`（stub esp_timer.h を include し2宣言を補う）を新設し
+   `-include` した．
+（force-include は既存の soc/soc_caps.h・esp_attr.h・esp_idf_version.h・
+sys/param.h・esp_bit_defs.h に上記2件を加えた計7件．）
+
+### 13.4 3ビルド検証（ビルド/リンク全通過）
+
+- **v6.1 IDF61 BT**（`bt_smoke_c6`＋`ESP32C6_BT_IDF61=ON`）：リンク成功．
+  `build/c6bt_idf61/asp.elf`（text 305,520／RAM系 bss 276,864）．nmで
+  `esp_bt_controller_init/enable`・`register_chipv7_phy`（**`0x42032abe`＝hal版の
+  `0x42032590` から移動＝v6.1 libphy がリンクされた物証**．本ビルドの phy `-L` は
+  v6.1 のみで hal phy パス無し＝no-op swap でないことを構造的に担保）・
+  `esp_shim_bt_clock_init`・`esp_intr_alloc`・`esp_timer_is_active`・`bt_timer_task`
+  を確認．
+- **wifi_scan 回帰**（`ESP32C6_WIFI`＝hal）：リンク成功（トグル既定OFF＝
+  `esp_bt.cmake` 改変は WIFI ビルドに非波及）．
+- **hal BT 回帰**（`ESP32C6_BT`＝トグル既定OFF）：リンク成功（既存hal本体を
+  `else()` 内包しただけ＝D-2b 到達ビルド温存・可逆）．
+
