@@ -1086,17 +1086,33 @@ OpenOCD＝`board/esp32c6-builtin.cfg`＋`adapter serial 14:C1:9F:E0:5A:9C`，
 収束させた（BTの`esp_phy_enable(PHY_MODEM_BT)`もWiFiと同一libphy経路の
 ため）．**C6 BLEは現状hal submodule（esp-hal-3rdparty）のbt.c/libble_app.a/
 libphyを使用**している．
-- C6 `wifi_scan`はhal版libphyで`register_chipv7_phy`を通過（RF稼働）する
-  ため，**hal libphy自体はC6シリコンで収束する**＝「libphy世代不整合」を
-  単純な主因とは断定できない．
-- しかしBTの`esp_phy_enable(PHY_MODEM_BT)`はWiFiと**微妙に異なるcalデータ
-  ／コードパス**（`phy_init_data`もバックトレース上に存在）を通る可能性が
-  あり，C5の前例が示す通りBT-enable経路固有にlibphy世代依存が出うる．
-- **次段の最有力候補＝C6 BLEもC5同様にIDF v6.1 matched set（bt/phy/coex）へ
-  切替**（`asp3/target/esp32c6_espidf/esp_bt.cmake`をC5の`esp_bt.cmake` 9-16行
-  の参照実装に倣って改修）．本ラウンドのクロック2修正（regi2c sel_160m＋
-  WIFIPWR）は，modemクロック状態をWORKS一致へ揃える前提として**維持**する
-  （v6.1切替後もこの前提は必要）．
+**★libphy共有の確認（次段の優先順位を決める一次事実）**：BTビルド
+（`build/c6bt_fix`）とWiFiビルド（`build/c6_wifiscan_works`）のnm比較で，
+両者とも**同一のhal `libphy.a`の`register_chipv7_phy`**をリンクしている
+（アドレスはリンクレイアウト差で異なるだけ・同一シンボル・同一実体）．
+WiFi側のみ`__wrap_register_chipv7_phy`が在るが，中身は`__real_register_
+chipv7_phy`を呼ぶだけの**診断トレースラッパ**（`wifi/wifi_trace.c`）で
+機能差ではない．よって：
+- C6 `wifi_scan`はこの共有libphyで`register_chipv7_phy`を通過（RF稼働）
+  ＝**同じlibphyがWiFiでは収束しBTでは収束しない**．「libphy世代不整合」を
+  単純な主因とは断定できない（swapは両経路の同一コードを差替えるだけで，
+  バグが**BT専用サブパス**に在る場合しか効かない）．
+- **より確度の高い差分＝`register_chipv7_phy`への入力**：バックトレース上に
+  `phy_init_data`が在り，較正モード（WiFi=`esp_phy_enable(PHY_MODEM_WIFI)`
+  →`register_chipv7_phy(init_data,cal_data,PHY_RF_CAL_FULL)`／BLE側は
+  `r_ble_lll_adv_start`→blob内部からの呼出しで`init_data`・cal_data・
+  モード引数が異なりうる）が経路依存．
+- **次段の推奨（反証実験を先に）**：まず**BT vs WiFiの`register_chipv7_phy`
+  入力（`phy_init_data`／cal_data／モード引数a0-a3）を実機で差分**する
+  （WiFi側`__wrap_register_chipv7_phy`が既にa0-a3をトレース済＝
+  `wifi_trace.c`のパターンをBT側`bt_shim.c`へ移植して同じ引数を採取・比較）．
+  ここで差が出れば入力補正が本命修正．**フォールバック候補＝C6 BLEも
+  C5同様にIDF v6.1 matched set（bt/phy/coex）へ切替**（C5 `esp_bt.cmake`
+  9-16行の参照実装・C5実施09/10で同型のhal libphy非収束を解消した前例）．
+  ＝「入力差分→ダメならv6.1 swap」の順（libphy共有の一次事実がこの順序を
+  支持する）．本ラウンドのクロック2修正（regi2c sel_160m＋WIFIPWR）は
+  modemクロック状態をWORKS一致へ揃える前提として**維持**（いずれの次段
+  でも必要）．
 
 ### 回帰・board C最終状態・留保
 
