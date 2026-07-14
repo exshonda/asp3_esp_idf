@@ -36,6 +36,9 @@
 #include "host/ble_gap.h"
 #include "host/ble_hs_id.h"
 #include "host/ble_hs_adv.h"
+#include "host/ble_gatt.h"
+#include "host/ble_uuid.h"
+#include "os/os_mbuf.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
@@ -44,6 +47,15 @@
  *  esp_bt_controller_init() より前に呼ぶ必要がある．詳細はdocs/bt-shim.md．
  */
 extern void esp_shim_bt_clock_init(void);
+
+#ifdef TOPPERS_ESP32C3_BT_SM
+/*
+ *  D-2d(SM)：bond store 初期化（S3 BT-5 と同じ）．ble_store_ram.c は
+ *  IDF文脈（BLE_USED_IN_IDF=1）で空になるため使えず，stock bleprph と同じ
+ *  ble_store_config（BLE_STORE_CONFIG_PERSIST=0＝RAM保持）を使う．公開
+ *  ヘッダが無いので自前 extern する（stock bleprph も同様）．  */
+extern void ble_store_config_init(void);
+#endif
 
 /*
  *  ble_hs sync 到達マーカ（JTAGで容易に観測できるよう固定アドレスへも
@@ -62,6 +74,27 @@ volatile uint32_t	g_gap_event_count;	/* 全 GAP イベント回数 */
 volatile uint8_t	g_own_addr_type;
 volatile int32_t	g_reset_reason = 0x7fffffff;	/* ble_hs_cfg.reset_cb の reason */
 volatile uint32_t	g_reset_count;		/* ホストリセット回数 */
+
+/*
+ *  D-2d：自前GATTサービス＋notify 状態．S3 の BT-5（notify/subscribe追跡・
+ *  SM）を «動作済みの正» として C3 へ逐語移植（docs/bt-shim.md Phase D-2d）．
+ *  S3と同じ 16bit UUID：service 0xABF0／chr 0xABF1(READ,"BT4-OK")／
+ *  0xABF2(READ|NOTIFY,32bit LE counter)．C3固有として write 特性 0xABF3
+ *  （WRITE．受信値をログ＋RTCマーカ＋putカウンタ）を追加する．
+ *  notify送出は main_task の定常ループ（1秒周期・アプリタスク文脈）から
+ *  subscribe中のみ行う．カウンタはsubscribe中のみ加算するので central 側の
+ *  受信欠番＝ロスと機械判定できる．main_task文脈での送出はD-2cで移植した
+ *  保留リング（esp_shim.c）がクリティカルセクション内送出を救済する．
+ */
+volatile uint16_t	g_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+volatile uint8_t	g_notify_enabled;	/* CCCD notifyビット */
+static uint16_t		g_notify_val_handle;	/* notify特性のvalue handle */
+volatile uint32_t	g_notify_counter;	/* notify値（32bit LE） */
+volatile uint32_t	g_notify_sent;		/* 送出成功回数 */
+volatile uint32_t	g_notify_fail;		/* 送出失敗回数 */
+volatile int32_t	g_notify_last_rc;	/* 最後の失敗rc */
+volatile uint32_t	g_write_count;		/* write特性の受信回数（putカウンタ） */
+volatile uint32_t	g_write_last;		/* 直近writeの先頭バイト＋長さ */
 
 /*
  *  D-2b調査（HRT凍結検証）：SYSTIMER HWカウンタ直読みプローブ．
@@ -111,8 +144,154 @@ raw_systimer_lo(void)
     connect: 0x604E<status:8><conn_count:8>／disconnect: 0xD15C<reason:8><disc_count:8>．  */
 #define BLE_CONN_MARK_ADDR	((void *) 0x600080C0UL)
 #define BLE_DISC_MARK_ADDR	((void *) 0x600080B8UL)
+/*  D-2d：write特性（0xABF3）受信マーカ．STORE2(0x60008058)は本番ビルド
+    （ACL_TRACE OFF）では未使用のため転用（ACL_TRACE ON時のみ acl_trace が
+    使うので衝突するが，本番/検証は OFF）．
+    0x7717<write_count:8><先頭バイト:8> をパックし単発 dump-mem で確認する．  */
+#define BLE_WRITE_MARK_ADDR	((void *) 0x60008058UL)
 
 static int gap_event_cb(struct ble_gap_event *event, void *arg);
+
+/*
+ *  D-2d：自前GATTサービス（S3 BT-5 を «正» として逐語移植）．
+ *    service 0xABF0（PRIMARY）
+ *      chr 0xABF1  READ            固定値 "BT4-OK"（S3と同一．42 54 34 2d 4f 4b）
+ *      chr 0xABF2  READ | NOTIFY   32bit LE カウンタ（subscribe中のみ周期送出）
+ *      chr 0xABF3  WRITE           受信値をログ＋RTCマーカ＋putカウンタ（C3追加）
+ */
+static int
+gatt_read_access(uint16_t conn_handle, uint16_t attr_handle,
+				 struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+	static const char	val[] = "BT4-OK";
+
+	(void) conn_handle;
+	(void) attr_handle;
+	(void) arg;
+	if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+		return (os_mbuf_append(ctxt->om, val, sizeof(val) - 1) == 0
+				? 0 : BLE_ATT_ERR_INSUFFICIENT_RES);
+	}
+	return BLE_ATT_ERR_UNLIKELY;
+}
+
+/*  notify特性（0xABF2）のREAD：現在のカウンタ値（notifyペイロードと同形式）  */
+static int
+gatt_notify_access(uint16_t conn_handle, uint16_t attr_handle,
+				   struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+	uint32_t	v = g_notify_counter;
+	uint8_t		buf[4];
+
+	(void) conn_handle;
+	(void) attr_handle;
+	(void) arg;
+	if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+		buf[0] = (uint8_t) (v & 0xffU);
+		buf[1] = (uint8_t) ((v >> 8) & 0xffU);
+		buf[2] = (uint8_t) ((v >> 16) & 0xffU);
+		buf[3] = (uint8_t) ((v >> 24) & 0xffU);
+		return (os_mbuf_append(ctxt->om, buf, sizeof(buf)) == 0
+				? 0 : BLE_ATT_ERR_INSUFFICIENT_RES);
+	}
+	return BLE_ATT_ERR_UNLIKELY;
+}
+
+/*  write特性（0xABF3）：受信データをログ＋RTCマーカ＋putカウンタ加算  */
+static int
+gatt_write_access(uint16_t conn_handle, uint16_t attr_handle,
+				  struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+	uint16_t	len;
+	uint8_t		first = 0U;
+
+	(void) conn_handle;
+	(void) attr_handle;
+	(void) arg;
+	if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+		len = OS_MBUF_PKTLEN(ctxt->om);
+		if (len > 0U) {
+			(void) os_mbuf_copydata(ctxt->om, 0, 1, &first);
+		}
+		g_write_count++;
+		g_write_last = ((uint32_t) len << 8) | (uint32_t) first;
+		sil_wrw_mem(BLE_WRITE_MARK_ADDR,
+					0x77170000UL
+					| ((g_write_count & 0xffUL) << 8)
+					| ((uint32_t) first & 0xffUL));
+		syslog(LOG_NOTICE,
+			   "ble_host_smoke: GATT WRITE len=%d first=0x%02x count=%d",
+			   (int_t) len, (int_t) first, (int_t) g_write_count);
+		return 0;
+	}
+	return BLE_ATT_ERR_UNLIKELY;
+}
+
+static const struct ble_gatt_chr_def custom_chrs[] = {
+	{
+		.uuid = BLE_UUID16_DECLARE(0xABF1),
+		.access_cb = gatt_read_access,
+		.flags = BLE_GATT_CHR_F_READ,
+	},
+	{
+		.uuid = BLE_UUID16_DECLARE(0xABF2),
+		.access_cb = gatt_notify_access,
+		.val_handle = &g_notify_val_handle,
+		.flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+	},
+	{
+		.uuid = BLE_UUID16_DECLARE(0xABF3),
+		.access_cb = gatt_write_access,
+		.flags = BLE_GATT_CHR_F_WRITE,
+	},
+	{ 0 }	/* 終端 */
+};
+
+static const struct ble_gatt_svc_def custom_svcs[] = {
+	{
+		.type = BLE_GATT_SVC_TYPE_PRIMARY,
+		.uuid = BLE_UUID16_DECLARE(0xABF0),
+		.characteristics = custom_chrs,
+	},
+	{ 0 }	/* 終端 */
+};
+
+/*  subscribe中なら1回notifyを送る（1秒周期ループから呼ぶ．S3 bt5_notify_tick）  */
+static void
+notify_tick(void)
+{
+	struct os_mbuf	*om;
+	uint32_t		v;
+	uint8_t			buf[4];
+	int				rc;
+
+	if (g_notify_enabled == 0U || g_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+		return;
+	}
+	v = ++g_notify_counter;
+	buf[0] = (uint8_t) (v & 0xffU);
+	buf[1] = (uint8_t) ((v >> 8) & 0xffU);
+	buf[2] = (uint8_t) ((v >> 16) & 0xffU);
+	buf[3] = (uint8_t) ((v >> 24) & 0xffU);
+	om = ble_hs_mbuf_from_flat(buf, sizeof(buf));
+	if (om == NULL) {
+		g_notify_fail++;
+		g_notify_last_rc = -1;
+		syslog(LOG_ERROR, "ble_host_smoke: notify mbuf alloc fail (v=%u)",
+			   (unsigned) v);
+		return;
+	}
+	rc = ble_gatts_notify_custom(g_conn_handle, g_notify_val_handle, om);
+	if (rc == 0) {
+		g_notify_sent++;
+	}
+	else {
+		g_notify_fail++;
+		g_notify_last_rc = rc;
+		syslog(LOG_ERROR, "ble_host_smoke: notify rc=%d (v=%u)",
+			   (int_t) rc, (unsigned) v);
+	}
+}
 
 /*
  *  接続可能アドバタイズ（undirected connectable / general discoverable）を
@@ -193,7 +372,11 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 			   "ble_host_smoke: GAP CONNECT status=%d handle=%d",
 			   (int_t) event->connect.status,
 			   (int_t) event->connect.conn_handle);
-		if (event->connect.status != 0) {
+		if (event->connect.status == 0) {
+			/*  D-2d：notify送出先の接続ハンドルを記録  */
+			g_conn_handle = event->connect.conn_handle;
+		}
+		else {
 			/*  接続確立失敗＝再アドバタイズ  */
 			g_adv_active = 0U;
 			start_advertising();
@@ -202,6 +385,8 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 	case BLE_GAP_EVENT_DISCONNECT:
 		g_gap_disc_count++;
 		g_adv_active = 0U;
+		g_conn_handle = BLE_HS_CONN_HANDLE_NONE;	/* D-2d */
+		g_notify_enabled = 0U;						/* D-2d */
 		sil_wrw_mem(BLE_DISC_MARK_ADDR,
 					0xD15C0000UL
 					| (((uint32_t) event->disconnect.reason & 0xffUL) << 8)
@@ -215,6 +400,75 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 		syslog(LOG_NOTICE, "ble_host_smoke: GAP ADV_COMPLETE reason=%d",
 			   (int_t) event->adv_complete.reason);
 		break;
+	case BLE_GAP_EVENT_SUBSCRIBE:
+		/*  D-2d：0xABF2 の CCCD 変化を追跡（attr_handle==val_handle）．
+		    cur_notify をそのまま反映（on/off両対応）．S3 BT-5 と同一．  */
+		syslog(LOG_NOTICE,
+			   "ble_host_smoke: GAP SUBSCRIBE attr=%d cur_notify=%d reason=%d",
+			   (int_t) event->subscribe.attr_handle,
+			   (int_t) event->subscribe.cur_notify,
+			   (int_t) event->subscribe.reason);
+		if (event->subscribe.attr_handle == g_notify_val_handle) {
+			g_notify_enabled = (uint8_t) event->subscribe.cur_notify;
+		}
+		break;
+	case BLE_GAP_EVENT_MTU:
+		syslog(LOG_NOTICE, "ble_host_smoke: GAP MTU value=%d",
+			   (int_t) event->mtu.value);
+		break;
+#ifdef TOPPERS_ESP32C3_BT_SM
+	case BLE_GAP_EVENT_ENC_CHANGE:
+		/*  D-2d(SM)：SMPペアリング/暗号化の結果（status=0が成功）  */
+		/*  SMP診断マーカ（STORE2 0x58）：tag 0x5DE0＝ENC_CHANGE 到達，
+		    下位バイト=status．esptool dump-mem で serial 非開放のまま読める．  */
+		sil_wrw_mem((void *) 0x60008058UL,
+					0x5DE00000UL | ((uint32_t) event->enc_change.status & 0xffUL));
+		syslog(LOG_NOTICE, "ble_host_smoke: GAP ENC_CHANGE status=%d",
+			   (int_t) event->enc_change.status);
+		{
+			struct ble_gap_conn_desc	desc;
+
+			if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
+				syslog(LOG_NOTICE,
+					   "ble_host_smoke: sec_state enc=%d auth=%d bond=%d keysz=%d",
+					   (int_t) desc.sec_state.encrypted,
+					   (int_t) desc.sec_state.authenticated,
+					   (int_t) desc.sec_state.bonded,
+					   (int_t) desc.sec_state.key_size);
+			}
+		}
+		break;
+	case BLE_GAP_EVENT_PASSKEY_ACTION:
+		/*  IO=NoInputNoOutput（Just Works）では来ない想定．来たらログのみ  */
+		syslog(LOG_NOTICE, "ble_host_smoke: GAP PASSKEY_ACTION action=%d",
+			   (int_t) event->passkey.params.action);
+		break;
+	case BLE_GAP_EVENT_REPEAT_PAIRING:
+		/*  central側が既存bondを無視して再ペアリング＝旧bondを消しRETRY
+		    （stock bleprphと同型．S3 BT-5）  */
+		{
+			struct ble_gap_conn_desc	desc;
+
+			if (ble_gap_conn_find(event->repeat_pairing.conn_handle,
+								  &desc) == 0) {
+				ble_store_util_delete_peer(&desc.peer_id_addr);
+			}
+			syslog(LOG_NOTICE,
+				   "ble_host_smoke: GAP REPEAT_PAIRING -> deleted old bond, retry");
+		}
+		return BLE_GAP_REPEAT_PAIRING_RETRY;
+	case BLE_GAP_EVENT_PARING_COMPLETE:
+		/*  SMP手続き完了（status=0成功／BLE host error code）．enc_cb系
+		    （bond再利用のLTK再暗号化）でも発火する（S3 BT-5注記）  */
+		/*  SMP診断マーカ（STORE2 0x58）：tag 0x5DC0＝PAIRING_COMPLETE 到達，
+		    下位バイト=status（0=成功 / BLE_SM_ERR_* 系）．  */
+		sil_wrw_mem((void *) 0x60008058UL,
+					0x5DC00000UL
+					| ((uint32_t) event->pairing_complete.status & 0xffUL));
+		syslog(LOG_NOTICE, "ble_host_smoke: GAP PAIRING_COMPLETE status=%d",
+			   (int_t) event->pairing_complete.status);
+		break;
+#endif /* TOPPERS_ESP32C3_BT_SM */
 	default:
 		break;
 	}
@@ -387,13 +641,45 @@ main_task(EXINF exinf)
 	 *  行われる．したがって nimble_port_freertos_init より前に呼ぶ．
 	 *  esp_nimble_init（=ble_hs_init）済みが前提．
 	 */
+#ifdef TOPPERS_ESP32C3_BT_SM
+	/*
+	 *  D-2d(SM)：bond store を初期化してから SM パラメータを設定する
+	 *  （S3 BT-5 §5：store未初期化だと Pairing Request 直後に
+	 *  ble_sm_chk_store_overflow→ble_store_read が ENOTSUP で即 Pairing
+	 *  Failed になる．これが SM 即時失敗の真因だった）．  */
+	ble_store_config_init();
+
+	/*  Just Works / Secure Connections（S3 BT-5 と同一設定）．IO=NoIO・
+	    bonding=1・MITM=0・SC=1．鍵配布は ENC|ID（bond再利用＋IRK交換）．  */
+	ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
+	ble_hs_cfg.sm_bonding = 1;
+	ble_hs_cfg.sm_mitm = 0;
+	ble_hs_cfg.sm_sc = 1;
+	ble_hs_cfg.sm_our_key_dist =
+		BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+	ble_hs_cfg.sm_their_key_dist =
+		BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+#endif /* TOPPERS_ESP32C3_BT_SM */
+
 	ble_svc_gap_init();
 	ble_svc_gatt_init();
 	{
-		int	rc_name = ble_svc_gap_device_name_set(BLE_DEVICE_NAME);
-		if (rc_name != 0) {
+		int	rc;
+
+		/*  D-2d：自前サービス 0xABF0（0xABF1 READ／0xABF2 NOTIFY／
+		    0xABF3 WRITE）を登録．count_cfg でATT属性数を予約→add_svcs で
+		    キューへ積む（実登録は ble_hs_start→ble_gatts_start）．  */
+		rc = ble_gatts_count_cfg(custom_svcs);
+		if (rc == 0) {
+			rc = ble_gatts_add_svcs(custom_svcs);
+		}
+		if (rc != 0) {
+			syslog(LOG_ERROR, "ble_host_smoke: gatts svc reg rc=%d", (int_t) rc);
+		}
+		rc = ble_svc_gap_device_name_set(BLE_DEVICE_NAME);
+		if (rc != 0) {
 			syslog(LOG_ERROR, "ble_host_smoke: gap_device_name_set rc=%d",
-				   (int_t) rc_name);
+				   (int_t) rc);
 		}
 	}
 
@@ -424,7 +710,31 @@ main_task(EXINF exinf)
 			syslog(LOG_NOTICE, "ble_host_smoke: no SYNC yet (check on HW)");
 		}
 	}
-	syslog(LOG_NOTICE, "ble_host_smoke: done");
+	syslog(LOG_NOTICE, "ble_host_smoke: entering steady loop (notify tick)");
+
+	/*
+	 *  D-2d：定常ループ（1秒周期・アプリタスク文脈）．subscribe中のみ
+	 *  notify を1回送る（notify_tick）．常用イメージが advertising/接続/
+	 *  notify を無期限に続けられるよう main_task を返さず保持する
+	 *  （ユーザーがスマホで追試できるよう adv 継続の本番ビルドを残す）．
+	 *  ログは60秒毎のハートビートのみ（notify毎ログは抑制）．
+	 */
+	{
+		uint32_t	sec = 0U;
+
+		for (;;) {
+			notify_tick();
+			sec++;
+			if ((sec % 60U) == 0U) {
+				syslog(LOG_NOTICE,
+					   "ble_host_smoke: ss t=%us conn=%u disc=%u ntf=%u/%u wr=%u",
+					   (unsigned) sec, (unsigned) g_gap_conn_count,
+					   (unsigned) g_gap_disc_count, (unsigned) g_notify_sent,
+					   (unsigned) g_notify_fail, (unsigned) g_write_count);
+			}
+			(void) tslp_tsk(1000000);	/* 1s */
+		}
+	}
 }
 
 #ifdef HRT_PROBE

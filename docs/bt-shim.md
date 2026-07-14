@@ -2170,3 +2170,110 @@ storm probe OFF＝未使用）へパック．**単一 dump-mem** で採取：
   恒久対策（target 層でプロトタイプ補完）は別課題．
 - GAP service（`0x1800`）は BlueZ が内部処理で隠すため一覧に出ないことがある
   （`0x1801` と特性は OTA 取得＝ディスカバリ完了の物証）．
+
+## Phase D-2d：自前GATTサービス＋notify＋(SM) 実機（★read/write/notify達成，2026-07-14, board B `...C2:60`）
+
+D-2c（GATTディスカバリ開通）の上に，**自前GATTサービス（read/write/notify
+特性）＋周期notify**を実装し，BlueZ hci0（Intel AX210 `70:A8:D3:A1:22:45`）
+から over-the-air で read/write/notify を実証．さらに **SMP（ペアリング/暗号）**
+を S3 BT-5（`~/TOPPERS/esp32_s3/.steering/20260710-ble-bt5-security-notify/`）を
+«動作済みの正» として逐語移植して有効化した．
+
+### 実装（S3 BT-5 の C3 逐語移植＋write特性追加）
+自前サービス **0xABF0**（PRIMARY）に3特性（S3と同一 16bit UUID＋C3固有write）：
+
+| UUID | 種別 | 動作 |
+|---|---|---|
+| `0xABF1` | READ | 固定値 `"BT4-OK"`（`42 54 34 2d 4f 4b`．S3と同一） |
+| `0xABF2` | READ \| NOTIFY | 32bit LE カウンタ．subscribe(CCCD)中のみ 1秒周期で送出（`ble_gatts_notify_custom`） |
+| `0xABF3` | WRITE | 受信値をログ＋RTCマーカ（STORE2 0x58＝`0x7717<count><先頭byte>`）＋putカウンタ加算 |
+
+- `ble_gatts_count_cfg`/`ble_gatts_add_svcs` で登録（`ble_svc_gap/gatt_init` の後・
+  `nimble_port_freertos_init` の前．標準 `0x1800`/`0x1801` は維持）．
+- subscribe追跡＝`BLE_GAP_EVENT_SUBSCRIBE`（`attr_handle==val_handle` で
+  `g_notify_enabled=cur_notify`）．接続で `g_conn_handle` 記録，切断でクリア．
+- notify送出は **main_task の定常ループ（1秒周期・アプリタスク文脈）**．D-2cで
+  移植した保留リング（`esp_shim.c`）がクリティカルセクション内送出を救済するため
+  main_task 文脈からの `ble_gatts_notify_custom` 直接呼出しで安全（S3 §2.1と同型）．
+  従来 main_task は sync待ち後に return していたが，adv/接続/notify を無期限に
+  続けられるよう定常ループへ移行（60秒毎ハートビートのみログ）．
+
+### ビルド（`esp_bt.cmake`，可逆オプション）
+- **`option(ESP32C3_BT_SM ... ON)`** を新設．ON時：`MYNEWT_VAL_BLE_SM_LEGACY/SC=0`
+  の «蓋» を外し（`NIMBLE_BLE_SM=1`），SC=ECDH P-256 の crypto を vendored
+  **tinycrypt 必要5ソース**（`aes_encrypt.c cmac_mode.c ecc.c ecc_dh.c utils.c`）で
+  供給（mbedTLSは `CONFIG_ESPRESSIF_BLE` 非定義で不選択＝WiFi系TLSと分離維持）．
+  bond store は `ble_store_ram.c`（IDF文脈=`BLE_USED_IN_IDF=1` で空）ではなく
+  **`ble_store_config.c`（`BLE_STORE_CONFIG_PERSIST=0`＝RAM保持，NVS不使用）**へ
+  差替え（S3 §5.2 の真因対策）．app 側は `TOPPERS_ESP32C3_BT_SM` で SM 設定
+  （`ble_store_config_init()`＋`sm_io_cap=NO_IO`/`sm_bonding=1`/`sm_mitm=0`/
+  `sm_sc=1`/`sm_our_key_dist=sm_their_key_dist=ENC|ID`）を有効化．OFF に戻せば
+  D-2c 構成へ完全復帰（可逆）．
+- ビルド：SM入り `ble_host_smoke` = **RAM 93.48%**（320KB に収まる）・
+  IROM 5.85%/DROM 6.50%，リンク0エラー．SM関連シンボル（`ble_store_config_init`・
+  `uECC_make_key`・`ble_sm_alg_ecc_init`・`tc_aes_encrypt`・`ble_gatts_notify_custom`）
+  リンク確認．非回帰：`bt_smoke`（BT=ON/NIMBLE=OFF＝SMブロック不関与）RAM 84.95% 0エラー．
+
+### 検証結果（over-the-air，BlueZ hci0×board B `60:55:F9:57:C2:60`）
+DUTノードは再列挙で流動（本セッション ttyACM5→ttyACM8．操作直前に毎回MAC照合）．
+ライブ観測はホスト `bluetoothctl` のみ，オンターゲットは単発 `esptool dump-mem`．
+
+| 項目 | 結果 |
+|---|---|
+| GATTディスカバリ | 自前 `0xABF0`＋`0xABF1`/`0xABF2`(CCCD付)/`0xABF3`＋標準`0x1801` を OTA で列挙（`gatt.list-attributes`） |
+| **READ 0xABF1** | `42 54 34 2d 4f 4b` = **"BT4-OK"** ✓ |
+| **WRITE 0xABF3** | `write "0xa5 0x5a 0x03"` 成功 → DUT側 RTC STORE2(0x58)=**`0x771701a5`**（tag 0x7717・count=1・先頭byte=0xa5）＝受信を DUT で確認 ✓ |
+| **NOTIFY 0xABF2** | `notify on` で **カウンタ `01..09` 単調増加・1/秒・欠番ゼロ**，`notify off` で停止 ✓ |
+| 安定性 | 全 connect/pair サイクルを通じ DUT は無crash・無reset（STORE0 は sync値 `0x5ade51c0` を維持，`0x5E` reset マーカ非出現）．切断はすべて clean（disc reason `0x13`＝central起点） |
+
+### SM（ペアリング/暗号）＝★DUT側は暗号確立成功，BlueZ の Paired/Bonded 未成立
+- **DUT側 SM は暗号を確立する**：SMP診断RTCマーカ（`BLE_GAP_EVENT_ENC_CHANGE`→
+  STORE2 0x58 に `0x5DE0<status>`）が **`0x5DE00000`＝ENC_CHANGE status=0（暗号成立）**
+  を記録．＝peripheral の SMP/tinycrypt 経路（SC/ECDH/AES-CMAC）は機能している．
+- **ただし条件依存**：ENC_CHANGE が発火したのは **agent を単一 bluetoothctl
+  セッション内で保持（`agent NoInputNoOutput`＋`default-agent`＋`pair` を同一
+  セッションで連続）**した試行のみ．connect と pair を別セッションに分けると
+  agent が落ち（`Failed to register agent object`），ENC_CHANGE 非発火（0x58 に
+  0x5DE0 が書かれず旧 write マーカのまま）＝S3 §5.2 issue#3（central側 agent 状態）と
+  同型の «テスト環境» 依存を C3 でも観測．
+- **未達＝BlueZ の `Paired: yes`/`Bonded: yes` が立たない**：DUT が暗号成立
+  （ENC_CHANGE=0）しても bluetoothctl は `Paired: no` のまま，`pair` は
+  成功/失敗いずれの結果行も返さず（Pairing Request 送出後に完了イベント無し），
+  最終的に central 起点 clean 切断（DUT視点 reason `0x13`）．＝**鍵配布/bond
+  登録の最終段（BlueZ側 DBus 完了 or key distribution）が完了しない**．
+- 判定できたこと／できていないこと：peripheral SM の暗号確立は物証（ENC_CHANGE=0）
+  で確定．「BlueZ が bond を確定しない」機序は host/BlueZ側の未確定（root権限が
+  無く `btmon`/`journalctl -u bluetooth` は本PCで不可＝HCIレベルの直接観測不可）．
+  DUT側の PAIRING_COMPLETE status は ENC_CHANGE が同 reg を上書きするため本
+  マーカ設計では未分離＝別reg分離が次段の計測改善．
+
+### 計測・運用メモ
+- SMP診断マーカは `TOPPERS_ESP32C3_BT_SM` 下で STORE2(0x60008058) を共用：
+  write特性=`0x7717xxxx`／PAIRING_COMPLETE=`0x5DC0<status>`／ENC_CHANGE=`0x5DE0<status>`．
+  RTC domain は reflash（RTS/DTRチップreset）を跨いで残る＝旧値混同に注意
+  （本番 boot で 0x58 は初期化しないため，pair非実施なら旧 write マーカが残る）．
+- **serial開放＝DUTリセット**（[[c3-usbjtag-serial-open-resets-dut]]）のためライブは
+  ホスト `bluetoothctl` のみ．`bluetoothctl` は本PCで散発的に segfault/SIGTERM する
+  が，デバイスキャッシュ（`bluetoothctl devices`）と単発 `connect` は機能する．
+  `dump-mem` は `--after no-reset`（ブートローダ滞留）→ `--before usb-reset
+  --after watchdog-reset flash-id` で app 再起動，の D-2c 手順を踏襲．
+
+### 変更したファイル（D-2d）
+| ファイル | 内容 |
+|---|---|
+| `apps/ble_host_smoke/ble_host_smoke.c` | 自前サービス0xABF0（read/notify/write access_cb＋svc_def）／SUBSCRIBE追跡／`notify_tick`＋定常ループ／SM設定・store_init・ENC_CHANGE/PAIRING_COMPLETE/REPEAT_PAIRING（`TOPPERS_ESP32C3_BT_SM`ガード）／write・SMP RTCマーカ |
+| `asp3/target/esp32c3_espidf/esp_bt.cmake` | `option(ESP32C3_BT_SM ON)`：SM有効時に SM=0 蓋を外し・`TOPPERS_ESP32C3_BT_SM`定義・tinycrypt include＋5ソース・`ble_store_ram.c`→`ble_store_config.c` 差替（可逆） |
+
+### 実機状態（クローズ）
+board B（`60:55:F9:57:C2:60`）に **SM入り本番ビルドを書込み済み・advertising継続**
+（`ASP3-C3-BLE`）．暗号を要求する特性は無い（read/write/notifyは平文で動作）ため
+スマホ central は pairing 無しで GATT read/write/notify を追試できる．
+
+### 次の一手
+1. **BlueZ `Paired:yes` 未成立の切り分け**：PAIRING_COMPLETE と ENC_CHANGE を
+   別RTC regに分離（現状 0x58 共用で PAIRING_COMPLETE が見えない）＋鍵配布
+   （our/their key dist の実授受）を DUT側マーカで観測．root可PCなら `btmon`/
+   `journalctl -u bluetooth` で HCI/SMP を host側直接観測（本PCは sudo不可）．
+2. スマホ（Android/iOS）での pair/notify 追試（S3はAndroid/BlueZ完動・iOS再接続
+   MIC failure の既知制限＝steering §8-9）．
+3. 暗号必須特性（`BLE_GATT_CHR_F_READ_ENC` 等）で pairing を強制トリガする構成の検証．
