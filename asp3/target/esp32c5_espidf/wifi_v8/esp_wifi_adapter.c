@@ -76,8 +76,6 @@
 #include "hal/modem_lpcon_ll.h"
 #include "hal/modem_syscon_ll.h"
 #include "hal/pmu_ll.h"
-#include "esp_rom_sys.h"	/* esp_rom_delay_us（esp_shim_pvt_init用） */
-#include "target_syssvc.h"	/* target_fput_log（実施24：ocode_force機械確認の直接出力用） */
 
 /*
  *  リンク閉包で解決するesp-hal／blob側の関数（宣言のみ）
@@ -601,15 +599,11 @@ get_free_heap_size_wrapper(void)
 
 /*
  *		イベント（esp_event_shim.cの最小実装へ）
- *
- *  【実施10】esp_event_post の宣言は IDF v6.1 の esp_event.h
- *  （esp_wifi.h 経由で本TUに取り込まれる）が供給する
- *  （esp_err_t esp_event_post(esp_event_base_t, int32_t, const void *,
- *   size_t, TickType_t)）。以前の hal では esp_event.h がこの宣言を
- *  持たず本ファイルでローカル extern していたが，IDF では宣言が衝突
- *  （const void * 対 void *）するため削除し，esp_event.h の宣言を使う。
- *  実体は esp_event_shim.c（C3・独立TU）が提供する。
  */
+extern int esp_event_post(const char *event_base, int32_t event_id,
+						  void *event_data, size_t event_data_size,
+						  uint32_t ticks_to_wait);
+
 static int32_t
 event_post_wrapper(const char *event_base, int32_t event_id,
 				   void *event_data, size_t event_data_size,
@@ -712,505 +706,20 @@ wifi_reset_mac_wrapper(void)
  *  DR_REG_MODEM_SYSCON_BASEで確認済み．docs/c5-port-design.md §9）．
  *  C6の値をそのまま転記しないという方針に従い個別に確認した．
  */
-/*
- *  BLE実施03：実体はwifi/esp_shim.cへ移設した（WiFi/BT共有ファイルへ
- *  移すことでBT単体ビルドでもリンクできるようにするため．C6のBLE実施01
- *  と同じ理由・同じパターン）．中身は無変更．呼出し箇所
- *  （wifi_clock_enable_wrapper内）も無変更．
- */
-extern void esp_shim_modem_icg_init(void);
-
-/*
- *  PVT自動dbias調整＋チャージポンプの初期化（【実施21】候補Bの加算移植）
- *
- *  stock ESP-IDF v6.1はC5でCONFIG_ESP_ENABLE_PVT=y（Kconfig既定）であり，
- *  CPUクロックをPLL(160M/240M)へ切り替える度に
- *  esp_hw_support/port/esp32c5/rtc_clk.c → pmu_pvt.c の
- *  pvt_auto_dbias_init()＋charge_pump_init()＋pvt_func_enable(true)＋
- *  charge_pump_enable(true)を実行する（eFuse blk_version>=2が前提．
- *  DUT実測=3で成立）．ASP3 Direct BootはROM設定のクロックのまま起動する
- *  ためこの経路を一切通らず，実施21のJTAG A/B実測で
- *  「stock=PCR_PVT_MONITOR_CONF(0x600960B8) bit0=1・PVTブロック
- *  (0x60019000)設定済み＋動作中／ASP3=クロックゲート・全ゼロ」という
- *  再現差分（各2ブート）を確認した．PVTはHP系dbias（コア電圧バイアス）を
- *  動的補正する機構で，アナログ測定系（トーン自己ループバックのSAR ADC）
- *  への影響が仮説候補のため加算移植する（docs/c5-bringup.md実施21）．
- *
- *  実装はIDF v6.1 pmu_pvt.cの実行順を忠実に再現し，レジスタ値は
- *  同一個体のstock実測ダンプ（実施21）と照合済み：
- *    - PVT_DBIAS_CMD0/1/2の上位ビットはeFuse dbias_vol_gap由来の
- *      チップ固有値を含むが，同一個体のstock実測値(0x13024/0x13005/
- *      0x13427)を転記するため一致する（rtc.hのPVT_CMD0=0x24等の
- *      定数成分も照合済み）．
- *    - DELAY_LIMIT系(154/147/143)・PUMP_BITMAP(1<<22)・
- *      PUMP_CHANNEL_CODE(1<<27)・PVT_TARGET(0xffff)・CLK_DIV(1)も
- *      rtc.h定数とstock実測の両方に一致．
- *
- *  なお実施21のJTAG注入（+2.6s＝txcap探索窓の冒頭で同内容を書込み，
- *  PVT実動作を読み戻しで確認）では30秒観測で症状不変（done=0・
- *  生ADC=0）だった．本移植はstockと同じ「PHY較正開始前に有効」という
- *  タイミングでの因果検証（負なら候補B棄却の確定側の証拠）を兼ねる．
- */
 static void
-esp_shim_pvt_init(void)
+esp_shim_modem_icg_init(void)
 {
-	/*  eFuse blk_version（EFUSE_RD_MAC_SYS2_REG 0x600B484C：
-	 *  major=bit[12:11]・minor=bit[10:8]，blk_version=major*100+minor）  */
-	uint32_t	sys2 = *(volatile uint32_t *)0x600B484CU;
-	uint32_t	blk_version = ((sys2 >> 11) & 0x3U) * 100U + ((sys2 >> 8) & 0x7U);
-	volatile uint32_t	*pcr_pvt_conf = (volatile uint32_t *)0x600960B8U;	/* PCR_PVT_MONITOR_CONF */
-	volatile uint32_t	*pcr_pvt_func = (volatile uint32_t *)0x600960BCU;	/* PCR_PVT_MONITOR_FUNC_CLK_CONF */
-	volatile uint32_t	*pmu_hp_reg0 = (volatile uint32_t *)0x600B0028U;	/* PMU_HP_ACTIVE_HP_REGULATOR0 */
+	pmu_dev_t			*pmu = (pmu_dev_t *)0x600B0000U;
+	modem_lpcon_dev_t	*lpcon = (modem_lpcon_dev_t *)0x600AF000U;
+	modem_syscon_dev_t	*syscon = (modem_syscon_dev_t *)0x600A9C00U;	/* C6の0x600A9800から+0x400移動 */
+	uint32_t			code_bit = 1U << 2;	/* BIT(PMU_HP_ICG_MODEM_CODE_ACTIVE=2) */
 
-	if (blk_version < 2U) {
-		return;		/* stockと同条件：PVT未サポートeFuse */
-	}
-
-	/*  --- pvt_auto_dbias_init() 相当 ---  */
-	*pcr_pvt_conf |= (1U << 1);					/* RST_EN（リセットパルス） */
-	*pcr_pvt_conf &= ~(1U << 1);
-	*pcr_pvt_conf |= (1U << 0);					/* CLK_EN */
-	*pcr_pvt_func |= (1U << 22);				/* FUNC_CLK_EN */
-	*(volatile uint32_t *)0x60019064U = 0x7fff8000U;	/* DBIAS_TIMER：EN=0・TARGET=0xffff */
-	esp_rom_delay_us(1U);
-	*(volatile uint32_t *)0x60019034U = 0x42960400U;	/* DBIAS_CHANNEL_SEL0（monitor cell選択） */
-	*(volatile uint32_t *)0x60019038U = 0x80000000U;	/* DBIAS_CHANNEL_SEL1 */
-	*(volatile uint32_t *)0x6001903CU = 0x00013e80U;	/* CHANNEL0_SEL（フィルタ閾値） */
-	*(volatile uint32_t *)0x60019040U = 0x00013e80U;	/* CHANNEL1_SEL */
-	*(volatile uint32_t *)0x60019044U = 0x00010000U;	/* CHANNEL2_SEL */
-	*(volatile uint32_t *)0x60019050U = 0x00013024U;	/* DBIAS_CMD0（調整特性＋lp/hp gap） */
-	*(volatile uint32_t *)0x60019054U = 0x00013005U;	/* DBIAS_CMD1 */
-	*(volatile uint32_t *)0x60019058U = 0x00013427U;	/* DBIAS_CMD2 */
-	*pcr_pvt_func = (*pcr_pvt_func & ~0xFU) | 0x1U;		/* FUNC_CLK_DIV_NUM=1 */
-	*pcr_pvt_func |= (1U << 20);				/* FUNC_CLK_SEL */
-	*(volatile uint32_t *)0x600190D8U = 154U << 2;	/* SITE2_UNIT0_VT1：電圧高判定閾値 */
-	*(volatile uint32_t *)0x600190DCU = 147U << 2;	/* SITE2_UNIT1_VT1：電圧低判定閾値 */
-	*(volatile uint32_t *)0x600190E0U = 143U << 2;	/* SITE2_UNIT2_VT1：チャージポンプ閾値 */
-
-	/*  --- charge_pump_init() 相当 ---  */
-	*(volatile uint32_t *)0x6001902CU = 0x08000000U;	/* PMUP_CHANNEL_CFG：code0=1 */
-	*(volatile uint32_t *)0x60019014U = 1U << 22;		/* PMUP_BITMAP_LOW0 */
-	/*  PMUP_DRV_CFG：PUMP_DRV0=0（フィールドS=27）＝書込み不要  */
-
-	/*  --- pvt_func_enable(true) 相当 ---  */
-	*pmu_hp_reg0 |= (1U << 3);					/* DIG_DBIAS_INIT（較正開始） */
-	*pcr_pvt_func |= (1U << 22);
-	*pcr_pvt_conf |= (1U << 0);
-	*(volatile uint32_t *)0x60019030U |= (1U << 8);		/* CLK_CFG：MONITOR_CLK_PVT_EN */
-	*(volatile uint32_t *)0x600190D8U |= (1U << 0);		/* SITE2_UNIT0_VT1：MONITOR_EN */
-	esp_rom_delay_us(10U);
-	*pmu_hp_reg0 &= ~(1U << 14);				/* DIG_REGULATOR0_DBIAS_SEL=0（dbias制御をPVTへ移譲） */
-	*pmu_hp_reg0 &= ~(1U << 3);					/* DIG_DBIAS_INIT解除 */
-	*(volatile uint32_t *)0x60019064U |= (1U << 31);	/* DBIAS_TIMER：EN（自動dbias開始） */
-	esp_rom_delay_us(50U);
-
-	/*  --- charge_pump_enable(true) 相当 ---  */
-	*(volatile uint32_t *)0x60019028U |= (1U << 9);		/* PMUP_DRV_CFG：PUMP_EN */
-
-	/*  pmu_init()はPVT有効化後に1msの安定待ちを置く  */
-	esp_rom_delay_us(1000U);
-}
-
-/*
- *  PMU HP_ACTIVEバイアス生成器起動＋WIFI電源ドメインのforce→FSM委譲
- *  （【実施22】決定実験Cのbefore-PHY移植）
- *
- *  実施22のJTAG A/B実測（PMU HP_ACTIVEバンク5レジスタの4-way比較，
- *  stock×2・ASP3×2）で，PMU_HP_ACTIVE_DIG_POWER/HP_REGULATOR1は差分なし，
- *  HP_REGULATOR0の差分は既に実施21でPVT/dbias軸として因果棄却済みだが，
- *  残り2件が実施11〜21のどのラウンドでも一度も実測されていなかった
- *  新規差分と判明した：
- *    - PMU_HP_ACTIVE_BIAS（0x600B0018）：stock=0x02000000（XPD_BIAS=1，
- *      HP_ACTIVEモードのアナログバイアス生成器を明示起動）／
- *      ASP3=0x00000000（POR既定のまま＝未起動）。
- *      hal/components/esp_hw_support/port/esp32c5/pmu_param.c:212の
- *      PMU_HP_ACTIVE_ANALOG_CONFIG_DEFAULT()で`.bias.xpd_bias = 1`と
- *      確定．stockのpmu_hp_system_init(PMU_MODE_HP_ACTIVE, ...)が
- *      設定する．ASP3はこの呼出し自体がゼロ行．
- *    - PMU_POWER_PD_HPWIFI_CNTL（0x600B0108）：stock=0x00000000
- *      （FORCE_PU/FORCE_NO_RESET/FORCE_NO_ISO等の強制ビットを全解除し
- *      HW電源シーケンサFSMへ委譲）／ASP3=0x0000001C（POR既定のまま＝
- *      FORCE_PU=1・FORCE_NO_RESET=1・FORCE_NO_ISO=1で静的固定）。
- *      hal/.../pmu_init.c:145-152のpmu_power_domain_force_default()相当が
- *      4電源ドメイン（HPWIFI含む）を順に「force解除→FSM委譲」させる．
- *      ASP3はこの遷移を一度も経験していない＝WIFI電源ドメインが
- *      POR以来ずっと静的forceのまま（動的な電源シーケンス・内部リセット
- *      パルスを一度も経ていない可能性）．
- *
- *  両レジスタともプレーンなR/Wビットフィールドでトリガ/ラッチ機構は
- *  無い（pmu_ll.hのpmu_ll_hp_set_bias_xpd/pmu_ll_hp_set_power_force_*系に
- *  update系呼出しは存在しない）．
- *
- *  実施22はまずASP3がPHY較正の無限リトライループに入った後（mid-hang）
- *  にJTAGで同値を注入し，読み戻しで注入成立を確認した上で30秒観測したが
- *  症状不変だった（組合せ・単独とも）．ただしXPD_BIASはアナログバイアス
- *  基準点そのものであり，較正チェーンが起動時に一度だけ基準点を
- *  ラッチする設計であれば mid-hang注入は原理的に無力（実施21候補Aと
- *  同型の限界，advisorレビュー指摘）．本移植はstockと同じ
- *  「PHY較正開始前」タイミングでの因果検証を兼ねる．
- */
-static void
-esp_shim_hpactive_bias_init(void)
-{
-	volatile uint32_t	*pmu_bias = (volatile uint32_t *)0x600B0018U;	/* PMU_HP_ACTIVE_BIAS */
-	volatile uint32_t	*pmu_pd_hpwifi = (volatile uint32_t *)0x600B0108U;	/* PMU_POWER_PD_HPWIFI_CNTL */
-
-	*pmu_bias = 0x02000000U;		/* XPD_BIAS=1（bit25）：HP_ACTIVEアナログバイアス生成器起動 */
-	*pmu_pd_hpwifi = 0x00000000U;	/* force全解除：WIFI電源ドメインをHW FSM委譲へ */
-}
-
-/*
- *  【実施23】残余(1)：PMU_HP_ACTIVE_HP_CK_POWER（BBPLL/BB-I2Cアナログ電源）
- *
- *  実施21/22でHP_ACTIVEバンクの一部（BIAS/HP_REGULATOR0/PD_HPWIFI_CNTL）を
- *  比較・移植済みだったが，同バンクの`HP_CK_POWER`（`0x600B0014`，
- *  `pmu_hp_system_init()`のclk_power.val書込み先，`pmu_hp_clk_power_reg_t`
- *  ＝`xpd_bb_i2c`(bit28)・`xpd_bbpll_i2c`(bit29)・`xpd_bbpll`(bit30)）は
- *  実施11〜22のどのラウンドでも実測されていなかった．
- *
- *  実施23のJTAG A/B実測（同一個体，stock×2・ASP3×2）：
- *    stock=0x70000000（xpd_bb_i2c=1・xpd_bbpll_i2c=1・xpd_bbpll=1，
- *    `pmu_param.c`の`PMU_HP_ACTIVE_POWER_CONFIG_DEFAULT().clk_power`と一致）／
- *    ASP3=0x00000000（POR既定のまま＝BBPLL・BB I2Cのアナログ電源が
- *    一度も明示起動されていない）。
- *
- *  BBPLL（ベースバンドPLL）とBB I2C（ベースバンド内部レジスタバス）は
- *  トーン自己ループバック測定が使うBB内部ADC（`MODEM0+0x81C..0x828`）と
- *  同じアナログ/ミックスシグナル領域に属し，実施11〜22で見つかった
- *  どの差分よりもRF/BBアナログ機序への近さが高い．HP_ACTIVEバンクは
- *  Direct Boot開始以来ずっとこのモードのまま（light-sleep等のモード遷移が
- *  一度もない）ため，このバンクの値は現在も生きて反映されている
- *  （HP_MODEM/HP_SLEEPバンクとは異なり「休止中の設定」ではない）。
- *
- *  プレーンなR/Wビットフィールドでトリガ/ラッチ機構は無い
- *  （`pmu_ll_hp_set_clk_power()`はimm-update呼出しを伴わない）。
- *  最優先候補として単体で先に因果検証する（他の残余レジスタ群は
- *  実施23の次段でまとめて移植・検証）．
- */
-static void
-esp_shim_hpactive_ckpower_init(void)
-{
-	volatile uint32_t	*pmu_ck_power = (volatile uint32_t *)0x600B0014U;	/* PMU_HP_ACTIVE_HP_CK_POWER */
-
-	*pmu_ck_power = 0x70000000U;	/* xpd_bb_i2c=1(bit28)/xpd_bbpll_i2c=1(bit29)/xpd_bbpll=1(bit30) */
-}
-
-/*
- *  【実施23】残余(2)：pmu_hp_system_init()のHP_ACTIVEバンクに残る
- *  低確度候補群＋pmu_power_domain_force_default()の未移植3ドメインを
- *  まとめて移植する（実施23のJTAG全域ダンプで新規に見つかったが，
- *  いずれも「現在到達しないモード遷移専用の設定」または「実施22で
- *  棄却済みPD_HPWIFIと同型のforce解除（他ドメイン）」であり，
- *  個別に単体因果検証するほどの機序的優先度は無いと判断し1件として
- *  まとめる——残余(1)のCK_POWERのみ単体検証済み）：
- *
- *    - `PMU_HP_ACTIVE_SYSCLK`（`0x600B0024`）：stock=0x08000000
- *      （icg_sysclk_en=1のみ）／ASP3=0x00000000。システムクロックICG
- *      バイパスの有効化ビットで，実施13のicg_modemと同系統だが対象が
- *      sysclk全体のICGである点が異なる。
- *    - `PMU_HP_ACTIVE_BACKUP`/`BACKUP_CLK`（`0x600B001C`/`0x600B0020`）：
- *      HP_SLEEP→ACTIVE・HP_MODEM→ACTIVEのregdma retention設定。
- *      ASP3はHP_SLEEP/HP_MODEMへ一度も遷移しない（light-sleep等の
- *      電源管理を一切呼ばない）ため，この設定が現在参照される経路は
- *      無いと考えられる（機序的に最も疑わしくない）。
- *    - `PMU_POWER_PD_TOP_CNTL`/`PD_HPAON_CNTL`/`PD_HPCPU_CNTL`
- *      （`0xf8`/`0xfc`/`0x100`）：`pmu_power_domain_force_default()`が
- *      force解除する4ドメイン（実施22はWIFIのみ移植・棄却）のうち
- *      残り3ドメイン。stock=0x00000000（force全解除）／ASP3=0x0000001c
- *      （POR既定のまま静的force）。
- *    - `PMU_POWER_PD_LPPERI_CNTL`（`0x10c`）：同関数のLP側force解除。
- *      stock=0x00000000／ASP3=0x0000001c。
- *
- *  いずれもプレーンR/Wでトリガ/ラッチ機構は無い。値は同一個体の
- *  stock実測（実施23）をそのまま転記する。
- */
-static void
-esp_shim_hpactive_residual2_init(void)
-{
-	volatile uint32_t	*pmu_sysclk    = (volatile uint32_t *)0x600B0024U;	/* PMU_HP_ACTIVE_SYSCLK */
-	volatile uint32_t	*pmu_backup    = (volatile uint32_t *)0x600B001CU;	/* PMU_HP_ACTIVE_BACKUP */
-	volatile uint32_t	*pmu_backupclk = (volatile uint32_t *)0x600B0020U;	/* PMU_HP_ACTIVE_BACKUP_CLK */
-#if 0	/* 【実施24】UART直接出力（logtask非依存，target_fput_log経由の
-	 * wifi_diag_live）でこのブロックをA/B検証した：書込み成立を機械確認
-	 * （pd_top/hpaon/hpcpu/lpperi=0x00000000，stockと一致）した上で
-	 * ≥5独立ブート（RTSクリーンリセット×2＋同一セッション内WDTループ再現×3）
-	 * とも症状不変（raw_adc=0・done16=0）・WDTリブート周期（約3.5秒）も
-	 * 不変——UART経由では「悪化」は一切観測されなかった。
-	 * しかし本ラウンドはJTAGが使用不能な環境だったため，実施23が実際に
-	 * 検出した問題（**JTAG単発halt捕捉法がPHYハングループへ到達できず
-	 * dispatcher_1近傍に着地する**という，JTAG介入時にのみ現れる現象）を
-	 * 直接再検証することはできていない。advisorレビュー指摘のとおり，
-	 * UART計測とJTAG halt捕捉は異なる観測条件であり，UART側が無事だからと
-	 * いってJTAG側の問題が解消したとは言えない。次回JTAG環境での作業を
-	 * 妨げない（実施23の主要な調査ツールである単発halt捕捉法を壊さない）
-	 * ことを優先し，**因果棄却は確定したが，安全側に倒してrevertを維持する**。
-	 * 【実施23 bisection】PD_TOP/HPAON/HPCPU/LPPERI force解除を有効にした
-	 * ビルドでJTAG単発halt(+9.9/12/13s)が11連続でPHYハングループ
-	 * （0x42026000-0x4202a000）に到達できず，毎回dispatcher_1近傍
-	 * （0x420217xx-0x420218xx）に着地する新規の停滞パターンを確認した
-	 * （それ以前のCK_POWER単体ビルドでは同方式で確実に到達できていた）。
-	 * 「悪化したら即revert」の方針に従い，最も疑わしい（CPU/TOP電源
-	 * ドメインという影響範囲の大きさから）本ブロックを一時的に無効化し，
-	 * 単独のビセクションでこの停滞の原因かどうかを切り分ける
-	 * （docs/c5-bringup.md 実施23参照）。因果確認までは残置し，コードは
-	 * ツリーからは削除しない。 */
-	volatile uint32_t	*pmu_pd_top    = (volatile uint32_t *)0x600B00F8U;	/* PMU_POWER_PD_TOP_CNTL */
-	volatile uint32_t	*pmu_pd_hpaon  = (volatile uint32_t *)0x600B00FCU;	/* PMU_POWER_PD_HPAON_CNTL */
-	volatile uint32_t	*pmu_pd_hpcpu  = (volatile uint32_t *)0x600B0100U;	/* PMU_POWER_PD_HPCPU_CNTL */
-	volatile uint32_t	*pmu_pd_lpperi = (volatile uint32_t *)0x600B010CU;	/* PMU_POWER_PD_LPPERI_CNTL */
-#endif
-
-	*pmu_sysclk    = 0x08000000U;	/* icg_sysclk_en=1(bit27) */
-	*pmu_backup    = 0x010200a0U;	/* stock実測値（実施23）をそのまま転記 */
-	*pmu_backupclk = 0xffffffffU;	/* backup_clk：全ビットicgバイパス（stock/デフォルトと同一） */
-#if 0	/* 実施24：上のブロックと合わせて無効化のまま維持（詳細は上記コメント） */
-	*pmu_pd_top    = 0x00000000U;	/* force全解除 */
-	*pmu_pd_hpaon  = 0x00000000U;	/* force全解除 */
-	*pmu_pd_hpcpu  = 0x00000000U;	/* force全解除 */
-	*pmu_pd_lpperi = 0x00000000U;	/* force全解除 */
-#endif
-}
-
-/*
- *  【実施23】pmu_lp_system_init()の未移植分（LP_ACTIVE/LP_SLEEPバンク）
- *
- *  実施23のJTAG全域ダンプで新規に見つかった差分：
- *    - `PMU_HP_SLEEP_LP_REGULATOR0`（`0x600B009C`＝`lp_sys[LP_ACTIVE]
- *      .regulator0`，LPドメイン電圧レギュレータのdbias/xpd）：
- *      stock=0xe8400000／ASP3=0xc6600000。LP_ACTIVEは（ASP3がlight-sleep等の
- *      電源管理を一切呼ばないため）Direct Boot開始以来ずっと「現在有効な」
- *      バンクであり，実施21のHP側dbias（PVT）軸と同型だが対象がLPドメイン
- *      という点で新規（実施21候補Bはこの軸を棄却済みだがLP側は未検証）。
- *    - `PMU_LP_SLEEP_LP_REGULATOR0`/`XTAL`/`LP_CK_POWER`/`BIAS`
- *      （`0x600B00B4`/`0xBC`/`0xC4`/`0xC8`）：LP_SLEEPバンク（ASP3が
- *      一度も遷移しないモード専用の設定）。HP_MODEM/HP_SLEEPバンクと
- *      同種の理由で現在は不活性と考えられるが，`pmu_lp_system_init()`の
- *      パリティとして移植する。
- *
- *  ★注意：実施23のPD_TOP/HPAON/HPCPU force解除でJTAG単発halt法が
- *  ブートリーチャビリティを悪化させた前例があるため，本関数もCPU/TOP等の
- *  広域ドメイン制御を含まない（LPドメインのレギュレータ/クロック電源の
- *  プレーンR/Wのみ）ことを確認した上で適用する。
- */
-static void
-esp_shim_lpsystem_init(void)
-{
-	volatile uint32_t	*lp_active_reg0 = (volatile uint32_t *)0x600B009CU;	/* LP_ACTIVE.REGULATOR0 */
-	volatile uint32_t	*lp_sleep_reg0  = (volatile uint32_t *)0x600B00B4U;	/* LP_SLEEP.REGULATOR0 */
-	volatile uint32_t	*lp_sleep_xtal  = (volatile uint32_t *)0x600B00BCU;	/* LP_SLEEP.XTAL */
-	volatile uint32_t	*lp_sleep_ck    = (volatile uint32_t *)0x600B00C4U;	/* LP_SLEEP.CK_POWER */
-	volatile uint32_t	*lp_sleep_bias  = (volatile uint32_t *)0x600B00C8U;	/* LP_SLEEP.BIAS */
-
-	*lp_active_reg0 = 0xe8400000U;	/* stock実測値（実施23）をそのまま転記 */
-	*lp_sleep_reg0  = 0x60400000U;
-	*lp_sleep_xtal  = 0x00000000U;
-	*lp_sleep_ck    = 0x00000000U;
-	*lp_sleep_bias  = 0xc0000000U;
-}
-
-/*
- *  【実施24】手動regi2cリプレイ（実施14で確立したI2C_ANA_MST直叩き手法）の
- *  shim関数化。hal/esp_rom_hp_regi2c_esp32c5.c（regi2c ROMパッチ，読取り専用で
- *  参照）と同一のプロトコルをASP3側で独立実装し，リンク構造を変えずに
- *  regi2cトランザクションを発行する。I2C_ULP(0x61=ULP_CAL)ブロック専用
- *  （regi2c_enable_block()のULP_CAL分岐のみを再現。他ブロックは未対応）。
- *
- *  プロトコル（I2C_ANA_MST base=0x600AF800，実施14/23で確認済み）：
- *    ANA_CONF2(+0x20) bit10 = ULP_CAL_MST_SEL → i2c_sel（0/1のどちらの
- *    I2C{0,1}_CTRL_REGを使うか）を決める。ANA_CONF1(+0x1C)に
- *    RD_MASK（~BIT(8)&0xFFFFFF）を書く。I2C{0,1}_CTRL_REG(+0x0/+0x4)：
- *    bit25=busy，bits15:8=reg_addr，bits7:0=block/slave_id，
- *    bit24=WR_CNTL（1=write），bits23:16=data。
- */
-#define ESP_SHIM_I2C_ANA_MST_BASE	0x600AF800U
-#define ESP_SHIM_I2C_ANA_MST_I2C0_CTRL	(ESP_SHIM_I2C_ANA_MST_BASE + 0x00U)
-#define ESP_SHIM_I2C_ANA_MST_I2C1_CTRL	(ESP_SHIM_I2C_ANA_MST_BASE + 0x04U)
-#define ESP_SHIM_I2C_ANA_MST_ANA_CONF1	(ESP_SHIM_I2C_ANA_MST_BASE + 0x1CU)
-#define ESP_SHIM_I2C_ANA_MST_ANA_CONF2	(ESP_SHIM_I2C_ANA_MST_BASE + 0x20U)
-#define ESP_SHIM_REGI2C_BUSY_BIT	(1UL << 25)
-#define ESP_SHIM_REGI2C_ULP_CAL_MST_SEL	(1UL << 10)
-
-static uint32_t
-esp_shim_regi2c_ctrl_addr(uint8_t block)
-{
-	uint32_t	conf2 = *(volatile uint32_t *)ESP_SHIM_I2C_ANA_MST_ANA_CONF2;
-	uint32_t	mst_sel_bit = (block == 0x61U) ? ESP_SHIM_REGI2C_ULP_CAL_MST_SEL : 0UL;
-	uint32_t	i2c_sel_raw = (conf2 & mst_sel_bit) ? 1U : 0U;
-
-	/*  RD_MASK書込み（regi2c_enable_block()相当，I2C_ULPのみ対応）  */
-	*(volatile uint32_t *)ESP_SHIM_I2C_ANA_MST_ANA_CONF1 =
-		(~(1UL << 8)) & 0x00FFFFFFU;
-
-	return((i2c_sel_raw != 0U) ? ESP_SHIM_I2C_ANA_MST_I2C0_CTRL
-								: ESP_SHIM_I2C_ANA_MST_I2C1_CTRL);
-}
-
-static uint8_t
-esp_shim_regi2c_read(uint8_t block, uint8_t reg_add)
-{
-	uint32_t	ctrl = esp_shim_regi2c_ctrl_addr(block);
-	uint32_t	temp;
-
-	while ((*(volatile uint32_t *)ctrl & ESP_SHIM_REGI2C_BUSY_BIT) != 0U) {
-		;
-	}
-	temp = ((uint32_t)block & 0xFFU) | (((uint32_t)reg_add & 0xFFU) << 8);
-	*(volatile uint32_t *)ctrl = temp;
-	while ((*(volatile uint32_t *)ctrl & ESP_SHIM_REGI2C_BUSY_BIT) != 0U) {
-		;
-	}
-	return((uint8_t)((*(volatile uint32_t *)ctrl >> 16) & 0xFFU));
-}
-
-static void
-esp_shim_regi2c_write_mask(uint8_t block, uint8_t reg_add, uint8_t msb,
-							 uint8_t lsb, uint8_t data)
-{
-	uint32_t	ctrl = esp_shim_regi2c_ctrl_addr(block);
-	uint32_t	temp;
-
-	while ((*(volatile uint32_t *)ctrl & ESP_SHIM_REGI2C_BUSY_BIT) != 0U) {
-		;
-	}
-	temp = ((uint32_t)block & 0xFFU) | (((uint32_t)reg_add & 0xFFU) << 8);
-	*(volatile uint32_t *)ctrl = temp;
-	while ((*(volatile uint32_t *)ctrl & ESP_SHIM_REGI2C_BUSY_BIT) != 0U) {
-		;
-	}
-	temp = (*(volatile uint32_t *)ctrl >> 16) & 0xFFU;
-
-	temp &= (uint32_t)((~(0xFFFFFFFFUL << lsb)) | (0xFFFFFFFFUL << ((uint32_t)msb + 1U)));
-	temp |= (((uint32_t)data & (~(0xFFFFFFFFUL << ((uint32_t)msb - lsb + 1U)))) << lsb);
-
-	temp = ((uint32_t)block & 0xFFU) | (((uint32_t)reg_add & 0xFFU) << 8)
-			| (1UL << 24) | ((temp & 0xFFU) << 16);
-	*(volatile uint32_t *)ctrl = temp;
-	while ((*(volatile uint32_t *)ctrl & ESP_SHIM_REGI2C_BUSY_BIT) != 0U) {
-		;
-	}
-}
-
-/*
- *  【実施24】esp_ocode_calib_init()（bandgap o-codeトリム）のbefore-PHY移植。
- *
- *  実施23で差分自体を確定済み（stock=eFuse値でIR_FORCE_CODE=1を強制／
- *  ASP3=pmu_init()自体を呼ばないためIR_FORCE_CODE=0のままHW自動較正）。
- *  実施23はROM regi2cパッチ（hal/esp_rom_hp_regi2c_esp32c5.c）をASP3の
- *  CMakeへ追加リンクする構造変更のコストを理由に因果検証を見送っていたが，
- *  本ラウンドでは上記esp_shim_regi2c_*関数（実施14の手動リプレイの
- *  shim化）でリンク構造を変えずに同じレジスタ操作を行う。
- *
- *  stockの`set_ocode_by_efuse(1)`（hal/esp_hw_support/port/esp32c5/
- *  ocode_init.c，読取り専用で参照）を忠実に再現：
- *    1. eFuse RD_SYS_PART1_DATA4（0x600B486C）bit[16:9]からocode値を読む。
- *    2. block=I2C_ULP(0x61) reg=6(EXT_CODE，bits7:0)にocode値を書く。
- *    3. block=I2C_ULP reg=5(IR_FORCE_CODE，bit6)に1を書く。
- *  適用条件（stockと同じ，esp_ocode_calib_init()より）：
- *  chip_revision==1&&blk_version>=1，または chip_revision>=100&&
- *  blk_version>=2（本DUTはchip_revision=100・blk_version=3で成立，
- *  実施21/23のeFuse実測で確認済み）。不成立ならstockはcalibrate_ocode()
- *  （HW自己較正）を使うため何もしない（ASP3は元々この経路＝POR既定の
- *  ままであり，この分岐は現状維持が正しい）。
- *
- *  書込み成立の確認はregi2c読み戻しを直接ポーリング出力
- *  （`target_fput_log`）でUART越しに記録する（TOPPERS_ESP32C5_WIFI_REGI2C_TRACE
- *  ガード）。★実施24の実測でsyslog()経由の周期出力（wifi_diag_cyclic_handler，
- *  wifi_scan.c）はPHY較正の無限リトライループに入ると出力が完全に止まる
- *  （logtaskがスケジューリングされなくなると推定）ことが判明したため，
- *  ここでもtarget_fput_log直呼び（カーネルバナー同様，タスク
- *  スケジューリングに非依存で確実に届く）を使う。本関数はesp_wifi_init()の
- *  ごく早い段階（PHYハングループへ到達する前）で1回だけ実行されるため
- *  タイミング的には元々syslogでも間に合っていたはずだが，念のため
- *  直接出力に統一する。
- */
-static void
-esp_shim_diag_fput_str(const char *s)
-{
-	while (*s != '\0') {
-		target_fput_log(*s);
-		s++;
-	}
-}
-
-static void
-esp_shim_diag_fput_hex8(uint8_t v)
-{
-	static const char	hexdig[] = "0123456789abcdef";
-
-	target_fput_log(hexdig[(v >> 4) & 0xFU]);
-	target_fput_log(hexdig[v & 0xFU]);
-}
-
-static void
-esp_shim_diag_fput_dec(uint32_t v)
-{
-	char	buf[10];
-	int_t	i = 0;
-
-	if (v == 0U) {
-		target_fput_log('0');
-		return;
-	}
-	while (v != 0U && i < 10) {
-		buf[i++] = (char)('0' + (v % 10U));
-		v /= 10U;
-	}
-	while (i > 0) {
-		target_fput_log(buf[--i]);
-	}
-}
-
-static void
-esp_shim_ocode_force_init(void)
-{
-	uint32_t	sys2 = *(volatile uint32_t *)0x600B484CU;	/* EFUSE_RD_MAC_SYS2_REG */
-	uint32_t	wafer_major = (sys2 >> 4) & 0x3U;
-	uint32_t	wafer_minor = sys2 & 0xFU;
-	uint32_t	chip_revision = wafer_major * 100U + wafer_minor;
-	uint32_t	blk_major = (sys2 >> 11) & 0x3U;
-	uint32_t	blk_minor = (sys2 >> 8) & 0x7U;
-	uint32_t	blk_version = blk_major * 100U + blk_minor;
-	uint32_t	data4;
-	uint32_t	ocode;
-	uint8_t		rb_ext_code;
-	uint8_t		rb_force;
-
-	if (!((chip_revision == 1U && blk_version >= 1U) ||
-		  (chip_revision >= 100U && blk_version >= 2U))) {
-#ifdef TOPPERS_ESP32C5_WIFI_REGI2C_TRACE
-		esp_shim_diag_fput_str("\r\nocode_force: skip chip_rev=");
-		esp_shim_diag_fput_dec(chip_revision);
-		esp_shim_diag_fput_str(" blk_ver=");
-		esp_shim_diag_fput_dec(blk_version);
-		esp_shim_diag_fput_str(" (calib_ocode branch)\r\n");
-#endif /* TOPPERS_ESP32C5_WIFI_REGI2C_TRACE */
-		return;
-	}
-
-	data4 = *(volatile uint32_t *)0x600B486CU;	/* EFUSE_RD_SYS_PART1_DATA4_REG */
-	ocode = (data4 >> 9) & 0xFFU;
-
-	esp_shim_regi2c_write_mask(0x61U, 6U, 7U, 0U, (uint8_t)ocode);	/* I2C_ULP_EXT_CODE */
-	esp_shim_regi2c_write_mask(0x61U, 5U, 6U, 6U, 1U);				/* I2C_ULP_IR_FORCE_CODE */
-
-	rb_ext_code = esp_shim_regi2c_read(0x61U, 6U);
-	rb_force = esp_shim_regi2c_read(0x61U, 5U);
-
-#ifdef TOPPERS_ESP32C5_WIFI_REGI2C_TRACE
-	esp_shim_diag_fput_str("\r\nocode_force: chip_rev=");
-	esp_shim_diag_fput_dec(chip_revision);
-	esp_shim_diag_fput_str(" blk_ver=");
-	esp_shim_diag_fput_dec(blk_version);
-	esp_shim_diag_fput_str(" ocode=0x");
-	esp_shim_diag_fput_hex8((uint8_t)ocode);
-	esp_shim_diag_fput_str(" readback ext_code_reg=0x");
-	esp_shim_diag_fput_hex8(rb_ext_code);
-	esp_shim_diag_fput_str(" force_reg=0x");
-	esp_shim_diag_fput_hex8(rb_force);
-	esp_shim_diag_fput_str(" force_bit=");
-	target_fput_log((char)('0' + ((rb_force >> 6) & 1U)));
-	esp_shim_diag_fput_str("\r\n");
-#endif /* TOPPERS_ESP32C5_WIFI_REGI2C_TRACE */
+	pmu_ll_hp_set_icg_modem(pmu, PMU_MODE_HP_ACTIVE, 2U);
+	modem_syscon_ll_set_modem_apb_icg_bitmap(syscon, code_bit);
+	modem_lpcon_ll_set_i2c_master_icg_bitmap(lpcon, code_bit);
+	modem_lpcon_ll_set_lp_apb_icg_bitmap(lpcon, code_bit);
+	pmu_ll_imm_update_dig_icg_modem_code(pmu, true);
+	pmu_ll_imm_update_dig_icg_switch(pmu, true);
 }
 
 static void
@@ -1218,33 +727,24 @@ wifi_clock_enable_wrapper(void)
 {
 	static bool_t	lpclk_selected = false;
 
-	/*  【実施13】C6ではesp_shim_modem_icg_init()はJTAG実測で冗長と判明
+	/*  【実施13（v9側）をhal(v8)統一で移植．docs/c5-hal-v8-unification-memo.md】
+	 *  C6ではesp_shim_modem_icg_init()はJTAG実測で冗長と判明
 	 *  （clk_conf_power_st=0x66660000は既にnative一致＝modem_clockが
-	 *  設定）していたため，C5でも暫定的に踏襲して無効化し，
-	 *  「C5は未検証（【実機確認待ち】）」と明記していた．**C5実機の
-	 *  JTAG実測でこの踏襲が誤りと判明したため有効化する**．
-	 *
-	 *  C5実測：PMU hp_sys[HP_ACTIVE].icg_modem.code（0x600B000C
-	 *  bit31:30）がDirect Bootでは0のまま残る．一方，
-	 *  MODEM_SYSCON_CLK_CONF_POWER_ST（0x600A9C0C）のCLK_WIFI_ST_MAP
-	 *  ＝0x6＝BIT(1)|BIT(2)であり，ICGコード0はこのマップに含まれない．
-	 *  そのためCLK_CONF1（0x600A9C14）のCLK_WIFIBB_*_EN群が全て1でも
-	 *  **WIFIBBクロックはICGでゲートされたまま**になり，BBレジスタ
-	 *  ブロック（MODEM0＝0x600A0000）への書込みが一切効かない．
-	 *  結果，PHY較正のphy_iq_est_enable_new()が起動ビット（BB+0x450
-	 *  bit1）を立てられず，完了ビット（BB+0x47C bit16）が永久に
-	 *  立たない＝無限リトライループ（実施12で発見したハング）．
-	 *
-	 *  A/B/A/B反証実験（FORCE_ON=0・ST_MAP不変のまま，icg_modem.code
-	 *  のみ0↔2をトグルし，都度BBレジスタへの書込み成否を確認）で
-	 *  因果を確認済み：code=0→書込み無視，code=2→書込み成立．
-	 *  なお適用にはPMUのimmediate updateパルス2本
-	 *  （PMU_IMM_MODEM_ICG_REG=0x600B00DC bit31＝update_dig_icg_modem_en，
-	 *  PMU_IMM_SLEEP_SYSCLK_REG=0x600B00D0 bit28＝update_dig_icg_switch）
-	 *  の**両方**が必要（codeを書くだけでは反映されない．片方だけ
-	 *  パルスした際は書込みが効かないことも実測で確認）．
-	 *  詳細は docs/c5-bringup.md 実施13．
-	 */
+	 *  設定）していたため，C5でも暫定的に踏襲して無効化していたが，
+	 *  v9統合の実機JTAG実測（実施13）でこの踏襲は誤りと判明した：
+	 *  PMU hp_sys[HP_ACTIVE].icg_modem.code（0x600B000C bit31:30）が
+	 *  Direct Bootでは0のまま残り，MODEM_SYSCON_CLK_CONF_POWER_ST
+	 *  （C5では0x600A9C0C）のCLK_WIFI_ST_MAP＝0x6＝BIT(1)|BIT(2)には
+	 *  ICGコード0が含まれないため，WIFIBBクロックがICGでゲートされた
+	 *  まま＝BBレジスタブロック（MODEM0）への書込みが一切効かず，PHY
+	 *  較正が完了ビットを立てられない無限リトライループを招く．
+	 *  A/B/A/B反証実験（icg_modem.codeのみ0↔2をトグルし書込み成否を
+	 *  確認）で因果を確認済み．v8はv9とレジスタ配置・PMU/ICG系統が
+	 *  同一（両者ともhal/arch共有層＝target.cmakeのSOC/HAL定義を使う）
+	 *  ためこの修正はblob世代非依存＝v8でも同様に必要と判断し移植する。
+	 *  適用にはPMU即時反映パルス2本（update_dig_icg_modem_code／
+	 *  update_dig_icg_switch）の両方が必要（関数内で実施済み）。
+	 *  詳細はdocs/c5-bringup.md 実施13。 */
 	esp_shim_modem_icg_init();
 
 	/*
@@ -1268,26 +768,6 @@ wifi_clock_enable_wrapper(void)
 	 *  （【実機確認待ち】）。
 	 */
 	if (!lpclk_selected) {
-		/*  【実施21】候補B加算移植：stockがクロック切替時（＝PHY較正より
-		 *  前）に行うPVT自動dbias＋チャージポンプ有効化を，Wi-Fi初期化の
-		 *  一度きりのこの時点（regi2c有効化・phy_enableより前）で代替する  */
-		esp_shim_pvt_init();
-
-		/*  【実施22】決定実験Cのbefore-PHY移植：PMU HP_ACTIVEバイアス
-		 *  生成器起動＋WIFI電源ドメインのforce→FSM委譲を同じ時点で代替する  */
-		esp_shim_hpactive_bias_init();
-
-		/*  【実施23】残余(1)：BBPLL/BB-I2Cアナログ電源起動を同じ時点で代替する  */
-		esp_shim_hpactive_ckpower_init();
-
-		/*  【実施23】残余(2)：SYSCLK ICG・retention・PD_TOP/HPAON/HPCPU/LPPERI
-		 *  force解除を同じ時点で代替する  */
-		esp_shim_hpactive_residual2_init();
-
-		/*  【実施23】pmu_lp_system_init()の未移植分（LP_ACTIVE/LP_SLEEPバンク）
-		 *  を同じ時点で代替する  */
-		esp_shim_lpsystem_init();
-
 		modem_clock_deselect_all_module_lp_clock_source();
 		modem_clock_select_lp_clock_source(PERIPH_WIFI_MODULE,
 											MODEM_CLOCK_LPCLK_SRC_RC_SLOW, 0U);
@@ -1310,11 +790,6 @@ wifi_clock_enable_wrapper(void)
 		 */
 		_regi2c_ctrl_ll_master_enable_clock(true);
 		regi2c_ctrl_ll_master_configure_clock();
-
-		/*  【実施24】esp_ocode_calib_init()のbefore-PHY移植：regi2cマスタ
-		 *  クロックが実際に有効化された直後（本関数のこの時点で初めて
-		 *  I2C_ANA_MSTトランザクションが物理的に成立する）に置く。  */
-		esp_shim_ocode_force_init();
 
 		lpclk_selected = true;
 	}
@@ -1601,63 +1076,6 @@ extern uint8_t coex_schm_flexible_period_get(void);
 extern void *coex_schm_get_phase_by_idx(int idx);
 
 /*
- *  【実施10】ESP-IDF v6.1（os_adapter 0x09）で wifi_osi_funcs_t に
- *  追加された sleep-retention / HE(AX) 系フィールドの no-op スタブ。
- *  scan 経路（PM/sleep 無効）では呼ばれない想定のため，まず無害な
- *  スタブ（0返し／何もしない）で ABI を満たす。scan が要求した場合の
- *  実装は後続（docs/c5-bringup.md）。v8 では未設定＝NULL のままだった
- *  C6/C5-gated の regdma/sleep_retention_find もここで安全側に埋める。
- */
-static void regdma_link_set_write_wait_content_wrapper(void *link, uint32_t value, uint32_t mask)
-{
-	(void)link; (void)value; (void)mask;
-}
-static void *sleep_retention_find_link_by_id_wrapper(int id)
-{
-	(void)id;
-	return NULL;
-}
-static int32_t wifi_bb_sleep_retention_attach_wrapper(void)
-{
-	return 0;
-}
-static int32_t wifi_bb_sleep_retention_detach_wrapper(void)
-{
-	return 0;
-}
-static int32_t wifi_mac_sleep_retention_attach_wrapper(void)
-{
-	return 0;
-}
-static int32_t wifi_mac_sleep_retention_detach_wrapper(void)
-{
-	return 0;
-}
-/*
- *  【実施12】_wifi_pm_sleep_lock_acquire/_wifi_pm_sleep_lock_release：
- *  v9のwifi_os_adapter.hでは，v8で削除した_wifi_apb80m_request/releaseと
- *  同じ構造体スロット（_dport_access_stall_other_cpu_end_wrapの直後，
- *  _phy_disableの直前）に位置する別フィールドとして存在する（削除では
- *  なく置換）。実施10のv9移行時，apb80m側の削除は正しく行ったが，この
- *  置換後継フィールドの追加が漏れていたためNULL関数ポインタのまま
- *  だった。本リポジトリはESP-IDFのPM（動的クロック/スリープ）サブ
- *  システムを実装しないため，他のPM/sleep-retention系フィールドと
- *  同じ方針でno-opスタブとする。
- */
-static void wifi_pm_sleep_lock_acquire_wrapper(void)
-{
-}
-static void wifi_pm_sleep_lock_release_wrapper(void)
-{
-}
-#if CONFIG_SOC_WIFI_HE_SUPPORT
-static bool wifi_disable_ac_ax_wrapper(void)
-{
-	return false;
-}
-#endif
-
-/*
  *		osiテーブル本体
  */
 wifi_osi_funcs_t g_wifi_osi_funcs = {
@@ -1713,30 +1131,6 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 		dport_access_stall_other_cpu_start_wrapper,
 	._dport_access_stall_other_cpu_end_wrap =
 		dport_access_stall_other_cpu_end_wrapper,
-	/*
-	 *  _wifi_apb80m_request/_wifi_apb80m_release：IDF v6.1のwifi_os_adapter.h
-	 *  はversion 0x08（v6.1-dev）とversion 0x09（v6.1-beta1，本ビルドが
-	 *  実際に使うblob世代）でフィールド構成が異なり，このAPB80M要求/解放
-	 *  ペアはv8由来でv9では削除されている（wifi_osi_funcs_tにメンバが
-	 *  存在しない）．v9移行（実施10）時の見落としと判明．wrapper関数
-	 *  自体（wifi_apb80m_request/release_wrapper）は削除せず残置
-	 *  （将来的な参照用．未使用関数警告のみで実害無し）。
-	 *  同じ構造体スロットの後継フィールド（_wifi_pm_sleep_lock_acquire/
-	 *  _wifi_pm_sleep_lock_release）は実施12で追加（下記）。
-	 *
-	 *  【実施48】本PC(別PC=originとは別機)にローカル配置されたESP-IDF
-	 *  v6.1スナップショットは `v6.1-dev-5215-g0d928780`（wifi lib submodule
-	 *  cde32e0）で，wifi_os_adapter.h はこのスロットが依然として
-	 *  _wifi_apb80m_request/_wifi_apb80m_release（v8由来名）のまま
-	 *  ＝pm_sleep_lockへの改名前の世代．リンクするprebuilt blob
-	 *  （components/esp_wifi/lib/esp32c5/*.a）も同checkoutにピン留めされ
-	 *  この名前・レイアウトに一致する．よって本PCではapb80m名で結線する
-	 *  （両フィールドは同一オフセット・no-opで機能的に等価．どちらの
-	 *  スナップショットでもPMサブシステム未実装のため実害なし）。
-	 *  origin PCのIDFはpm_sleep_lock世代だったため，IDFチェックアウトを
-	 *  更新したらこの2行をpm_sleep_lock名へ戻す必要がある（ローカル
-	 *  パス依存＝docs/c5-bringup.md 実施48）。
-	 */
 	._wifi_apb80m_request = wifi_apb80m_request_wrapper,
 	._wifi_apb80m_release = wifi_apb80m_release_wrapper,
 	._phy_disable = phy_disable_wrapper,
@@ -1806,19 +1200,5 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 	._coex_schm_flexible_period_set = coex_schm_flexible_period_set,
 	._coex_schm_flexible_period_get = coex_schm_flexible_period_get,
 	._coex_schm_get_phase_by_idx = coex_schm_get_phase_by_idx,
-#if CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C61 || CONFIG_IDF_TARGET_ESP32S31
-	/*  v8 でも定義済みだが未設定(NULL)だった C5/C6-gated 2フィールド  */
-	._regdma_link_set_write_wait_content = regdma_link_set_write_wait_content_wrapper,
-	._sleep_retention_find_link_by_id = sleep_retention_find_link_by_id_wrapper,
-	/*  【実施10】v9 で追加された sleep-retention 4フィールド  */
-	._wifi_bb_sleep_retention_attach = wifi_bb_sleep_retention_attach_wrapper,
-	._wifi_bb_sleep_retention_detach = wifi_bb_sleep_retention_detach_wrapper,
-	._wifi_mac_sleep_retention_attach = wifi_mac_sleep_retention_attach_wrapper,
-	._wifi_mac_sleep_retention_detach = wifi_mac_sleep_retention_detach_wrapper,
-#endif
-#if CONFIG_SOC_WIFI_HE_SUPPORT
-	/*  【実施10】v9 で追加された HE(AX) 無効化フィールド  */
-	._wifi_disable_ac_ax = wifi_disable_ac_ax_wrapper,
-#endif
 	._magic = ESP_WIFI_OS_ADAPTER_MAGIC,
 };

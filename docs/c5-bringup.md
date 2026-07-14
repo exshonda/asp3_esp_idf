@@ -10104,3 +10104,234 @@ ping連続OK・ホスト発ping 3/3 OK。その後run600b（2回目の600s完走
 4. ハーネス（`r47_load_test.py`/`r47_load_hard.py`/`r47_run.sh`/
    `r47_run_hard.sh`/`c5_serial_logger.py`）はセッションスクラッチ。
    要点は実施46と同じ（ロガー先行起動→25s→precheck→負荷）。
+
+## 実施48：★hal(v8) blob再試験（docs/c5-hal-v8-unification-memo.md の計画を実行）——実施09「v8 blobはeco2非互換」判定を**反証**。クロック鎖修正＋APM解除後の正しい環境ではv8 blobも2.4GHz scanが完全動作（同一DUT・同一アンテナ・同一時間帯でv9と対照）。あわせて別PC移行に伴うv9側のIDFローカルパス依存（apb80m↔pm_sleep_lock）を解消
+
+### 背景・狙い
+
+`docs/c5-hal-v8-unification-memo.md`（コミット802d75b，ユーザー発案）の
+計画に従い，実施09で下した「esp-hal-3rdparty(hal submodule) v8 blob は
+eco2 C5 の PHY/RX 較正に非対応」という判定を再検証する。実施09当時の
+ASP3環境には後に発見された2欠陥（(1)クロック鎖＝BBPLL 576MHz誤ロック，
+実施32-34で修正／(2)APM遮断＝MODEMマスタREE2ブロック，実施42-43で修正）が
+共存しており，v8 blobは正しく構成された環境で一度も試されていなかった。
+**scanベースの試験なのでWi-Fi認証情報は不要**（AP接続はしない）。
+
+事前予測（メモの通り固定）：クロック＋APM修正済み環境ならv8較正は収束し
+scanが通る。外れれば（＝ここで再ハングすれば）実施09の追認としてクリーンに
+価値がある。
+
+### 環境（本ラウンドは別PC＝origin同期済み現ツリー802d75bベース）
+
+- DUT＝ESP32-C5 #1 `d0:cf:13:f0:a7:44`（native USB=ttyACM4／UART
+  CP2102N `b04e3b…` = ttyUSB3＝観測）。全操作直前にMAC/シリアル照合。
+- toolchain＝xpack riscv-none-elf-gcc 15.2.0。esptool＝
+  `~/tools/espressif/python_env/idf6.1_py3.12_env`（v5.3.1，`--no-stub`）。
+- hal submodule＝`b90b1837`（v8 blob世代．libnet80211.a=1.67MB＝v9の
+  1.80MBと別物）。v8変種は`ESP_HAL_DIR`（hal submodule）基点で
+  **IDFローカルパス非依存**——統一の最大の利点。
+
+### v9側の前提修正（別PC移行に伴うIDFローカルパス依存の解消）
+
+現ツリーのv9(wifi/)ビルドが本PCでは**そのままではコンパイル不能**だった：
+`wifi/esp_wifi_adapter.c:1727-1728`が`._wifi_pm_sleep_lock_acquire/release`を
+初期化するが，本PCのローカルIDF `v6.1-dev-5215-g0d928780`（wifi lib
+submodule `cde32e0`）の`wifi_os_adapter.h`はこのスロットが依然として
+`_wifi_apb80m_request/release`（v8由来名）のまま＝pm_sleep_lockへの改名
+**前**の世代だった。origin PCのIDFはpm_sleep_lock世代（実施12）で，本PCは
+それより古いスナップショット。リンクするprebuilt blob（本PCの
+`components/esp_wifi/lib/esp32c5/*.a`）も同checkoutにピン留めされこの
+名前・レイアウトに一致するため，**本PCではapb80m名で結線するのが正しい**
+（両フィールドは同一構造体オフセット・no-op＝機能的に等価，PMサブシステム
+未実装のため実害なし）。`wifi/esp_wifi_adapter.c`の当該2行をapb80mへ変更
+（コメントで実施48・ローカルパス依存を明記）。これは実施09/12とは独立の
+「別PC移行の申し送り（コミット419eb75）」の消化。IDFチェックアウトを
+pm_sleep_lock世代へ更新したらこの2行を戻す必要がある。
+
+### 手順
+
+1. v9再現（priority 1）：v9(wifi/)をapb80m修正後にビルド（RAM 76.25%＝
+   実施45/46と同水準・回帰なし）→ ttyACM4へ`--no-stub`書込→ ttyUSB3で
+   UART観測。**→ scan成功**（後述）。
+2. v8変種の取り込み：`origin/claude/c5-hal-v8-unification`から
+   `target.cmake`（v8選択ロジック追加）・`esp_wifi_v8.cmake`・`wifi_v8/`
+   （esp_shim.c/esp_shim_blobglue.c/esp_wifi_adapter.c＝v8 os_adapter 0x08）を
+   `git checkout … --`で現ツリーへ取り込み（必要分のみ）。共有arch/target層の
+   修正（クロック鎖・APM解除`esp32c5_r42_apm_unblock`・CLIC・SWDキー）は
+   両変種で自動的に効く＝再試験の要。scan-onlyのためv9側connect経路修正
+   （実施45 g_misc_nvs・実施46固定プール）は無関係で移植不要。
+3. v8ビルド：`-DESP32C5_WIFI=ON -DESP32C5_WIFI_HAL_V8=ON`（build/c5_wifi_v8）。
+   エラー0（RAM 75.99%＝v8 blobが小さい分v9より僅かに小）。IDFローカル
+   パス依存なし。
+4. v8書込→同一DUT・同一アンテナ・同一時間帯（v9の数分後）でUART観測。
+5. v9へ書き戻し（DUTを既知良品v9出荷構成へ復元・再現確認）。
+
+### 結果（★v8非互換説を反証）
+
+同一DUT `a7:44`・同一アンテナ/設置・同一時間帯（2026-07-14 ≈14:15）・
+同一`wifi_scan`アプリでの対照：
+
+| 変種 | blob出所 | 初回scan | 再scan（連続） | <SSID-INST-1X> RSSI | 較正/RX | 安定性 |
+|---|---|---|---|---|---|---|
+| **v9**（wifi/, IDF v6.1 blob） | ローカルIDF（apb80m修正後） | 20 APs | 53-62 APs | -48 | 収束・promisc_rx=171 | クラッシュ無 |
+| **v8**（wifi_v8/, hal submodule blob） | hal `b90b1837` | 20 APs | 50-64 APs（9連続scan） | -47 | **収束・promisc_rx=420** | **クラッシュ/WDT/panic無** |
+
+- v8：`esp_wifi_init`→`esp_wifi_start -> 0`→`set_promiscuous OK`→
+  `promisc_rx_count=420`（RX受信あり＝**旧IQ-estハング点を通過・PHY較正収束**）→
+  `esp_wifi_scan_start -> 0`→`WIFI_EVENT id=1`→`20 APs found`。以降
+  RESCANで64/58/60/63/62/50/60/54 APs（計9scan）を全窓（≈95s）で継続，
+  唯一のrst行は通常のdownload/flash-bootのbootrom行のみ。
+- 両変種が同一ネットワーク群を検出（<SSID-INST-1X>/<SSID-EDU>/<SSID-INST-G>）・
+  RSSIも同水準。**v8はeco2 C5で2.4GHz scanが完全動作する**。
+
+### 判定（メモの判定点3つに対して）
+
+- (a) PHY較正が収束するか（旧IQ-estハング）：**v8 PASS**（scan_start=0・
+  RX active・9連続scan完走・ハング無）。予測的中——実施09の「v8非互換」は
+  **クロック鎖＋APMの交絡による誤判定**と確定。相関（v8時代にハング）≠
+  因果（v8がeco2非対応）。
+- (b) scanでAP検出（2.4GHz）：**v8 PASS**（20→50-64 APs）。
+- (c) connect→DHCP→ping→TCP/UDP＋5GHz：**本ラウンド未実施**（認証情報が
+  必要＝タスク範囲外）。v8での5GHz動作は依然未知（メモの反証可能性の残り）。
+
+### 反証可能性の残り（早合点しない）
+
+- v8での**connect/load/5GHz**は未検証。実施45の5GHz実証（ch48/RSSI-61）は
+  v9のみ。v8で5GHzやconnectがこける可能性はまだ排除されていない＝
+  「hal一本化」の最終確定には (c) の追試が要る。
+- 本ラウンドが確定したのは「scan（=PHY較正収束＋RX＋2.4GHzビーコン受信）は
+  v8でも動く」まで。実施09の判定は**scanの範囲で反証**された。
+
+### 変更ファイル（実施48）
+
+- `wifi/esp_wifi_adapter.c`：g_wifi_osi_funcs の pm_sleep_lock スロット2行を
+  apb80m へ（本PCのローカルIDFスナップショット＋blobに整合）。コメント追記。
+- `target.cmake`：`ESP32C5_WIFI_HAL_V8` オプション＋v9/v8変種選択ロジック
+  （origin/claude/c5-hal-v8-unification から取り込み，既定OFF＝v9無影響）。
+- `esp_wifi_v8.cmake`（新規）・`wifi_v8/{esp_shim.c,esp_shim_blobglue.c,
+  esp_wifi_adapter.c}`（新規．v8 os_adapter 0x08）を取り込み。
+- 既定ビルド（`ESP32C5_WIFI_HAL_V8`未指定）はv9のまま＝非回帰。
+
+### 次の一手
+
+1. **v8で判定点(c)**：connect→DHCP→ping→TCP/UDP＋5GHz（ch48等）を
+   v8変種で試す。認証情報が要るため申し送り（SSID/パスワードは非コミット）。
+   ここまでv8で通れば「hal一本化」を確定し，`esp_wifi.cmake:85`の
+   ローカルパス直書き（`/home/honda/tools/esp-idf-v6.1`）を撤去して
+   C3/C6/C5をhal submodule一本へ統一可能（IDFローカルパス依存が消える）。
+2. こけたら「v8はconnect/5GHz層でeco2非互換」を今度こそクリーンに確定し
+   v6.1続行（＝ローカルパス依存を pinned submodule 化して明示化）。
+3. BLE側（C5はIDF v6.1のbt.c/NimBLE）をhalの`lib_esp32c5`へ戻せるかは
+   wifi統一確定後の第2段（メモ末尾）。
+
+## 実施49：★v8/hal を C5 Wi-Fi の «既定» へ昇格＋IDF v6.1 ローカルパス依存の隔離（ユーザー決定＝v6.1がbetaのためIDF非依存のv8/halへ舵）——`ESP32C5_WIFI=ON` の既定が v8（hal submodule blob・IDFパス不要）を選ぶよう反転。v9 は `-DESP32C5_WIFI_V9=ON` の opt-in fallback として温存。既定v8ビルドが `/home/honda/tools/esp-idf-v6.1` を一切参照しないことを実証
+
+### 背景・狙い（ユーザー決定）
+
+実施48でv8 blob（hal submodule `b90b1837`）が eco2 C5 で 2.4GHz scan を
+完全動作（実施09「v8非互換」を反証）することを実証した。IDF v6.1 は
+まだ beta で，かつ v9 経路は `esp_wifi.cmake:85` の
+`set(IDF /home/honda/tools/esp-idf-v6.1)` ハードコードに依存する＝
+特定PCのローカルIDFが在る環境でしかビルドできない（ポータビリティ欠如）。
+**ユーザー決定：既定を IDF非依存の v8/hal へ切替え，v9 は opt-in fallback
+として残す**。本実施はその «既定化＋IDF依存隔離» を可逆・非回帰で行う。
+
+### 変更（target.cmake のみ・最小）
+
+`asp3/target/esp32c5_espidf/target.cmake` の変種選択ロジックを反転：
+
+- 新オプション `ESP32C5_WIFI_V9`（既定OFF）＝**v9(IDF v6.1)への opt-in
+  fallback**。ON のとき `esp_wifi.cmake`＋`wifi/` を使う（IDFパス依存はこの
+  経路のみに隔離）。
+- 既定（`ESP32C5_WIFI_V9` 未指定）＝**v8/hal**（`esp_wifi_v8.cmake`＋
+  `wifi_v8/`．ESP_HAL_DIR 基点・IDF非依存）。実施48の
+  `ESP32C5_WIFI_HAL_V8` の作法を既定側へ昇格。
+- `ESP32C5_WIFI_HAL_V8`（実施48の旧スイッチ）は後方互換で受理するが
+  v8 が既定になったため no-op（`ESP32C5_WIFI_V9` と同時指定は FATAL_ERROR）。
+- REGI2C_TRACE 診断（v9/wifi/専用）のガードを `if(ESP32C5_WIFI_HAL_V8)` →
+  `if(NOT ESP32C5_WIFI_V9)` へ更新（v8既定でも正しく「v9でのみ可」を強制）。
+
+`esp_wifi.cmake`（v9・IDFハードコード）・`esp_wifi_v8.cmake`・`wifi/`・
+`wifi_v8/` の中身は無変更。切替は target.cmake の3〜4行のロジックのみ＝可逆。
+
+### 検証1：既定v8ビルドが IDFパス無しでリンク（★主目的の実証）
+
+`-DESP32C5_WIFI=ON`（V9無し）で configure/build：
+
+- **RAM 75.99%**（実施48のv8と同一）・FLASH 11.47%・**リンク0エラー**。
+- 生成物（`build/c5_v8_default/`）を
+  `grep -rl "esp-idf-v6.1\|/home/honda/tools"` → **ヒット0**＝
+  既定v8ビルドは `/home/honda/tools/esp-idf-v6.1` を**一切参照しない**。
+  リンクの `-L` は `hal/components/esp_wifi/lib/esp32c5` 等 submodule 基点のみ。
+  → **IDFパス非依存を実証**（ユーザーの主目的＝ポータビリティ達成）。
+
+### 検証2：非回帰
+
+- **v9 opt-in**（`-DESP32C5_WIFI=ON -DESP32C5_WIFI_V9=ON`）：configure/build
+  とも成功，**RAM 76.25%**（実施45/46/48のv9と同水準）。build.ninja に
+  `esp-idf-v6.1` パスあり＝IDF依存は opt-in 経路に正しく隔離（設計どおり）。
+- **非Wi-Fiビルド**（`ESP32C5_WIFI` 無し・sample1）：build成功・RAM 3.27%・
+  IDFパス参照0。Wi-Fi無効ビルドに一切影響なし。
+
+### 検証3：実機v8 scan 再確認（★board latch により中断・power-cycle待ち）
+
+DUT＝ESP32-C5 #1 `d0:cf:13:f0:a7:44`（MAC照合：native USB by-id
+`…D0:CF:13:F0:A7:44…` = ttyACM4／UART CP2102N `b04e3b…` = ttyUSB3）。
+C5#2 `c8:94`・C3・S31 には不接触。既定v8バイナリを `--no-stub` で
+ttyACM4 へ書込（4MB・verify OK・hard-reset）。
+
+- **注意（UART観測の作法）**：`cat`/`stty` で ttyUSB3 を開くと DTR/RTS が
+  asserted のままになり C5 が出力しない（0バイト）。**pyserial で
+  `dtr=False, rts=False` で開くと出力が出る**（今回判明。実施48の観測
+  との差＝観測ツールの DTR/RTS 扱い）。
+- **観測結果**：初回ブートで
+  `TOPPERS/ASP3 Kernel Release 3.7.2 for ESP32-C5` →
+  `wifi_scan: esp_wifi_init` → `pp rom version: 78a72e9d5`（=v8 blob）→
+  `wifi driver task prio:23` 起動まで到達。ただしその後 UART が化け
+  （PHYブリングアップでのクロック変化と推測）→ `WIFI_EVENT id=43` →
+  以降 **`rst:0x7 (TG0_WDT_HPSYS)` + `Core0 Saved PC:0x40038598` の
+  WDTリセットループ**に転落（AP件数の出力前）。
+- **判定＝latched-board-state（[[c5-latched-board-state]]）**。`0x40038598`
+  は red-herring ROM PC。この状態は soft/hard reset で消えず，物理電源
+  再投入でのみ解消する。今回，観測ツールの試行錯誤で reset を数回反復した
+  ことが latch を誘発した可能性が高い。**同一v8変種は実施48（≈3h前・同一
+  DUT）で 9連続 scan・50-64 APs を実証済み**＝コード退行ではない。
+  → **クリーンな scan 再確認は物理電源再投入後に再取得が必要**（ユーザー
+  依頼事項）。広域 pkill・反復 reset のハンマリングはしない（memory準拠）。
+
+### v9 完全削除 前の gate（申し送り）
+
+v9 fallback を**残す**理由＝v8 での以下が未実証（Wi-Fi認証情報が要る＝
+本タスク範囲外，SSID/パスワードは非コミット）：
+
+1. **v8 connect → DHCP → ping → TCP/UDP エコー**（実施45はv9のみ）。
+2. **v8 5GHz**（ch48等．実施45のch48/RSSI-61実証はv9のみ）。
+
+上記が v8 で通って初めて「hal一本化」を確定し，`esp_wifi.cmake`（v9）と
+`wifi/` を削除可能。それまで v9 は `-DESP32C5_WIFI_V9=ON` で温存する。
+
+### C3/C6 拡張の所見（«評価のみ»・本タスクでは未編集）
+
+- **C6**：C6は元々 esp-hal-3rdparty(hal submodule) 基点で構成されており
+  （`asp3/target/esp32c6_espidf/esp_wifi.cmake` は ESP_HAL_DIR 基点・IDF
+  ハードコード無し。本C5 v8版はそのC6版のコピー起点）。C6は既に
+  «IDF非依存»＝本件の hal 統一と同じ土俵にある。C6は deaf-RX（受信不能）
+  が別課題として未解決（`docs/wifi-shim-c6.md`）だが，これはblob世代では
+  なくPHY/RX側の問題で，v8/hal統一とは独立。
+- **C3**：C3の `asp3/target/esp32c3_espidf/esp_wifi.cmake` も ESP_HAL_DIR
+  基点（IDFハードコード無し）で，元々 hal submodule で scan 実績あり。
+  C3も追加のIDF依存撤廃は不要（既にhal基点）。**ただしC3 BLE関連
+  （`asp3/target/esp32c3_espidf/**`・`apps/ble_host_smoke/**`・
+  `docs/bt-shim.md`）は別サブエージェント作業中につき本タスクでは不接触**。
+- 結論：**IDFローカルパスのハードコードが残るのは C5 の v9 経路
+  （`esp_wifi.cmake:85`）だけ**。本実施でそれを opt-in に隔離したので，
+  C5既定・C3・C6 の3チップともに «hal submodule 一本・IDF非依存» で
+  ビルドできる状態になった（C5のv9撤去は上記gate通過後）。
+
+### 変更ファイル（実施49）
+
+- `asp3/target/esp32c5_espidf/target.cmake`：v9/v8 変種選択ロジックを反転
+  （既定=v8）。`ESP32C5_WIFI_V9` opt-in オプション追加，`ESP32C5_WIFI_HAL_V8`
+  を後方互換no-op化，REGI2C_TRACEガードを `NOT ESP32C5_WIFI_V9` へ。
+- 本doc（実施49）追記・memory 更新（`c5-wifi-hal-v8-scan-works` に既定化を追記）。
+- コミットはしない（ユーザー確認用の作業ツリー変更）。

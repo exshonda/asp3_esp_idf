@@ -179,58 +179,109 @@ if(ESP32C5_BT AND ESP32C5_WIFI)
     message(FATAL_ERROR "ESP32C5_BT + ESP32C5_WIFI is not supported yet (RAM budget; C3/C6の前例踏襲)")
 endif()
 
-option(ESP32C5_WIFI "Enable Wi-Fi (esp_wifi blob + os_adapter shim, Phase B-2a scan)" OFF)
+#
+#  hal(v8)統一＝既定（docs/c5-bringup.md 実施48＋実施49，ユーザー決定）：
+#  ESP32C5_WIFI=ON の «既定» は esp-hal-3rdparty(hal submodule) の v8 blob
+#  （esp_wifi_v8.cmake ＋ wifi_v8/）を使う。v8 は ESP_HAL_DIR（submodule）
+#  基点で **IDFローカルパス非依存**＝どのPC/CI でもビルドできる（統一の主目的）。
+#  実施48で v8 は eco2 C5 で 2.4GHz scan が完全動作すると実証済み（実施09の
+#  「v8 eco2非互換」判定はクロック鎖＋APM交絡による誤判定と確定）。
+#
+#  v9（IDF v6.1 blob ＝ esp_wifi.cmake ＋ wifi/）は **opt-in fallback** として
+#  温存する（`-DESP32C5_WIFI_V9=ON`）。v9 は `esp_wifi.cmake:85` の
+#  `/home/honda/tools/esp-idf-v6.1` ハードコードに依存するため，そのローカル
+#  IDF が在る環境でしか使えない。v9 を完全削除する前の gate＝**v8 での
+#  connect/DHCP/ping/TCP・5GHz 実証**（認証情報が要る＝範囲外，実施48の
+#  «反証可能性の残り»）。それまで v9 は残す。
+#
+#  ESP32C5_WIFI_HAL_V8（実施48の旧スイッチ）は後方互換のため受理するが，
+#  v8 は既に既定なので指定は冗長（no-op）。ESP32C5_WIFI=OFF のままでは
+#  いずれも無効（BT単体ビルドは wifi/ を使う＝従来どおり変更なし）。
+#
+option(ESP32C5_WIFI_V9
+    "Opt-in fallback: use IDF v6.1(v9) Wi-Fi blob variant (esp_wifi.cmake + wifi/). Requires local ESP-IDF at esp_wifi.cmake の IDF パス. Default OFF = v8/hal (IDF-independent). See docs/c5-bringup.md 実施49."
+    OFF)
+option(ESP32C5_WIFI_HAL_V8
+    "Deprecated (v8 is now the default). Kept for backward compat; has no effect. Use ESP32C5_WIFI_V9=ON to select the v9 fallback."
+    OFF)
+if(ESP32C5_WIFI_V9 AND ESP32C5_WIFI_HAL_V8)
+    message(FATAL_ERROR "ESP32C5_WIFI_V9 and ESP32C5_WIFI_HAL_V8 are mutually exclusive (v8 is default; drop ESP32C5_WIFI_HAL_V8 and keep ESP32C5_WIFI_V9=ON for v9).")
+endif()
+if(ESP32C5_WIFI_V9 AND NOT ESP32C5_WIFI)
+    message(FATAL_ERROR "ESP32C5_WIFI_V9=ON requires ESP32C5_WIFI=ON")
+endif()
+
+option(ESP32C5_WIFI "Enable Wi-Fi (esp_wifi blob + os_adapter shim, Phase B-2a scan; default variant = v8/hal, IDF-independent)" OFF)
+if(ESP32C5_WIFI AND ESP32C5_WIFI_V9)
+    #  opt-in fallback：IDF v6.1(v9)。ローカル IDF パス依存（esp_wifi.cmake:85）。
+    set(ESP32C5_WIFI_CMAKE_FILE ${TARGETDIR}/esp_wifi.cmake)
+    set(ESP32C5_WIFI_SRCDIR ${TARGETDIR}/wifi)
+else()
+    #  既定：v8/hal（IDF非依存）。ESP32C5_WIFI_HAL_V8 指定時もこちら（冗長）。
+    set(ESP32C5_WIFI_CMAKE_FILE ${TARGETDIR}/esp_wifi_v8.cmake)
+    set(ESP32C5_WIFI_SRCDIR ${TARGETDIR}/wifi_v8)
+endif()
 if(ESP32C5_WIFI OR ESP32C5_BT)
-    if(ESP32C5_WIFI AND NOT EXISTS ${TARGETDIR}/esp_wifi.cmake)
+    if(ESP32C5_WIFI AND NOT EXISTS ${ESP32C5_WIFI_CMAKE_FILE})
         message(FATAL_ERROR
-            "ESP32C5_WIFI=ON was requested, but ${TARGETDIR}/esp_wifi.cmake "
+            "ESP32C5_WIFI=ON was requested, but ${ESP32C5_WIFI_CMAKE_FILE} "
             "was not found. See docs/c5-port-design.md.")
     endif()
     list(APPEND ASP3_INCLUDE_DIRS
-        ${TARGETDIR}/wifi
+        ${ESP32C5_WIFI_SRCDIR}
         ${C3_TARGETDIR}
         ${C3_TARGETDIR}/wifi
     )
     list(APPEND ASP3_CFG_FILES ${C3_TARGETDIR}/wifi/esp_shim.cfg)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-        ${TARGETDIR}/wifi/esp_shim.c
+        ${ESP32C5_WIFI_SRCDIR}/esp_shim.c
         #  esp_shim_blobglue.cはWiFi blob（net80211/pp/core）専用の
         #  グルーが大半だが，esp_sleep_pd_config／esp_sleep_clock_config／
         #  esp_deep_sleep_register_phy_hook／_esp_error_check_failed等
         #  BTも要求する汎用スタブ（modem_clock.c／phy_init.cが参照）を
         #  同居させているため，BT単体ビルドでもリンクする（--gc-sections
         #  でWiFi専用の未参照部分は落ちる．C6のBLE実施01で確認済みの
-        #  パターンをC5でも踏襲）．
-        ${TARGETDIR}/wifi/esp_shim_blobglue.c
+        #  パターンをC5でも踏襲．ESP32C5_WIFI_HAL_V8はESP32C5_WIFIが
+        #  前提のオプションのためBT単体ビルドはESP32C5_WIFI_SRCDIR=wifi/
+        #  のまま＝無影響）．
+        ${ESP32C5_WIFI_SRCDIR}/esp_shim_blobglue.c
         ${C3_TARGETDIR}/wifi/esp_shim_libc.c
     )
 endif()
 if(ESP32C5_WIFI)
     list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_WIFI)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-        ${TARGETDIR}/wifi/esp_wifi_adapter.c
+        ${ESP32C5_WIFI_SRCDIR}/esp_wifi_adapter.c
         ${C3_TARGETDIR}/wifi/esp_event_shim.c
         ${C3_TARGETDIR}/wifi/esp_coex_adapter.c
     )
 
     #
     #  DIAGNOSTIC (temporary，実施16)：regi2c（`phy_i2c_{read,write}Reg
-    #  [_Mask]`）トランザクション列トレース．PHY校正ループ入口までの
-    #  read/write系列をstock ESP-IDF v6.1 examples/wifi/scanと比較する
-    #  調査専用の計装．既定OFF＝通常のC5ビルドには一切影響しない．
+    #  [_Mask]`）トランザクション列トレース。v9(wifi/)専用の計装
+    #  （wifi_v8/には移植していない．docs/c5-hal-v8-unification-memo.md
+    #  「棚卸し表」参照．v8で必要になった場合は別途移植）。PHY校正ループ
+    #  入口までのread/write系列をstock ESP-IDF v6.1 examples/wifi/scanと
+    #  比較する調査専用の計装．既定OFF＝通常のC5ビルドには一切影響しない。
     #  `-DESP32C5_WIFI_REGI2C_TRACE=ON`で有効化（--wrapフラグの追加は
     #  esp_wifi.cmake側）。docs/c5-bringup.md 実施16参照。
     #
     option(ESP32C5_WIFI_REGI2C_TRACE
-        "DIAGNOSTIC (temporary, 実施16): trace regi2c read/write transactions via --wrap" OFF)
+        "DIAGNOSTIC (temporary, 実施16): trace regi2c read/write transactions via --wrap (v9/wifi/ only)" OFF)
     if(ESP32C5_WIFI_REGI2C_TRACE)
+        if(NOT ESP32C5_WIFI_V9)
+            message(FATAL_ERROR
+                "ESP32C5_WIFI_REGI2C_TRACE is v9/wifi/ only and is not ported to the "
+                "default hal(v8) variant. Re-run with -DESP32C5_WIFI_V9=ON to use it. "
+                "See docs/c5-hal-v8-unification-memo.md.")
+        endif()
         list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_WIFI_REGI2C_TRACE)
         list(APPEND ASP3_SYSSVC_TARGET_C_FILES
             ${TARGETDIR}/wifi/wifi_trace.c
         )
     endif()
 
-    include(${TARGETDIR}/esp_wifi.cmake)
+    include(${ESP32C5_WIFI_CMAKE_FILE})
 endif()
 include(${TARGETDIR}/esp_bt.cmake)
 
