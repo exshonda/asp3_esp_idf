@@ -1003,3 +1003,184 @@ D-1達成が確認された当該バイナリ）を**フラッシュしたまま
 `r04_dyn.py`（全TCBダンプ＋動的トレース），`r04_console.py`（reset＋
 UART採取／氾濫は`grep -av`で除去）。いずれも実施21系`r21_capture.py`の
 OOCD／RTSリセット・reenum待ちハーネスを流用。
+
+## BLE実施05：C5 D-2a（NimBLE host sync）＋D-2b（接続可能アドバタイズ）——★両方達成：sync到達・adv rc=0・**ホストhci0で「ASP3-C5-BLE」をOTA検出＝C5初のBLE電波到達**、割込みストーム非発生（nalloc=2トレースがC6/C5 D-1と完全一致）
+
+**日付**：2026-07-14　**対象**：C5#1（`D0:CF:13:F0:A7:44`、UART=`b04e3bcf…`
+＝ttyUSB0／JTAG=`D0:CF:13:F0:A7:44`のUSB-Serial/JTAG＝ttyACM2）　**目的**：
+BLE実施02（C6 D-2a/D-2b）の手順をC5へ転写し、実施03/04で達成済みのC5 D-1の
+上にNimBLEホストを載せてsync到達（D-2a）→接続可能アドバタイズ（D-2b）まで進める。
+
+### 結論（先出し）
+
+- **D-2a＝達成**：`ble_hs`のsyncコールバック到達をLP_AON STORE0
+  （`0x600B1000`＝`0x5ade51c0`）で**2ブート独立に確認**。氾濫除去コンソールでも
+  `ble_host_smoke_c5: ble_hs SYNC, host up`を両ブートで確認。
+- **D-2b＝達成**：`ble_gap_adv_start`が**rc=0**（STORE2`0x600B1008`＝
+  `0xad000000`＝`0xAD000000|rc`のrc=0、2/2ブート）、**ホストhci0の
+  `bluetoothctl scan le`で`ASP3-C5-BLE`（`D0:CF:13:F0:A7:44`、RSSI -63〜-68）を
+  実機検出＝C5 BLE史上初のover-the-air adv到達**。割込みレートは線1=0・
+  線2=45〜48/秒（累積STORE5＝1226〜2009、実行時間で割ると数十/秒＝正常域。
+  C3のストーム時~33万/秒とは4〜5桁差）、host reset回数=0（STORE3＝
+  `0x00000000`＝`on_reset`未呼出し）。
+- 多重登録トレース（STORE7`0x600B101C`）＝**`0xa1020704`（nalloc=2 src1=7
+  src2=4）＝C6のD-1/D-2b・C5のD-1（実施04）と完全一致**。D-1で先読み実装済み
+  だったsource多重登録対策（スロット配列、C3実施→(1)(o)のストーム地雷回避）が、
+  NimBLEホスト＋実adv RF活動下でも機能し、C3が踏んだ「単一handle上書き→
+  ストーム」は**再発しなかった**（C6実施02と同じ予防設計の実証）。
+- heap free=168712（D-1＝179888より約11KB少ない＝NimBLEホスト分。妥当）。
+
+### 氾濫（実施04）対策の実施方法
+
+実施04で確立した通り、C5では`no time event is processed in hrt interrupt.`が
+氾濫しコンソールを埋めうるため、**コンソールを唯一の判定根拠にしない**方式を
+採った：
+
+1. **判定はコンソールに依存させない**：sync（D-2a）・adv rc・割込みレート
+   線1/線2・多重登録トレースの全てを、コンソールの補助を要さず単独で判定できる
+   ようLP_AON STOREマーカへ書き、**esptool `--no-stub read-mem`（JTAG非依存）**で
+   回収した（advのRF活動下でJTAGが死ぬC3/C6の教訓＋氾濫の両方に備えた）。
+   実機で`read-mem`はDUTのUSB-Serial/JTAG（ttyACM2）経由で動作し、LP_AON STOREが
+   reset-to-bootloaderを生存することを実証（D-1残値`0xa1020704`が保持されていた
+   ことで事前確認）。
+2. **コンソールは氾濫除去してから補助的に読む**：`grep -av "no time event is
+   processed"`で氾濫行を除去。今回は実施04より氾濫が軽微（adv活動でアプリ出力が
+   常時流れるためか、30秒キャプチャ中の氾濫行は12行のみ）で、除去後は
+   D-2a/D-2bシーケンス全行（banner→init OK→enable→nimble_init→SYNC→
+   advertising started→g_adv_rc=0→intr rate line2=48）が読めた。
+3. STOREマーカとコンソールの**2系統が両ブートで一致**＝厳密性基準を満たす
+   独立2証拠。
+
+### C5用LP_AON STOREマップ（C6実施02からの再配置）
+
+C6は`0x600B1000`ベースのSTORE0/2/3/4/5/6/7を使ったが、C5は実施35が
+STORE1（RTC_SLOW_CLK_CAL）を、実施41がSTORE2-4を診断ミラーに使う。ただし
+**実施41の起動時書込みは`ESP32C5_R41_CALL_BOOTHOOK`未定義の本BTビルドでは
+走らない**（`target_kernel_impl.c`のガードを確認）ため、STORE2-4は「reset生存
+かつROM非改変」を実施41が実証済みの**安全な空きレジスタ**として再利用した
+（advisorレビューでも「STORE2-4は最も実証度が高い」と確認）。最終マップ：
+
+| STORE | 番地 | 用途 | 根拠 |
+|---|---|---|---|
+| STORE0 | `0x600B1000` | sync（`0x5ade51c0`） | C6でreset生存実証、C5起動は非改変 |
+| STORE2 | `0x600B1008` | adv-return rc（`0xAD0000\|rc`。試行＋rc兼用） | 実施41でreset生存実証 |
+| STORE3 | `0x600B100C` | ble_hs reset reason/count（`0x5E…`。0＝未reset） | 同上 |
+| STORE4 | `0x600B1010` | 割込みレート 線1累積ミラー | 同上 |
+| STORE5 | `0x600B1014` | 割込みレート 線2累積ミラー（副次） | 本ラウンドでreset生存を確認（=`0x4ca`/`0x7d9`） |
+| STORE7 | `0x600B101C` | 多重登録トレース（bt_shim.c、予約） | D-1（実施03/04）から使用 |
+
+C6の独立「adv開始試行」マーカ（STORE2）は落とし、adv-rcマーカ（`0xAD0000|rc`）が
+「試行して戻り値を得た」証拠を兼ねる形へ統合（レジスタ節約。実害なし）。
+
+### 設計（C6実施02の転写＋IDF v6.1固有の差分）
+
+- **NimBLEホストソースはhal submoduleではなくIDF v6.1（`~/tools/esp-idf-v6.1`）
+  から採る**：C5はbt/phy/coex/nimbleを実施10のmatched set（eco2対応）で統一する
+  方針（実施03の中心判断）に従い、nimbleもv6.1側で揃えた。トランスポートは
+  C6と同型の新世代経路（`hci_transport.c`＝D-1既存＋`hci_driver_nimble.c`＋
+  `nimble/transport/esp_ipc/src/hci_esp_ipc.c`。`hci_driver_standard.c`とは
+  `hci_driver_vhci_ops`を取り合う二者択一＝`if(NOT ESP32C5_BT_NIMBLE)`で分離）。
+- **`CONFIG_BT_NIMBLE_LEGACY_VHCI_ENABLE=0`が必須**（新世代コントローラは
+  `esp_nimble_hci_init()`がコンパイルアウトされる。C3版bt_nimble_config.hは
+  LEGACY=1のため流用不可）。★C5のインクルードパスはC3の`bt/stub/include`
+  （LEGACY=1版を同梱）を含むため、C5専用`bt/stub/include/bt_nimble_config.h`
+  （LEGACY=0）を`list(PREPEND …)`でC3より前に置いた（順序を誤ると
+  LEGACY=1が選ばれサイレントなmbufオフセットずれになる＝advisor指摘）。
+- **`CONFIG_BT_CONTROLLER_ONLY=1`はD-1限定**（NIMBLE_ENABLEDと排他。
+  `if(NOT ESP32C5_BT_NIMBLE)`へ移動。C6実施02と同じ分離）。
+- アプリ配線はC6実施02と同一（`nimble_port_init()`の二重初期化を避け、
+  `esp_bt_controller_init/enable`明示→`esp_nimble_init()`→`sync_cb/reset_cb`
+  登録→`nimble_port_freertos_init()`）。
+
+### 遭遇した壁と対処（C6実施02より遥かに少ない）
+
+C6実施02はGCC 14.2.0のimplicit-declaration hard error群（npl_os_bridge.h・
+sys/lock.h・string.h・stdio.h・TRUE/BT_HCI_LOG_INCLUDED順序バグ・GATT_SERVER
+不整合など計7類）を踏んだが、**C5は壁が1件のみ**だった：
+
+1. **`nimble_mem_free`/`nimble_mem_calloc`未定義参照（リンク時）**：ble_att_svr.c
+   ／ble_gatts.cが直接呼ぶ。実体は`bt/host/nimble/port/src/esp_nimble_mem.c`
+   （heap_caps_*＝esp_shim_libc.cへ委譲）。ソース集合に追加して解決。
+
+C6の壁がC5でほぼ出なかった理由：(i) C5はビルドに`riscv64-unknown-elf-gcc
+13.2.0`（asp3_coreの既定toolchain-riscv64.cmake）を使い、C6実施02が踏んだ
+**GCC 14.2.0固有のhard error化がそもそも発生しない**、(ii) IDF v6.1の
+`nimble_port.c`は`bt_common.h`（TRUE／BT_HCI_LOG_INCLUDEDの定義元）を`#if`より
+**前に**includeするため、C6/halで踏んだ順序バグがv6.1ソースツリーに存在しない
+（`-DTRUE=1 -DBT_HCI_LOG_INCLUDED=0`は不要と判断し追加しなかった。実機ビルドで
+実際に不要だったことを確認）、(iii) sdkconfig.hはC5の`sdkconfig_stub/sdkconfig.h`
+（全ビルド共通include。D-1から既存）へ解決される。GATT_SERVER不整合対策
+（`CONFIG_BT_NIMBLE_GATT_SERVER=1`）はbt_nimble_config.hへ先読みで入れておいた。
+
+### 判定基準（実施前に固定）と結果（2ブート独立）
+
+判定はC6実施02と同じ3点（①adv rc　②割込みレート　③hci0実機検出）を独立事実
+として記録（rc=0かつレート正常でもhci0未検出は「起こりうる正当な結果」で
+機械的に「失敗」と混同しない、というadvisor基準を踏襲）。
+
+| 指標 | boot1 | boot2 |
+|---|---|---|
+| sync到達（STORE0） | `0x5ade51c0` | `0x5ade51c0` |
+| ①adv-return rc（STORE2） | `0xad000000`＝**rc=0** | `0xad000000`＝**rc=0** |
+| host reset回数（STORE3） | `0`（未reset） | `0`（未reset） |
+| ②割込みレート 線1/線2（STORE4/5） | 0／`0x7d9`（累積2009、~80/s、正常域） | 0／`0x4ca`（累積1226、~50/s、正常域） |
+| 多重登録トレース（STORE7） | `0xa1020704`（nalloc=2 src1=7 src2=4） | `0xa1020704`（同左） |
+| コンソール（氾濫除去） | SYNC／advertising started 'ASP3-C5-BLE'／g_adv_rc=0／intr line2=48 | 同左（line2=45） |
+
+**③hci0実機検出（2ブート独立）**：ホストhci0（`8C:1D:96:BA:6D:BD`）の
+`bluetoothctl scan le`で`[NEW] Device D0:CF:13:F0:A7:44 ASP3-C5-BLE`を
+**boot1（RSSI -63〜-68）・boot2（キャッシュを`bluetoothctl remove`で消してから
+再スキャン＝鮮度保証、RSSI -62〜-83）の両方で検出**。MACはC5#1のBASE MAC
+（`D0:CF:13:F0:A7:44`）と一致（`own_addr_type=0`＝public address）。RSSIが
+ブート間・時系列で変動することが実放射（キャッシュヒットでない）の傍証。
+この`D0:CF:13:F0:A7:44`はこれまでBLEを一度も送出していない個体のため、
+検出は本ラウンドのadvが初出であることを意味する。
+
+**注：STORE4（線1）が2ブートとも0（線2のみ活動）**は、C6実施02が記録した
+同型の非対称（線1=0/線2活動）と一致する。多重登録トレース（STORE7）が
+nalloc=2＝2ソース（src7＋src4）とも正しく登録済みを示すため良性であり、
+C5固有の異常ではない（rc=0・hci0検出済みのため深追いしない）。
+
+**★判定＝D-2a達成・D-2b達成**。C5でBLEホストsync到達・接続可能アドバタイズ・
+OTA電波到達までを2ブート再現で確認した。
+
+### 変更ファイル
+
+| ファイル | 内容 |
+|---|---|
+| `apps/ble_host_smoke_c5/`（新規） | `ble_host_smoke_c5.c`/`.h`/`.cfg`：D-2a/D-2bアプリ（ble_host_smoke_c6を土台に、デバイス名`ASP3-C5-BLE`・C5用LP_AON STOREマップ・実施13 ICG init・sync待ちを100ms×200へ延長） |
+| `asp3/target/esp32c5_espidf/bt/stub/include/bt_nimble_config.h`（新規） | C5専用NimBLEホスト設定（LEGACY_VHCI=0。C3版＝LEGACY=1を流用しない） |
+| `asp3/target/esp32c5_espidf/esp_bt.cmake` | `ESP32C5_BT_NIMBLE`option＋自動ON、`bt/stub/include`のPREPEND、`CONFIG_BT_CONTROLLER_ONLY`と`hci_driver_standard.c`を`if(NOT ESP32C5_BT_NIMBLE)`へ、D-2a節（IDF v6.1のnimbleホスト一式＋`esp_nimble_mem.c`）追加 |
+| `asp3/target/esp32c3_espidf/wifi/esp_shim_cfg.h`・`esp_shim.cfg`（共有・strictly additive） | NimBLEプール拡張ゲート（SEM24→28/MTX8→12/DTQ4→8/TSK6→8）に`TOPPERS_ESP32C5_BT_NIMBLE`をOR追加。C3/C6の既存条件・値は不変（C5もC6同様にNimBLEホストのeventq/mutex/sem/taskを共有esp_shimプールから確保するため必要）。**注：本ファイルはesp32c3_espidf配下だが、C5がinclude/CFGで再利用している共有ファイルであり、追加はC3/C6の挙動を変えない**（禁則対象はasp3_core/hal/idfのみ） |
+
+submodule（`asp3/asp3_core`・`hal/`）・`~/tools/esp-idf-v6.1`はいずれも無変更。
+
+### 非回帰の確認
+
+- D-1（`bt_smoke_c5`）を`ESP32C5_BT=ON`で再ビルド：**RAM 70.77%（実施03の記録値と
+  完全一致）**、0エラー。gatingが正しいことを確認（D-1は`hci_driver_standard.c`を
+  リンク・`hci_driver_nimble.c`は不参照、D-2aは逆＝多重定義なし）。
+- D-2aビルド：FLASH 383584B（9.15%）・RAM 303920B（77.29%。WiFiビルドの76.25%と
+  同水準で余裕あり）、多重定義／未解決シンボルなし。
+
+### C5#1最終状態
+
+BLE実施05の`ESP32C5_BT=ON`＋`ESP32C5_BT_NIMBLE`（自動ON）ビルド
+（`build/ble_host_smoke_c5/asp_flash.bin`）をフル4MB `write-flash 0x0`済みのまま
+残置（D-2a/D-2b達成バイナリ。次段＝D-2c接続確立を同一条件で継続できる判断）。
+`load_test_c5_r47`（WiFi/TCP/UDPの恒久ビルド）への復元手順は実施03節に記載。
+
+### 使用した計測資産（scratchpad）
+
+`r04_console.py`（RTSリセット＋UART採取。氾濫は`grep -av`で除去。実施04から流用）、
+esptool v5.3.1 `--chip esp32c5 --before usb-reset --after no-reset read-mem <addr>`
+（LP_AON STORE回収。JTAG非依存）、ホストhci0の`bluetoothctl scan le`（OTA検出）。
+
+### 申し送り（次段＝D-2c 接続確立）
+
+C6実施02はD-2bで止まっている（D-2c接続はC3が`docs/bt-shim.md`で追っている段階）。
+C5もadv到達まで達成。次段でセントラルから接続を試みる場合、本ビルドは
+`CONFIG_BT_NIMBLE_SECURITY_ENABLE=0`（暗号なし）・GATTサーバは`ble_svc_gap/gatt`のみ
+の最小構成のため、GATT探索でNULL関数ポインタに当たる可能性（C3のD-2cで既知）に
+注意。氾濫の恒久修正（実施04申し送り＝`target_hrt_set_event`のクリーン再arm）は
+本ラウンドでも未実施（D-2a/D-2bはstore主体の判定で完遂できたため）。

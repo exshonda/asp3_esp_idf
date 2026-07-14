@@ -26,7 +26,7 @@
  *  部）．TOPPERS_ESP32C6_BT_NIMBLEをOR条件で追加し，C3の既存条件・値は
  *  一切変更しない（strictly additive．docs/ble-c5c6.md「BLE実施02」）．
  */
-#if defined(TOPPERS_ESP32C3_BT_NIMBLE) || defined(TOPPERS_ESP32C6_BT_NIMBLE)
+#if defined(TOPPERS_ESP32C3_BT_NIMBLE) || defined(TOPPERS_ESP32C6_BT_NIMBLE) || defined(TOPPERS_ESP32C5_BT_NIMBLE)
 #define ESP_SHIM_NUM_SEM    28    /* 24→28：NimBLE分+4 */
 #define ESP_SHIM_NUM_MTX    12    /* 8→12：NimBLE分+4 */
 #define ESP_SHIM_NUM_DTQ    8     /* 4→8：NimBLE eventq分+4 */
