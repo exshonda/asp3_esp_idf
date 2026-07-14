@@ -1,4 +1,10 @@
 /*
+ *  ★D-2c準備（GAP CONNECT/DISCONNECTマーカ＋ble_svc_gap/gatt_init呼出し
+ *  部分）はビルド未検証（IDF v6.1環境（`/home/honda/tools/esp-idf-v6.1`）
+ *  が本開発環境に存在しないため）．C6での同種変更はビルド検証済み
+ *  （docs/ble-c5c6-plan.md「8. D-2c準備の横展開」節）．C5移植は静的整合のみで，
+ *  実機・ビルドとも未検証．次回IDF v6.1環境で最初にビルドすること．
+ *
  *  NimBLE host スモークテスト（ESP32-C5．Phase D-2a／BLE実施05）
  *
  *  apps/ble_host_smoke_c6（C6のD-2a/D-2b）をC5向けに転写した版．
@@ -44,6 +50,7 @@
 #include "host/ble_hs_id.h"
 #include "host/ble_hs_adv.h"
 #include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
 
 /*
  *  実施13のICGアンロックをBTクロック初期化の一部として呼ぶ（bt/bt_shim.c，
@@ -84,6 +91,22 @@ extern volatile uint32_t esp_shim_int_count[];
 #define LP_AON_STORE3		0x600B100CUL	/* ble_hs reset reason/count */
 #define LP_AON_STORE4		0x600B1010UL	/* 割込みレート：CPU線1累積ミラー */
 #define LP_AON_STORE5		0x600B1014UL	/* 割込みレート：CPU線2累積ミラー */
+/*
+ *  ★ビルド未検証（ファイル冒頭コメント参照）．
+ *  D-2c準備（C3 wip 8476b55の横展開，docs/ble-c5c6-plan.md「8. D-2c
+ *  準備の横展開」）：GAP接続／切断マーカ．STORE0/2/3/4/5/7は本アプリで使用済み，
+ *  STORE1（RTC_SLOW_CLK_CAL，実施35）は既知の予約のため避ける．STORE6は
+ *  本アプリ内では未使用だが，C6実施02がSTORE6をreset_cbマーカに
+ *  使っており，クロスチップでの番地対応を崩さないため，C6と同一の
+ *  STORE8/9（`hal/components/soc/esp32c5/register/soc/lp_aon_reg.h`で
+ *  実在確認済み，本ラウンドでは未使用）を新規に明け渡す．フォーマット：
+ *  connect: 0x604E<status:8><conn_count:8>／
+ *  disconnect: 0xD15C<reason:8><disc_count:8>．
+ */
+#define LP_AON_STORE8		0x600B1020UL	/* GAP CONNECT マーカ */
+#define LP_AON_STORE9		0x600B1024UL	/* GAP DISCONNECT マーカ */
+#define BLE_CONN_MARK_ADDR	((void *) LP_AON_STORE8)
+#define BLE_DISC_MARK_ADDR	((void *) LP_AON_STORE9)
 
 #define BLE_SYNC_MARK_VAL	0x5ADE51C0UL
 
@@ -240,6 +263,12 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 	switch (event->type) {
 	case BLE_GAP_EVENT_CONNECT:
 		g_gap_conn_count++;
+		/*  ★ビルド未検証．D-2c物証：接続イベントをRTCへ記録
+		    （JTAG不要read-mem，C3 wip 8476b55と同一フォーマット）  */
+		sil_wrw_mem(BLE_CONN_MARK_ADDR,
+					0x604E0000UL
+					| (((uint32_t) event->connect.status & 0xffUL) << 8)
+					| (g_gap_conn_count & 0xffUL));
 		syslog(LOG_NOTICE,
 			   "ble_host_smoke_c5: GAP CONNECT status=%d handle=%d",
 			   (int_t) event->connect.status,
@@ -252,6 +281,11 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 	case BLE_GAP_EVENT_DISCONNECT:
 		g_gap_disc_count++;
 		g_adv_active = 0U;
+		/*  ★ビルド未検証（同上）  */
+		sil_wrw_mem(BLE_DISC_MARK_ADDR,
+					0xD15C0000UL
+					| (((uint32_t) event->disconnect.reason & 0xffUL) << 8)
+					| (g_gap_disc_count & 0xffUL));
 		syslog(LOG_NOTICE, "ble_host_smoke_c5: GAP DISCONNECT reason=%d",
 			   (int_t) event->disconnect.reason);
 		start_advertising();
@@ -308,6 +342,13 @@ main_task(EXINF exinf)
 	esp_shim_initialize();
 
 	/*
+	 *  ★ビルド未検証．D-2c準備：GAP接続／切断マーカを既知値(0)へ初期化
+	 *  （前回boot残値との混同回避．C3 wip 8476b55と同一の考え方）．
+	 */
+	sil_wrw_mem(BLE_CONN_MARK_ADDR, 0U);
+	sil_wrw_mem(BLE_DISC_MARK_ADDR, 0U);
+
+	/*
 	 *  実施13のICGアンロック．esp_bt_controller_init()より前に呼ぶこと
 	 *  （coldブート時のPHY初期化ハング対策．bt_smoke_c5と同一手順）．
 	 */
@@ -349,6 +390,25 @@ main_task(EXINF exinf)
 	if (err != ESP_OK) {
 		syslog(LOG_ERROR, "ble_host_smoke_c5: esp_nimble_init -> %d", (int_t) err);
 		return;
+	}
+
+	/*
+	 *  ★ビルド未検証（ファイル冒頭コメント参照）．D-2c準備の横展開
+	 *  （C3 wip 8476b55．docs/ble-c5c6-plan.md「8. D-2c準備の横展開」節，C6版と
+	 *  同一の配線）：標準GAP／GATTサービスを登録する．ble_svc_*_init は
+	 *  ble_gatts_add_svcsでサービス定義をキューへ積むだけで，実際の
+	 *  ATT属性登録は ble_hs_start→ble_gatts_start（ホストタスク側）で
+	 *  行われるため，nimble_port_freertos_init より前に呼ぶ．
+	 *  esp_nimble_init（=ble_hs_init）済みが前提．
+	 */
+	ble_svc_gap_init();
+	ble_svc_gatt_init();
+	{
+		int	rc_name = ble_svc_gap_device_name_set(BLE_DEVICE_NAME);
+		if (rc_name != 0) {
+			syslog(LOG_ERROR, "ble_host_smoke_c5: gap_device_name_set rc=%d",
+				   (int_t) rc_name);
+		}
 	}
 
 	ble_hs_cfg.sync_cb = on_sync;

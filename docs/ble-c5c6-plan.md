@@ -559,3 +559,167 @@ espidf/bt/`・`esp_bt.cmake`・`bt.cfg`）であり，これはCLAUDE.mdの
 - `hal/nuttx/`配下：C6/C5のBLE統合前例は**見当たらなかった**
   （`hal/nuttx/src/platform/nimble/`はNPL実装のヘッダ/ソースのみで，
   C6/C5固有のBLE bring-up資産ではない）。
+
+## 8. D-2c準備の横展開（2026-07-14）
+
+C3のD-2c（接続確立→GATTサーバ）は，wipコミット`8476b55`として
+「ビルド・flashまで到達，接続確立の実機確認は未達（別PCで再開予定）」の
+状態で保全されている。本節は，そのC3 wipの内容をC6（ビルド検証込み）・
+C5（静的移植のみ）へ横展開した記録。**実機（接続確立の確認）はC3/C6/C5
+いずれも未実施**——本節はあくまで次段（実機再開時）の準備。
+
+### C3 wip（8476b55）の内容
+
+- `asp3/target/esp32c3_espidf/bt/stub/include/bt_nimble_config.h`：
+  `CONFIG_BT_NIMBLE_GATT_SERVER=1`＋標準GAPサービス
+  （`CONFIG_BT_NIMBLE_GAP_SERVICE=1`・`ATT_MAX_PREP_ENTRIES=6`・
+  `SVC_GAP_CENT_ADDR_RESOLUTION=-1`・`SVC_GAP_PPCP_*=0`）を有効化。
+- `apps/ble_host_smoke/ble_host_smoke.c`：`gap_event_cb`のCONNECT/
+  DISCONNECTケースでLP_AON外の`0x60008xxx`域レジスタ（STORE6/STORE4，
+  D-2bのstorm probe用レジスタをD-2cでは接続観測用に転用）へマーカを
+  書込み，`main_task`冒頭で残値をクリア。`esp_nimble_init()`後に
+  `ble_svc_gap_init()`／`ble_svc_gatt_init()`／
+  `ble_svc_gap_device_name_set()`を呼ぶよう変更（`nimble_port_
+  freertos_init()`より前）。
+
+### C6への移植（ビルド検証込み）
+
+- `asp3/target/esp32c6_espidf/bt/stub/include/bt_nimble_config.h`：
+  機械的コピーはせず，既存構成との整合のみ行った——C6は元々
+  `CONFIG_BT_NIMBLE_GATT_SERVER=1`・`ATT_MAX_PREP_ENTRIES=64`を
+  実施02から保持済み（C3のwipが提案する値6より大きい既存値のため
+  **変更しなかった**）。新規追加は`CONFIG_BT_NIMBLE_GAP_SERVICE=1`＋
+  `SVC_GAP_CENT_ADDR_RESOLUTION=-1`＋`SVC_GAP_PPCP_MAX/MIN_CONN_
+  INTERVAL=0`＋`PPCP_SLAVE_LATENCY=0`＋`PPCP_SUPERVISION_TMO=0`の
+  5マクロのみ（`esp_nimble_cfg.h` L1846-1911で，C3と同一の
+  `MYNEWT_VAL_BLE_SVC_GAP_*`写像コードであることをC6のnimble
+  submoduleソースで確認済み）。
+- `apps/ble_host_smoke_c6/ble_host_smoke_c6.c`：
+  - GAP CONNECT/DISCONNECTマーカは，C3のようなSTORE転用ではなく，
+    C6のLP_AON STOREマップ（実施02：STORE0/2/3/4/5/6/7使用済み，
+    STORE1はノイズにつき使用禁止）の**未使用領域STORE8/9**
+    （`hal/components/soc/esp32c6/register/soc/lp_aon_reg.h`で実在
+    確認済み）を新規に明け渡した。フォーマットはC3と同一
+    （`0x604E<status:8><conn_count:8>` / `0xD15C<reason:8>
+    <disc_count:8>`）。
+  - `main_task`冒頭でSTORE8/9を0へクリア。
+  - `esp_nimble_init()`後に`ble_svc_gap_init()`／`ble_svc_gatt_init()`／
+    `ble_svc_gap_device_name_set(BLE_DEVICE_NAME)`を追加（C3と同じ
+    呼出し順序，`nimble_port_freertos_init()`より前）。
+  - `services/gatt/ble_svc_gatt.h`のincludeを追加（`ble_svc_gap.h`は
+    既存）。`esp_bt.cmake`は変更不要——`ble_svc_gap.c`／
+    `ble_svc_gatt.c`は実施02から既にソースリストに含まれている。
+
+**ビルド検証結果**（`riscv64-unknown-elf-gcc 13.2.0`，
+`-DASP3_TARGET=esp32c6_espidf -DESP32C6_BT=ON
+-DASP3_APPLDIR=apps/ble_host_smoke_c6 -DASP3_APPLNAME=ble_host_smoke_c6`）：
+
+| ビルド | 結果 | FLASH | RAM |
+|---|---|---|---|
+| D-2c準備後（本ラウンド） | 0エラー | 349584B (8.33%) | 303188B (71.86%) |
+| 変更前ベースライン（同一オプション，本ラウンド冒頭で確認） | 0エラー | 347760B (8.29%) | 303060B (71.83%) |
+
+GATTサービス登録コード追加分（FLASH+1824B・RAM+128B）のみの増分で，
+多重定義／未解決シンボルなし。
+
+**非回帰確認**：
+- `wifi_scan`（`-DESP32C6_WIFI=ON`）：0エラーでビルド成功
+  （FLASH 542528B 12.93%・RAM 377224B 89.41%）。本ラウンドはBT側
+  ファイルのみの変更でWiFi共有ファイルは無変更のため，形式確認に
+  留めず実ビルドで確認した。
+- C3 `ble_host_smoke`（`-DASP3_TARGET=esp32c3_espidf -DESP32C3_BT=ON`，
+  wip`8476b55`のまま無改造）：0エラーでビルド成功（RAM 304572B
+  92.95%）——C3側は本ラウンドで一切変更していないため，これはwip
+  コミット自体のビルド健全性の再確認（コミットメッセージの「ビルド・
+  flashまで到達」という記述と整合）。
+
+### C5への移植（静的のみ・★ビルド未検証）
+
+**★C5はこの環境でビルドできない**（`asp3/target/esp32c5_espidf/
+esp_bt.cmake`が要求するESP-IDF v6.1，`/home/honda/tools/esp-idf-
+v6.1`，が本開発環境に存在しないため）。以下は静的な整合確認のみ。
+
+- `asp3/target/esp32c5_espidf/bt/stub/include/bt_nimble_config.h`：
+  C6と同型の5マクロ（`GAP_SERVICE=1`＋`CENT_ADDR_RESOLUTION=-1`＋
+  `PPCP_*=0`）を追加。C5も実施05から`GATT_SERVER=1`・
+  `ATT_MAX_PREP_ENTRIES=64`を保持済みのため変更せず。ファイル冒頭と
+  追加箇所の両方に「★ビルド未検証（IDF v6.1環境で要ビルド）」を明記。
+- `apps/ble_host_smoke_c5/ble_host_smoke_c5.c`：C6と同一の設計
+  （STORE8/9をCONN/DISCマーカに新規使用，`main_task`冒頭クリア，
+  `esp_nimble_init()`後の`ble_svc_gap/gatt_init`呼出し）を移植。
+  C5のLP_AON STOREマップ（実施05：STORE0/2/3/4/5/7使用済み，STORE1は
+  実施35のRTC_SLOW_CLK_CAL用途で予約）ではSTORE6/8/9のいずれも本アプリ
+  内で未使用だが，クロスチップでの番地対応をC6と揃えるため**STORE8/9
+  を選択**した（STORE6はC6が別用途＝reset_cbマーカに使っているため
+  避けた）。ファイル冒頭と追加箇所の両方に「★ビルド未検証」を明記。
+- `services/gatt/ble_svc_gatt.h`のincludeを追加。`esp_bt.cmake`は
+  変更不要——C5も実施05から`ble_svc_gap.c`／`ble_svc_gatt.c`を
+  ソースリストに含んでいる（IDF v6.1の`NIMBLE_ROOT`経由）。
+
+**C5移植のリスク（v6.1マクロ体系との不整合の可能性）**：
+
+1. C5のNimBLEホストはhal submoduleではなくIDF v6.1のソースツリー
+   （`~/tools/esp-idf-v6.1`）を使う。今回追加した`esp_nimble_cfg.h`の
+   ゲート構造（`ble_svc_gap.c`の`MYNEWT_VAL(BLE_GATTS) &&
+   CONFIG_BT_NIMBLE_GAP_SERVICE`，`MYNEWT_VAL_BLE_SVC_GAP_PPCP_*`の
+   `#ifndef`フォールバックがGAP_SERVICEのifdefの外にある構造）は，
+   C6のhal submodule（esp-nimble）で実地確認したものであり，v6.1側の
+   実ソースはこの環境から参照できないため**確認していない**。Apache
+   Mynewt NimBLEの共通コードのため構造が一致する可能性は高いが，
+   v6.1固有の差分（バージョン間でのリファクタリング等）がある場合，
+   追加した5マクロだけでは足りない，または不要な可能性がある。
+2. C3のD-2c wipで使われた`ATT_MAX_PREP_ENTRIES=6`という小さい値を
+   踏襲せず，C5/C6の既存値`64`を維持した——この値はESP-IDF Kconfig
+   既定値であり，C3が意図的に絞った理由（RAM節約，本ビルドは最小
+   GATTサービスのみでlong writeがほぼ発生しない）が本ラウンドで
+   継承されていない。C5/C6のRAM予算次第では見直しの余地がある
+   （実施05のD-2aビルドはRAM 77.29%で「WiFiビルドの76.25%と同水準で
+   余裕あり」と記録されているため，即座に問題化する可能性は低いと
+   見るが未検証）。
+3. C5は`ble_gattc.c`の不整合（実施02がC6で踏んだ壁）を「壁が1件のみ」
+   （実施05）としてほぼ回避しているため，GATT_SERVER=1化に伴う
+   ビルドエラーの発生パターンがC6と異なる可能性がある——次回ビルド時
+   最初に確認すべき点。
+
+### マーカアドレス表（SYNC/ADV/CONN/DISC）
+
+| チップ | 用途 | アドレス | 値フォーマット | 検証状態 |
+|---|---|---|---|---|
+| C3 | ADV開始 | `0x6000805C` | `0x0ADE5000` | 実機到達済み（D-2b） |
+| C3 | GAP CONNECT | `0x600080C0`（STORE6，storm probe転用） | `0x604E<status:8><conn_count:8>` | wip・未検証 |
+| C3 | GAP DISCONNECT | `0x600080B8`（STORE4，storm probe転用） | `0xD15C<reason:8><disc_count:8>` | wip・未検証 |
+| C6 | sync | `0x600B1000`（LP_AON STORE0） | `0x5ade51c0` | 実機到達済み（D-2a） |
+| C6 | adv-return rc | `0x600B100C`（LP_AON STORE3） | `0xAD0000\|rc` | 実機到達済み（D-2b，rc=0） |
+| C6 | GAP CONNECT | `0x600B1020`（LP_AON STORE8，新規） | `0x604E<status:8><conn_count:8>` | **本ラウンドでビルド検証**・実機未検証 |
+| C6 | GAP DISCONNECT | `0x600B1024`（LP_AON STORE9，新規） | `0xD15C<reason:8><disc_count:8>` | **本ラウンドでビルド検証**・実機未検証 |
+| C5 | sync | `0x600B1000`（LP_AON STORE0） | `0x5ade51c0` | 実機到達済み（D-2a） |
+| C5 | adv-return rc | `0x600B1008`（LP_AON STORE2） | `0xAD0000\|rc` | 実機到達済み（D-2b，rc=0） |
+| C5 | GAP CONNECT | `0x600B1020`（LP_AON STORE8，新規） | `0x604E<status:8><conn_count:8>` | ★未ビルド・未検証 |
+| C5 | GAP DISCONNECT | `0x600B1024`（LP_AON STORE9，新規） | `0xD15C<reason:8><disc_count:8>` | ★未ビルド・未検証 |
+
+（C6/C5のCONN/DISCは番地を意図的に揃えてある——クロスチップでの
+read-mem手順を共通化するため。C3のみ別レジスタ域＝旧世代コントローラの
+storm probe転用という別経路であることに注意。）
+
+### 実機再開時の確認手順（次段）
+
+1. 対象ボードへ`ble_host_smoke_{c6,c5}`（`ESP32C{6,5}_BT=ON`＋
+   `ESP32C{6,5}_BT_NIMBLE`自動ON）をフルビルド・flashする
+   （C5は本ラウンドでは未ビルドのため，IDF v6.1環境で最初にビルドを
+   通すこと——上記「C5移植のリスク」節を参照）。
+2. ホストPCの`bluetoothctl`で対象デバイス（`ASP3-C6-BLE`/
+   `ASP3-C5-BLE`）へ`connect`する
+   （事前に`scan le`でMACを確認．D-2b実機記録のMAC/RSSIをdocs/
+   ble-c5c6.md実施02/05から参照）。
+3. `esptool --chip {esp32c6,esp32c5} --before usb-reset --after
+   no-reset read-mem 0x600B1020`（CONNECTマーカ）・`0x600B1024`
+   （DISCONNECTマーカ）を読み，`0x604E....`／`0xD15C....`の書込みを
+   確認する（JTAG不要，adv/接続のRF活動下でも安全）。
+4. 接続確立が確認できたら，ホスト側で`gatttool`／
+   `bluetoothctl gatt.list-attributes`等でGATTディスカバリを行い，
+   標準GAPサービス（Device Name／Appearance特性）が見えることを
+   確認する。
+5. 結果を確認したら，C3担当エージェントが`docs/bt-shim.md`へD-2c節を
+   追記する（本リポジトリの取り決め——本ラウンドでは`docs/bt-shim.md`
+   は変更していない）。C6/C5側の結果は本節（`docs/ble-c5c6-plan.md`
+   「8. D-2c準備の横展開」）を更新する。

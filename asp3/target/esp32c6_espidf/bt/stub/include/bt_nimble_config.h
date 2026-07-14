@@ -75,6 +75,30 @@
  *  既定値相当）．実機ビルドでの逐次発覚に基づき追加．
  */
 #define CONFIG_BT_NIMBLE_ATT_MAX_PREP_ENTRIES 64
+/*
+ *  D-2c準備の横展開（C3 wip 8476b55の内容をC6へ移植．
+ *  docs/ble-c5c6-plan.md「8. D-2c準備の横展開」節）：標準GAPサービス
+ *  （Device Name / Appearance キャラクタリスティック）を有効化．
+ *  ble_svc_gap.c:28 の `MYNEWT_VAL(BLE_GATTS) && CONFIG_BT_NIMBLE_
+ *  GAP_SERVICE` ゲートを満たすため必須（未定義だとble_svc_gap_defs/
+ *  ble_svc_gap_initがコンパイルされずリンクエラー．esp_nimble_cfg.h
+ *  L1846-1868で確認済み——C3と同一のMYNEWT_VAL_BLE_SVC_GAP_*写像
+ *  コードをC6のnimble submoduleでも確認した）．
+ */
+#define CONFIG_BT_NIMBLE_GAP_SERVICE 1
+/*  GAPサービスの各キャラクタリスティック構成（ESP-IDF Kconfig既定値．
+    C3のD-2c wipと同じ値）．CENT_ADDR_RESOLUTION=-1（Central Address
+    Resolutionキャラクタ非サポート），PPCP=0（Peripheral Preferred
+    Connection Params 無効）．esp_nimble_cfg.hのMYNEWT_VAL_BLE_SVC_GAP_
+    PPCP_*は`#ifndef`フォールバックがGAP_SERVICEのifdefの外にある
+    （esp_nimble_cfg.h L1893-1911）ため，GAP_SERVICEを立てる時点で
+    この4つの定義も必須（未定義のままだと後段でCONFIG_BT_NIMBLE_SVC_
+    GAP_PPCP_*という未宣言識別子への参照でコンパイル不能になる）．  */
+#define CONFIG_BT_NIMBLE_SVC_GAP_CENT_ADDR_RESOLUTION -1
+#define CONFIG_BT_NIMBLE_SVC_GAP_PPCP_MAX_CONN_INTERVAL 0
+#define CONFIG_BT_NIMBLE_SVC_GAP_PPCP_MIN_CONN_INTERVAL 0
+#define CONFIG_BT_NIMBLE_SVC_GAP_PPCP_SLAVE_LATENCY 0
+#define CONFIG_BT_NIMBLE_SVC_GAP_PPCP_SUPERVISION_TMO 0
 #define CONFIG_BT_NIMBLE_L2CAP_ENHANCED_COC 0
 #define CONFIG_BT_NIMBLE_DYNAMIC_SERVICE 0
 #define CONFIG_BT_NIMBLE_HS_FLOW_CTRL_ITVL 1000

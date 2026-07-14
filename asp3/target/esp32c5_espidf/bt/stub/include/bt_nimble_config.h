@@ -1,4 +1,13 @@
 /*
+ *  ★D-2c準備（GAP_SERVICE以下の追加分）はビルド未検証（IDF v6.1環境
+ *  （`/home/honda/tools/esp-idf-v6.1`）が本開発環境に存在しないため）．
+ *  C6での同種変更（本ファイル内GAP_SERVICE節のコメント参照）はビルド
+ *  検証済みだが，C5はhal submoduleではなくIDF v6.1のnimbleソースを
+ *  使うため，esp_nimble_cfg.hのgate位置がC6と完全一致する保証はない
+ *  （C6のesp-nimble submoduleとv6.1は別バージョンの可能性）．実機/
+ *  ビルド再開時は必ずビルドで確認すること．
+ *  docs/ble-c5c6-plan.md「8. D-2c準備の横展開」節にも同旨を記載．
+ *
  *  NimBLE（BLE実施05／Phase D-2a）用の CONFIG_BT_NIMBLE_* 補完ヘッダ
  *  （force-include．esp32c5_espidf専用——C3版を流用しない）
  *
@@ -74,6 +83,28 @@
  *  直接参照する残りのCONFIG_BT_NIMBLE_*一式（Kconfig.inの既定値相当）．
  */
 #define CONFIG_BT_NIMBLE_ATT_MAX_PREP_ENTRIES 64
+/*
+ *  ★ビルド未検証（IDF v6.1環境で要ビルド．ファイル冒頭コメント参照）．
+ *  D-2c準備の横展開（C3 wip 8476b55 / C6実施の内容をC5へ移植．
+ *  docs/ble-c5c6-plan.md「8. D-2c準備の横展開」節）：標準GAPサービス
+ *  （Device Name / Appearance キャラクタリスティック）を有効化．
+ *  C6と同じくble_svc_gap.c内の`MYNEWT_VAL(BLE_GATTS) &&
+ *  CONFIG_BT_NIMBLE_GAP_SERVICE`ゲートを満たすため必須と推定
+ *  （esp_nimble_cfg.hはApache Mynewt NimBLE系の共通ヘッダのため，
+ *  C6/hal submoduleと同じgate構造をIDF v6.1も持つ可能性が高いが，
+ *  v6.1ソース自体をこの環境で確認できないため未検証）．
+ */
+#define CONFIG_BT_NIMBLE_GAP_SERVICE 1
+/*  GAPサービスの各キャラクタリスティック構成（ESP-IDF Kconfig既定値．
+    C3/C6と同じ値）．CENT_ADDR_RESOLUTION=-1，PPCP=0（無効）．C6同様，
+    esp_nimble_cfg.hのMYNEWT_VAL_BLE_SVC_GAP_PPCP_*が`#ifndef`
+    フォールバックをGAP_SERVICEのifdefの外に持つ構造だと推定されるため，
+    GAP_SERVICEを立てる時点でこの4つも定義しておく（★同上・未検証）．  */
+#define CONFIG_BT_NIMBLE_SVC_GAP_CENT_ADDR_RESOLUTION -1
+#define CONFIG_BT_NIMBLE_SVC_GAP_PPCP_MAX_CONN_INTERVAL 0
+#define CONFIG_BT_NIMBLE_SVC_GAP_PPCP_MIN_CONN_INTERVAL 0
+#define CONFIG_BT_NIMBLE_SVC_GAP_PPCP_SLAVE_LATENCY 0
+#define CONFIG_BT_NIMBLE_SVC_GAP_PPCP_SUPERVISION_TMO 0
 #define CONFIG_BT_NIMBLE_L2CAP_ENHANCED_COC 0
 #define CONFIG_BT_NIMBLE_DYNAMIC_SERVICE 0
 #define CONFIG_BT_NIMBLE_HS_FLOW_CTRL_ITVL 1000
