@@ -62,13 +62,32 @@
 #define CONFIG_BT_NIMBLE_HCI_EVT_LO_BUF_COUNT 8
 #define CONFIG_BT_NIMBLE_GATT_MAX_PROCS 4
 /*
- *  D-2b：接続可能アドバタイズ（ペリフェラル）．デバイス名は
- *  ble_gap_adv_set_fields のadv dataで広告するため，GATTのGAPサービス
- *  （ble_svc_gap）は必須ではない．GATTサーバ有効化（GATT_SERVER=1）は
- *  実機で adv 経路の NULL 関数ポインタ呼出し／ブロッキング（要調査）を
- *  誘発したため，まず最小の adv 単体を通す段階では OFF のままとする．
- *  （GATTサービス立ち上げは追調査．docs/bt-shim.md「Phase D-2b」）．
+ *  D-2c：GATTサーバ有効化（MYNEWT_VAL_BLE_GATTS=CONFIG_BT_NIMBLE_GATT_SERVER，
+ *  esp_nimble_cfg.h:269-272）．D-2bのadvストーム根治（source多重登録バグ／
+ *  (1)(o)）後の再挑戦．旧D-2bの「adv経路NULL関数ポインタ」はストーム
+ *  （CPU飽和）状態下の観測であり，storm根治後に再評価する（docs/bt-shim.md
+ *  「Phase D-2c」）．
  */
+#define CONFIG_BT_NIMBLE_GATT_SERVER 1
+/*  ATT サーバのprepared-write（long write）エントリ数．GATT_SERVER=1で
+    ble_att_svr.c が MYNEWT_VAL_BLE_ATT_SVR_MAX_PREP_ENTRIES 経由で参照
+    （esp_nimble_cfg.h:616）．ESP-IDF既定は64だがRAM節約のため小さく取る
+    （本ビルドは最小GATTサービスのみ＝long writeはほぼ発生しない）．  */
+#define CONFIG_BT_NIMBLE_ATT_MAX_PREP_ENTRIES 6
+/*  標準GAPサービス（Device Name / Appearance キャラクタリスティック）を
+    有効化．ble_svc_gap.c:28 の `MYNEWT_VAL(BLE_GATTS) && CONFIG_BT_NIMBLE_GAP_SERVICE`
+    ゲートを満たすため必須（未定義だと ble_svc_gap_defs/ble_svc_gap_init が
+    コンパイルされずリンクエラー）．  */
+#define CONFIG_BT_NIMBLE_GAP_SERVICE 1
+/*  GAPサービスの各キャラクタリスティック構成（ESP-IDF Kconfig既定値）．
+    CENT_ADDR_RESOLUTION=-1（Central Address Resolutionキャラクタ非サポート），
+    PPCP=0（Peripheral Preferred Connection Params 無効）．いずれも
+    esp_nimble_cfg.h が #ifdef CONFIG_BT_NIMBLE_GAP_SERVICE で参照する．  */
+#define CONFIG_BT_NIMBLE_SVC_GAP_CENT_ADDR_RESOLUTION -1
+#define CONFIG_BT_NIMBLE_SVC_GAP_PPCP_MAX_CONN_INTERVAL 0
+#define CONFIG_BT_NIMBLE_SVC_GAP_PPCP_MIN_CONN_INTERVAL 0
+#define CONFIG_BT_NIMBLE_SVC_GAP_PPCP_SLAVE_LATENCY 0
+#define CONFIG_BT_NIMBLE_SVC_GAP_PPCP_SUPERVISION_TMO 0
 #define CONFIG_BT_NIMBLE_RPA_TIMEOUT 900
 #define CONFIG_BT_NIMBLE_HS_STOP_TIMEOUT_MS 2000
 #define CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT 1

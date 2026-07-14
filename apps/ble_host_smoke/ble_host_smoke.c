@@ -104,6 +104,13 @@ raw_systimer_lo(void)
 #define BLE_SYNC_MARK_VAL	0x5ADE51C0UL
 #define BLE_ADV_MARK_ADDR	((void *) 0x6000805CUL)	/* adv開始マーカ */
 #define BLE_ADV_MARK_VAL	0x0ADE5000UL
+/*  D-2c：GAP接続／切断マーカ（JTAG不要のesptool read-mem事後読み）．
+    STORE6(0xC0)/STORE4(0xB8)を使用＝D-2cでは storm probe を無効化
+    （storm根治はD-2b実施(1)(o)で構造的に確定済み・0x54のallocトレースは
+    probe非依存で継続）してこの2regを接続観測へ明け渡す．
+    connect: 0x604E<status:8><conn_count:8>／disconnect: 0xD15C<reason:8><disc_count:8>．  */
+#define BLE_CONN_MARK_ADDR	((void *) 0x600080C0UL)
+#define BLE_DISC_MARK_ADDR	((void *) 0x600080B8UL)
 
 static int gap_event_cb(struct ble_gap_event *event, void *arg);
 
@@ -177,6 +184,11 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 	switch (event->type) {
 	case BLE_GAP_EVENT_CONNECT:
 		g_gap_conn_count++;
+		/*  D-2c物証：接続イベントをRTCへ記録（JTAG不要read-mem）  */
+		sil_wrw_mem(BLE_CONN_MARK_ADDR,
+					0x604E0000UL
+					| (((uint32_t) event->connect.status & 0xffUL) << 8)
+					| (g_gap_conn_count & 0xffUL));
 		syslog(LOG_NOTICE,
 			   "ble_host_smoke: GAP CONNECT status=%d handle=%d",
 			   (int_t) event->connect.status,
@@ -190,6 +202,10 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 	case BLE_GAP_EVENT_DISCONNECT:
 		g_gap_disc_count++;
 		g_adv_active = 0U;
+		sil_wrw_mem(BLE_DISC_MARK_ADDR,
+					0xD15C0000UL
+					| (((uint32_t) event->disconnect.reason & 0xffUL) << 8)
+					| (g_gap_disc_count & 0xffUL));
 		syslog(LOG_NOTICE, "ble_host_smoke: GAP DISCONNECT reason=%d",
 			   (int_t) event->disconnect.reason);
 		start_advertising();	/*  切断後に再アドバタイズ  */
@@ -256,6 +272,11 @@ main_task(EXINF exinf)
 	esp_shim_initialize();
 	esp_shim_coex_adapter_register();
 
+	/*  D-2c：GAP接続／切断マーカを既知値(0)へ初期化（前回boot残値との
+	    混同回避．watchdog-resetはRTC domainを消さないため明示クリア）．  */
+	sil_wrw_mem(BLE_CONN_MARK_ADDR, 0U);
+	sil_wrw_mem(BLE_DISC_MARK_ADDR, 0U);
+
 	/*
 	 *  emi.c:164対策：BLEベースバンド(BB)のクロックを有効化する
 	 *  （bt_smoke と同じ．詳細はdocs/bt-shim.md）．
@@ -315,10 +336,11 @@ main_task(EXINF exinf)
 	cfg.adv_en = true;
 
 #ifdef HRT_PROBE
-	/*  （D-2b(1)）BLEコントローラISR（CPU線1）のストーム率／level割込み
-	    clear残存をRTC STORE4-7へ計装記録．advertising中はJTAGが死ぬので
-	    esptool read-mem（JTAG不要）で0x600080B8-C4を事後読みする．  */
-	esp_shim_isr_storm_probe = 1U;
+	/*  （D-2c）storm probe は無効化．D-2b(1)(o)でstorm根治は構造的に確定
+	    （0x54のallocトレース=0xA1020805はprobe非依存でbt_shimが継続記録）．
+	    STORE4(0xB8)/STORE6(0xC0)はD-2cのGAP接続／切断マーカへ転用するため
+	    probeの連続RTC書込みを止める（probe=0でも割込み配送自体は不変）．  */
+	esp_shim_isr_storm_probe = 0U;
 #endif
 	syslog(LOG_NOTICE, "ble_host_smoke: esp_bt_controller_init");
 	err = esp_bt_controller_init(&cfg);
@@ -350,10 +372,22 @@ main_task(EXINF exinf)
 	}
 
 	/*
-	 *  D-2b（最小adv）：GAP/GATTサービス（ble_svc_gap_init等）は
-	 *  接続可能アドバタイズには必須でないため，まずは登録しない．
-	 *  デバイス名はadvデータで広告する（start_advertising）．
+	 *  D-2c：標準GAP／GATTサービスを登録する（接続後にホストから
+	 *  サービスディスカバリで見えるようにするため）．ble_svc_*_init は
+	 *  ble_gatts_add_svcs でサービス定義をキューへ積むだけで，実際の
+	 *  ATT属性登録は ble_hs_start→ble_gatts_start（ホストタスク側）で
+	 *  行われる．したがって nimble_port_freertos_init より前に呼ぶ．
+	 *  esp_nimble_init（=ble_hs_init）済みが前提．
 	 */
+	ble_svc_gap_init();
+	ble_svc_gatt_init();
+	{
+		int	rc_name = ble_svc_gap_device_name_set(BLE_DEVICE_NAME);
+		if (rc_name != 0) {
+			syslog(LOG_ERROR, "ble_host_smoke: gap_device_name_set rc=%d",
+				   (int_t) rc_name);
+		}
+	}
 
 	/*
 	 *  sync/reset コールバックを登録してからホストタスクを起動する．
