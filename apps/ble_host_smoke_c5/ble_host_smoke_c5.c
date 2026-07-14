@@ -108,11 +108,15 @@ extern volatile uint32_t esp_shim_int_count[];
 #define BLE_CONN_MARK_ADDR	((void *) LP_AON_STORE8)
 #define BLE_DISC_MARK_ADDR	((void *) LP_AON_STORE9)
 #ifdef TOPPERS_ESP32C5_BT_SM
-/*  ★D-2d（SM）：ENC_CHANGE／PAIRING_COMPLETE マーカ（LP_AON STORE10/11＝
-    usb-reset生存．C3 の 0x58/0x54 相当）．値のフォーマットも C3 D-2d に揃える：
-    ENC=0x5DE0<status:8>／PAIRING=0x5DC0<status:8><our_sec:4><peer_sec:4>．  */
-#define LP_AON_STORE10		0x600B1028UL	/* ENC_CHANGE マーカ */
-#define LP_AON_STORE11		0x600B102CUL	/* PAIRING_COMPLETE マーカ */
+/*  ★D-2d（SM）：SMP マーカ．C5 は LP_AON STORE «0-9のみ» 実在（STORE10/11は
+    非実在＝旧定義は無効レジスタで誤読の原因だった）．空きは STORE6(0x600B1018)
+    のみのため，ENC_CHANGE と PAIRING_COMPLETE を «1レジスタ共用»＝last-wins で
+    タグ判別する（C3 の 0x54/0x58 分離と同じ情報を1regに凝縮）：
+      ENC_CHANGE 到達    → 0x5DE0<status:8>
+      PAIRING_COMPLETE   → 0x5DC0<status:8><our_sec:4><peer_sec:4>
+    PAIRING は ENC の «後» に発火するので，成功時は 0x5DC0...，失敗（鍵配布で
+    止まる）時は 0x5DE0<enc_status>（0=暗号OKだが未完／13=ETIMEOUT）が残る．  */
+#define LP_AON_STORE_SM		0x600B1018UL	/* STORE6：ENC/PAIRING 共用マーカ */
 #endif
 
 #define BLE_SYNC_MARK_VAL	0x5ADE51C0UL
@@ -318,8 +322,8 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 		break;
 #ifdef TOPPERS_ESP32C5_BT_SM
 	case BLE_GAP_EVENT_ENC_CHANGE:
-		/*  D-2d：暗号化結果．STORE10 に 0x5DE0<status>（C3 D-2d と同形式）．  */
-		sil_wrw_mem((void *) LP_AON_STORE10,
+		/*  D-2d：暗号化結果．STORE6 共用に 0x5DE0<status>（PAIRING が後で上書き）．  */
+		sil_wrw_mem((void *) LP_AON_STORE_SM,
 					0x5DE00000UL | ((uint32_t) event->enc_change.status & 0xffUL));
 		syslog(LOG_NOTICE, "ble_host_smoke_c5: GAP ENC_CHANGE status=%d",
 			   (int_t) event->enc_change.status);
@@ -342,7 +346,7 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 
 			(void) ble_store_util_count(BLE_STORE_OBJ_TYPE_OUR_SEC, &our_cnt);
 			(void) ble_store_util_count(BLE_STORE_OBJ_TYPE_PEER_SEC, &peer_cnt);
-			sil_wrw_mem((void *) LP_AON_STORE11,
+			sil_wrw_mem((void *) LP_AON_STORE_SM,
 						0x5DC00000UL
 						| (((uint32_t) event->pairing_complete.status & 0xffUL) << 8)
 						| (((uint32_t) our_cnt & 0xfUL) << 4)

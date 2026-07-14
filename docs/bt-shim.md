@@ -2557,3 +2557,27 @@ bleprph 例は `set-target esp32c3`＋`CONFIG_EXAMPLE_BONDING=y`。
 RAM 77.44%)，C5 WiFi v8(wifi_scan) 非回帰(RAM 76.05%)。これで C5 は D-2c/D-2d 相当の
 SM/GATT 追加＝bonding 試行の «土台» が復旧（C5は別blob 015db3db＝C3の壁は非該当の公算）。
 残＝SM/GATT移植＋実機bondテスト（次セッション）。
+
+### ★★★C5 実機 bond テスト（2026-07-14）：C5（別blob）も «厳密に同一» の失敗＝真因を «我々の共通 esp_shim» に確定（blob/silicon を実証で排除）
+C5 に D-2d（SMP/bonding）を移植し（`ESP32C5_BT_SM`＝tinycrypt+ble_store_config、
+app に SM設定/security_initiate/ENC・PAIRINGマーカ）実機テスト（board=C5#1
+`d0:cf:13:f0:a7:44`）。マーカは C5 の LP_AON STORE «0-9のみ実在» のため STORE6
+(0x600B1018) に ENC/PAIRING を共用（last-wins・タグ 0x5DE0/0x5DC0 で判別）。
+
+実機（Android/スマホ）：接続→pair→切断＝**C3 と同症状**。DUT マーカ（信頼できる
+STORE6）＝**`0x5de0000d`＝ENC_CHANGE status=13(BLE_HS_ETIMEOUT)・PAIRING_COMPLETE
+不発**，CONN=`0x604e0001`，DISC reason=`0x13`＝**C3 と «厳密に同一の機序»**。
+
+**★決定的な交絡排除**：C3(blob `dfdadb9d`)と C5(blob `015db3db`＝別物)が «同一» の
+失敗＝bond不成立は **blob 固有ではない**。かつ stock IDF は C3(同blob)で bond 成功。
+∴ **真因は blob/silicon ではなく «我々の共通 esp_shim/os_adapter»** で «実証» 確定
+（2つの異なる blob で同症状）。前記「次の決定打（NuttXが同blobでbondするか／
+blob-swap）」は不要＝**esp_shim（os_adapter プリミティブ）に集中**すればよい。
+
+**残る問い**（redirect後）：我々の esp_shim の «どの» プリミティブ／挙動が IDF の
+os_adapter と違い «暗号後の鍵配布 ACL» を止めるか。既反証＝キューE_CTX(pend_ring済)・
+セマフォE_CTX(sem_ectx=0＝sig_semはISR可)・NPLタイマ・key_dist。次＝SVC_PERROR診断を
+«C5 で» 成立させる（C5はSTOREマーカが信頼でき，非E_OK API を RTC へ記録すれば
+コンソール不安定を回避できる）／IDF os_adapter との «動作時» 差分（バッファ返却・
+flow control・イベント順序）を C3/C5 共通の観点で精査。C5移植は commit 369a86a、
+マーカ修正は本コミット。
