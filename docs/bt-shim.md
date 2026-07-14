@@ -2676,3 +2676,14 @@ timeout→app に ENC_CHANGE status=13(ETIMEOUT)。
 CONFIG_BT_NIMBLE_HS_PVCY=1 を与えれば Identity 配布がコンパイルインし sm_tx>0＝bond 完遂
 の見込み。次＝PVCY 有効化（sdkconfig_stub 追加＋依存 CONFIG／undefined ref 対処）→実機で
 PAIRING_COMPLETE 確認。
+
+#### C3 実機再テスト（同日・中断）：PVCY修正版を flash・広告確認（ASP3-C3-BLE 60:55:F9:57:C2:60 @ttyACM5）まで完了、connect 不可で中断
+C3 に PVCY 修正（ae21e7a）版 ble_host_smoke を flash（tmp/c3ble.sh flash＝usb-reset→
+watchdog-reset で download-latch 回避）。広告は確認（ASP3-C3-BLE）。だが central から
+connect 不可でペアリング未到達＝中断。connect 不可は PVCY 修正と別件の可能性が高い
+（C3 既知：①コンソール open/esptool 接触の DTR/RTS リセット [[c3-usbjtag-serial-open-resets-dut]]
+②ノード番号ドリフト ttyACM5↔8 ③BlueZ 側の古い bond/キャッシュ）。次回＝connect 切り分け
+（BlueZ で remove 60:55:F9:57:C2:60→power cycle→scan→connect，または nRF/スマホで試行）
+後に bond 確認（マーカ 0x60008054=PAIRING_COMPLETE tag 0x5DC0 status=0／0x60008058=
+ENC_CHANGE tag 0x5DE0）。C5 は bond 成功済＝真因/修正は実証済で，C3 は同一修正の実機
+再確認のみが残タスク。
