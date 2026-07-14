@@ -26,8 +26,10 @@
  *    encchg > 0             → status で成否（0=成功／非0=失敗）
  *
  *  0x50 レイアウト（各バイト飽和255）:
- *    [31:24] host 処理 EVT 総数（wrapper 稼働の sanity。0x5ADE51C0 のままなら
- *            wrapper 未動作＝--wrap 不発）
+ *    [31:24] LTK Request 到着〜Encryption Change 到着の «秒» 差（★遅延実測。
+ *            〜30 なら «遅いハンドシェイク»＝手遅れで SM タイムアウト／〜0-2 なら
+ *            «速いのに SM がタイムアウト»＝NimBLE SM proc バグ。当初の total は
+ *            wrapper 稼働実証済みのため delta 秒へ転用）
  *    [23:16] 直近 Encryption Change の status バイト
  *    [15: 8] Encryption Change(0x08) 到着数
  *    [ 7: 0] LE LTK Request(0x3E/0x05) 到着数
@@ -37,22 +39,34 @@
  */
 #include <stdint.h>
 
+/*  fch_hrt()＝高分解能タイマ（μs 単位の HRTCNT＝uint32_t）．LTK Request〜
+    Encryption Change の実時間差を測るために使う（タスク文脈で呼出し可）．  */
+extern uint32_t fch_hrt(void);
+
 #define EVT_TRACE_RTC	((volatile uint32_t *) 0x60008050UL)
 
 volatile uint32_t	g_evt_total;		/* host 処理 HCI EVT 総数        */
 volatile uint32_t	g_evt_ltk_req;		/* LE LTK Request(0x3E/0x05) 数  */
 volatile uint32_t	g_evt_enc_chg;		/* Encryption Change(0x08) 数    */
 volatile uint32_t	g_evt_enc_status;	/* 直近 Encryption Change status */
+volatile uint32_t	g_evt_ltk_hrt;		/* 初回 LTK Request の HRT(μs)   */
+volatile uint32_t	g_evt_delta_us;		/* LTK Req〜Enc Change の差(μs)  */
+volatile uint32_t	g_evt_enc_hrt;		/* Encryption Change(0x08) の HRT(μs)．
+										   ★app が ETIMEOUT を受けた時刻との差＝
+										   «実30秒待ち»(PDU欠落) vs «早発火»(NPL)の判別 */
 
 static void
 evt_trace_pack(void)
 {
-	uint32_t t = g_evt_total   > 255U ? 255U : g_evt_total;
+	uint32_t d = g_evt_delta_us / 1000000U;	/* μs→秒 */
 	uint32_t l = g_evt_ltk_req > 255U ? 255U : g_evt_ltk_req;
 	uint32_t c = g_evt_enc_chg > 255U ? 255U : g_evt_enc_chg;
 	uint32_t s = g_evt_enc_status & 0xffU;
 
-	*EVT_TRACE_RTC = (t << 24) | (s << 16) | (c << 8) | l;
+	if (d > 255U) {
+		d = 255U;
+	}
+	*EVT_TRACE_RTC = (d << 24) | (s << 16) | (c << 8) | l;
 }
 
 /*  app が起動時に一度呼ぶ（.bss は0初期化だが SYNC マーカ転用を明示化）  */
@@ -63,6 +77,9 @@ esp_evt_trace_reset(void)
 	g_evt_ltk_req = 0U;
 	g_evt_enc_chg = 0U;
 	g_evt_enc_status = 0U;
+	g_evt_ltk_hrt = 0U;
+	g_evt_delta_us = 0U;
+	g_evt_enc_hrt = 0U;
 	evt_trace_pack();
 }
 
@@ -81,9 +98,16 @@ __wrap_ble_hs_hci_evt_process(void *ev)
 		if (code == 0x08U) {			/* Encryption Change */
 			g_evt_enc_chg++;
 			g_evt_enc_status = p[2];	/* status バイト */
+			g_evt_enc_hrt = fch_hrt();	/* Enc Change 到着時刻 */
+			if (g_evt_ltk_hrt != 0U) {
+				g_evt_delta_us = g_evt_enc_hrt - g_evt_ltk_hrt;
+			}
 		}
 		else if (code == 0x3EU && p[2] == 0x05U) {	/* LE Meta / LTK Request */
 			g_evt_ltk_req++;
+			if (g_evt_ltk_hrt == 0U) {
+				g_evt_ltk_hrt = fch_hrt();	/* 初回 LTK Request 時刻 */
+			}
 		}
 		evt_trace_pack();
 	}

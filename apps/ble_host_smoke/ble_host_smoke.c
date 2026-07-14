@@ -47,6 +47,9 @@
  *  esp_bt_controller_init() より前に呼ぶ必要がある．詳細はdocs/bt-shim.md．
  */
 extern void esp_shim_bt_clock_init(void);
+/*  D-2d bond修正：保留リング(pend_ring)の周期flush用（下記 main_task 定常
+    ループから呼ぶ）．pend残0なら即return＝非回帰．  */
+extern void esp_shim_queue_flush_pending(void);
 
 #ifdef TOPPERS_ESP32C3_BT_SM
 /*
@@ -493,8 +496,30 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 		/*  D-2d(SM)：SMPペアリング/暗号化の結果（status=0が成功）  */
 		/*  SMP診断マーカ（STORE2 0x58）：tag 0x5DE0＝ENC_CHANGE 到達，
 		    下位バイト=status．esptool dump-mem で serial 非開放のまま読める．  */
+#ifdef TOPPERS_ESP32C3_BT_EVT_TRACE
+		/*  ★反証実験：HCI Encryption Change(0x08) 到着〜この app ENC_CHANGE
+		    通知までの «実秒»．status=13(ETIMEOUT) のとき，〜30 なら «実30秒
+		    待ち»＝NimBLE の SM タイマは正常＝真因は Identity PDU(ACLデータ)
+		    欠落／≪30（数秒）なら «NPL タイマ早発火»＝Codex 説．byte1 に格納：
+		    0x5DE0<delta秒:8><status:8>．  */
+		{
+			extern volatile uint32_t	g_evt_enc_hrt;
+			uint32_t	dsec = 0U;
+
+			if (g_evt_enc_hrt != 0U) {
+				dsec = (fch_hrt() - g_evt_enc_hrt) / 1000000U;
+				if (dsec > 255U) {
+					dsec = 255U;
+				}
+			}
+			sil_wrw_mem((void *) 0x60008058UL,
+						0x5DE00000UL | (dsec << 8)
+						| ((uint32_t) event->enc_change.status & 0xffUL));
+		}
+#else
 		sil_wrw_mem((void *) 0x60008058UL,
 					0x5DE00000UL | ((uint32_t) event->enc_change.status & 0xffUL));
+#endif
 		syslog(LOG_NOTICE, "ble_host_smoke: GAP ENC_CHANGE status=%d",
 			   (int_t) event->enc_change.status);
 		{
@@ -819,8 +844,27 @@ main_task(EXINF exinf)
 	 */
 	{
 		uint32_t	sec = 0U;
+		uint32_t	sub = 0U;
 
 		for (;;) {
+			/*
+			 *  ★D-2d bond修正（安全網）：保留リング(pend_ring)に滞留した
+			 *  ACL RX を «100ms周期» でflushする．ペアリング/鍵配布の SMP PDU
+			 *  （ACLデータ）が E_CTX フォールバックで pend_ring に退避された後，
+			 *  以後キュー交通が途絶えると exit_critical / queue-op の機会的
+			 *  flushが走らず滞留し，NimBLE の SM proc が対向 PDU を待って
+			 *  最終的に 30秒で BLE_HS_ETIMEOUT する（docs/bt-shim.md「D-2d
+			 *  bond診断」で暗号後の Identity PDU 滞留＝30秒待ちを実測確定）．
+			 *  独立タスク(main_task)から高頻度flushすれば滞留が ≤100ms で解け，
+			 *  対話的PDU交換にも鍵配布にも間に合う．pend残0なら即return＝
+			 *  非回帰・非侵襲（本ループはBLE常駐アプリの心臓部）．
+			 */
+			esp_shim_queue_flush_pending();
+			(void) tslp_tsk(100000);	/* 100ms */
+			if (++sub < 10U) {
+				continue;		/* notify/security/HBは1秒毎 */
+			}
+			sub = 0U;
 			notify_tick();
 #ifdef TOPPERS_ESP32C3_BT_SM
 			bt5_security_tick();	/* 接続5秒後に slave SecReq（S3 BT-5移植） */
@@ -833,7 +877,6 @@ main_task(EXINF exinf)
 					   (unsigned) g_gap_disc_count, (unsigned) g_notify_sent,
 					   (unsigned) g_notify_fail, (unsigned) g_write_count);
 			}
-			(void) tslp_tsk(1000000);	/* 1s */
 		}
 	}
 }
