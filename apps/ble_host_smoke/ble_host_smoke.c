@@ -95,6 +95,10 @@ volatile uint32_t	g_notify_fail;		/* 送出失敗回数 */
 volatile int32_t	g_notify_last_rc;	/* 最後の失敗rc */
 volatile uint32_t	g_write_count;		/* write特性の受信回数（putカウンタ） */
 volatile uint32_t	g_write_last;		/* 直近writeの先頭バイト＋長さ */
+#ifdef TOPPERS_ESP32C3_BT_SM
+volatile uint32_t	g_conn_secs;		/* 接続経過秒（SecReq遅延用．S3 BT-5移植） */
+volatile uint8_t	g_sec_initiated;	/* slave Security Request 送出済みフラグ */
+#endif
 
 /*
  *  D-2b調査（HRT凍結検証）：SYSTIMER HWカウンタ直読みプローブ．
@@ -319,6 +323,40 @@ notify_tick(void)
 	}
 }
 
+#ifdef TOPPERS_ESP32C3_BT_SM
+/*
+ *  D-2d(bond)：接続経過秒を加算し，接続5秒後に «未暗号» なら slave
+ *  Security Request を1回だけ送る（1秒周期ループから呼ぶ．S3 BT-5
+ *  bt5_security_tick を逐語移植）．S3 は connect で «ペアリング要求が出る»＝
+ *  ペリフェラル発の SecReq が central にペアリングを開始させるため．C3 の
+ *  D-2d 逐語移植ではこの接続時セキュリティ開始が欠落しており，暗号必須特性
+ *  0xABF4 の READ でしかトリガできなかった．S3 と同一トリガに揃えることで
+ *  «暗号有効化タイムアウト» が 0xABF4-read 経路特有か普遍かも切り分けられる．
+ */
+static void
+bt5_security_tick(void)
+{
+	struct ble_gap_conn_desc	desc;
+	uint16_t					ch = g_conn_handle;
+	int							rc;
+
+	if (ch == BLE_HS_CONN_HANDLE_NONE) {
+		return;
+	}
+	g_conn_secs++;
+	if (g_conn_secs < 5U || g_sec_initiated != 0U) {
+		return;
+	}
+	g_sec_initiated = 1U;
+	if (ble_gap_conn_find(ch, &desc) != 0 || desc.sec_state.encrypted) {
+		return;		/*  既に暗号化済みなら不要  */
+	}
+	rc = ble_gap_security_initiate(ch);
+	syslog(LOG_NOTICE,
+		   "ble_host_smoke: BT5 security_initiate(slave SecReq) rc=%d", (int_t) rc);
+}
+#endif /* TOPPERS_ESP32C3_BT_SM */
+
 /*
  *  接続可能アドバタイズ（undirected connectable / general discoverable）を
  *  開始する．sync完了後および切断後に呼ぶ．
@@ -401,6 +439,11 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 		if (event->connect.status == 0) {
 			/*  D-2d：notify送出先の接続ハンドルを記録  */
 			g_conn_handle = event->connect.conn_handle;
+#ifdef TOPPERS_ESP32C3_BT_SM
+			/*  D-2d(bond)：接続5秒後に slave SecReq を送るための計時開始  */
+			g_conn_secs = 0U;
+			g_sec_initiated = 0U;
+#endif
 		}
 		else {
 			/*  接続確立失敗＝再アドバタイズ  */
@@ -413,6 +456,9 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 		g_adv_active = 0U;
 		g_conn_handle = BLE_HS_CONN_HANDLE_NONE;	/* D-2d */
 		g_notify_enabled = 0U;						/* D-2d */
+#ifdef TOPPERS_ESP32C3_BT_SM
+		g_sec_initiated = 0U;						/* D-2d(bond) */
+#endif
 		sil_wrw_mem(BLE_DISC_MARK_ADDR,
 					0xD15C0000UL
 					| (((uint32_t) event->disconnect.reason & 0xffUL) << 8)
@@ -767,6 +813,9 @@ main_task(EXINF exinf)
 
 		for (;;) {
 			notify_tick();
+#ifdef TOPPERS_ESP32C3_BT_SM
+			bt5_security_tick();	/* 接続5秒後に slave SecReq（S3 BT-5移植） */
+#endif
 			sec++;
 			if ((sec % 60U) == 0U) {
 				syslog(LOG_NOTICE,
