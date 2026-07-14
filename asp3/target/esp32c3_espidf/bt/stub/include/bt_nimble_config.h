@@ -178,7 +178,18 @@
  *  ENC status=0・bond 成功を実証（C3 も同一 blob 非依存の同一失敗＝同じ真因）．
  *  working S3 も CONFIG_BT_NIMBLE_HS_PVCY=1（bt_nimble_config.h:202）．
  *  ble_hs_pvcy.c/ble_hs_resolv.c は esp_bt.cmake:364-365 に既にリンク済．
+ *
+ *  ★connect不可切り分け（docs/c3-ble-connect-plan.md 段階1）用トグル：
+ *  esp_bt.cmake の option(ESP32C3_BT_PVCY) が OFF のとき TOPPERS_C3_BT_PVCY_OFF
+ *  が -D 定義され，PVCY=0（＝起動時 resolving-list HCIバースト無し・
+ *  ただし responder Identity 鍵配布がコンパイルアウト＝bond不可）になる．
+ *  これは A/B 切り分け専用の一時ビルド．**恒久ビルドの既定は PVCY=1**
+ *  （ESP32C3_BT_PVCY=ON＝-D 無し）のまま変えない．
  */
+#ifdef TOPPERS_C3_BT_PVCY_OFF
+#define CONFIG_BT_NIMBLE_HS_PVCY 0
+#else
 #define CONFIG_BT_NIMBLE_HS_PVCY 1
+#endif
 
 #endif /* TOPPERS_BT_NIMBLE_CONFIG_H */

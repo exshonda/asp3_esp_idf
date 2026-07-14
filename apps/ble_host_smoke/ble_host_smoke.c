@@ -36,6 +36,9 @@
 #include "host/ble_gap.h"
 #include "host/ble_hs_id.h"
 #include "host/ble_hs_adv.h"
+#ifdef TOPPERS_C3_BT_CONNECT_FIX_UNDO_RESOLV
+#include "host/ble_hs_pvcy.h"	/*  connect-fix draft (i): ble_hs_pvcy_set_resolve_enabled  */
+#endif
 #include "host/ble_gatt.h"
 #include "host/ble_uuid.h"
 #include "os/os_mbuf.h"
@@ -591,6 +594,22 @@ on_sync(void)
 	g_ble_sync_done = 1U;
 	sil_wrw_mem(BLE_SYNC_MARK_ADDR, BLE_SYNC_MARK_VAL);
 	syslog(LOG_NOTICE, "ble_host_smoke: ble_hs SYNC, host up");
+
+#ifdef TOPPERS_C3_BT_CONNECT_FIX_UNDO_RESOLV
+	/*  connect不可 恒久修正候補(i)（既定OFF・docs/c3-ble-connect-plan.md 段階1）．
+	    PVCY=1 の起動時HCIバースト（ble_hs_startup_go→ble_hs_pvcy_set_our_irk）が
+	    有効化したコントローラ内アドレス解決を，アドバタイズ開始前にここで無効へ
+	    戻す．on_sync は ble_hs_startup_go 完了後（ble_hs.c: sync_cb）に呼ばれる
+	    ため，このタイミングでバーストは既に出終わっている．PVCY=1 のまま
+	    （bond の Identity 鍵配布ゲートは維持）．本アプリは privacy=0＝RPA非使用
+	    のためアドレス解決OFFは機能に無影響の見込み（HW確認は phase-2）．  */
+	{
+		int rc_res = ble_hs_pvcy_set_resolve_enabled(0);
+		syslog(LOG_NOTICE,
+		       "ble_host_smoke: connect-fix(i) undo addr-res-enable rc=%d",
+		       rc_res);
+	}
+#endif
 
 	/*  sync完了＝コントローラ同期済み．接続可能アドバタイズを開始する
 	    （ble_gap_*はsync後のイベント文脈で呼ぶのが作法．NimBLE設計）．  */

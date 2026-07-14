@@ -236,6 +236,33 @@ if(ESP32C3_BT_NIMBLE)
         #  （bt_smoke=コントローラのみ のビルドはプールを増やさない）．
         TOPPERS_ESP32C3_BT_NIMBLE
     )
+    #  ---- 段階1 A/B切り分け用：PVCY トグル（既定=ON＝bond有効・恒久ビルド） ----
+    #  connect不可の切り分け（docs/c3-ble-connect-plan.md 段階1）専用．
+    #  OFF にすると TOPPERS_C3_BT_PVCY_OFF を -D 定義し，bt_nimble_config.h が
+    #  CONFIG_BT_NIMBLE_HS_PVCY=0 とする＝起動時 resolving-list HCIバースト
+    #  （LE Set Address Resolution Enable/Clear/Add）が出なくなる代わりに，
+    #  responder Identity 鍵配布がコンパイルアウトされ bond不可になる．
+    #  よってこれは A/B 用の一時ビルド専用．**恒久ビルドの既定は ON のまま**．
+    #    使い方（切り分け専用ビルド）：cmake ... -DESP32C3_BT_PVCY=OFF
+    option(ESP32C3_BT_PVCY "NimBLE host privacy / resolving-list startup burst (bond needs ON; OFF is A/B diag only)" ON)
+    if(NOT ESP32C3_BT_PVCY)
+        list(APPEND ASP3_COMPILE_DEFS TOPPERS_C3_BT_PVCY_OFF)
+    endif()
+
+    #  ---- connect不可 恒久修正候補(i)（ドラフト・既定OFF） ----
+    #  docs/c3-ble-connect-plan.md 段階1で「PVCY=0でconnect成功／PVCY=1で失敗」＝
+    #  候補1が確定した場合の恒久修正候補(i)．app（ble_host_smoke.c on_sync）で
+    #  アドバタイズ開始前に ble_hs_pvcy_set_resolve_enabled(0) を呼び，起動時
+    #  バーストが有効化したアドレス解決を「元に戻す」．PVCY=1 を保つため bond
+    #  （Identity 鍵配布のコンパイル時ゲート）は維持される．本アプリは
+    #  privacy=0（ble_hs_id_infer_auto(0,…)＝RPA非使用）のためアドレス解決OFFは
+    #  機能に影響しない見込み（HW確認は phase-2）．**実機で候補1確定後に投入**．
+    #    使い方：cmake ... -DESP32C3_BT_CONNECT_FIX_UNDO_RESOLV=ON
+    option(ESP32C3_BT_CONNECT_FIX_UNDO_RESOLV "Undo startup addr-res-enable in on_sync (connect-fix draft i, default OFF)" OFF)
+    if(ESP32C3_BT_CONNECT_FIX_UNDO_RESOLV)
+        list(APPEND ASP3_COMPILE_DEFS TOPPERS_C3_BT_CONNECT_FIX_UNDO_RESOLV)
+    endif()
+
     if(ESP32C3_BT_SM)
         #  D-2d：SMP 有効．app 側（ble_host_smoke.c）の SM 設定・store 初期化を
         #  有効化する識別子．NIMBLE_BLE_SM は bt_nimble_config.h の
@@ -452,6 +479,28 @@ if(ESP32C3_BT_NIMBLE)
             -Wl,--wrap=ble_l2cap_rx
         )
         list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_BT_EVT_TRACE)
+    endif()
+
+    #
+    #  ---- connect不可 恒久修正候補(ii)（ドラフト・既定OFF） ----
+    #  docs/c3-ble-connect-plan.md 段階1で候補1が確定した場合の恒久修正候補(ii)．
+    #  shim/transport 層で出ていくHCIコマンドを --wrap で捕まえ，
+    #  «LE Set Address Resolution Enable»（OGF=0x08/OCF=0x2D＝opcode 0x202D）の
+    #  enable バイトを 0 に潰して __real_ へ渡す（Command Complete は偽造せず，
+    #  コントローラに有効なコマンドを送り正常応答させる＝候補(i)と違い解決を
+    #  «一度も» 有効化しない）．clear/add は応答処理を要するため触らない．
+    #  段階1で「どのコマンドで詰まるか」実機判明後に対象opcodeを hci_pvcy_filter.c
+    #  へ追加する．**実機で候補1確定後に投入**．
+    #  ★wrap 対象は esp_vhci_host_send_packet（esp_nimble_hci.c から名前付き直 jal
+    #    で呼ばれ確実に on-path．ble_hci_trans_hs_cmd_tx を wrap すると同モジュール
+    #    内 tail-jump 経路のため inert＝objdump で確認済み）．acl_trace も同関数 wrap 実績．
+    #    使い方：cmake ... -DESP32C3_BT_PVCY_FILTER=ON
+    #
+    option(ESP32C3_BT_PVCY_FILTER "Neutralize LE Set Address Resolution Enable in HCI TX (connect-fix draft ii, default OFF)" OFF)
+    if(ESP32C3_BT_PVCY_FILTER)
+        list(APPEND ASP3_SYSSVC_TARGET_C_FILES ${BT_TARGETDIR}/hci_pvcy_filter.c)
+        list(APPEND ASP3_LINK_OPTIONS -Wl,--wrap=esp_vhci_host_send_packet)
+        list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_BT_PVCY_FILTER)
     endif()
 
 endif()
