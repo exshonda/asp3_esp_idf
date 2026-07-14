@@ -2476,3 +2476,31 @@ BLE=`nimble-bleprph` 60:55:F9:57:C2:62）へ焼いて実機テスト**。
 成立→(A) blob版差が真因＝IDF blobへ差替が fix／不成立→(B) 我々の config/shim を
 stock IDF と突き合わせ（特に手書き controller config vs BT_CONTROLLER_INIT_CONFIG_DEFAULT，
 HCI host flow control）。実機ヘルパ tmp/c3ble.sh・診断計装 evt_trace.c は再利用可。
+
+#### エージェント «セマフォ E_CTX give 消失» 説は反証＋SVC_PERROR 診断計装（真因は «our shim» でなく blob or controller直下の統合に絞られる）
+比較エージェントは「D-2c でキューの E_CTX 救済(pend_ring)を入れたが，セマフォ
+(esp_shim_sem_give)には入れ忘れ＝controller が MIE==0 から出す give が消える」を
+最有力（確信度中）とした。これに沿い esp_shim_sem_give に «E_CTX 保留give»
+(shim_sem_pend／exit_critical・100msループで精算)を実装し，E_CTX give 累計
+(shim_sem_ectx_total)を RTC 0x50 byte3 へ計装。
+
+**実機：`shim_sem_ectx_total=0`（接続を含む全区間で E_CTX give ゼロ）→ 反証。**
+機序＝**ASP3 は `#define isig_sem sig_sem`＝sig_sem は ISR からも E_CTX 無しで呼べる**
+（ユーザー指摘・kernel.h:350）。controller の `_semphr_give_from_isr` は «実 ISR»
+（非タスク文脈）から呼ばれ sig_sem が成功する＝give は失われない。エージェントの
+«give が E_CTX で消える» 前提は本ポートでは成立しない（キューの E_CTX は tsnd_dtq が
+«ブロッキング» で ISR/CPUロック不可＝別物。sig_sem は非ブロッキングで ISR 可）。
+セマフォ修正は発火せず＝bond 不成立のまま。
+
+**SVC_PERROR 診断**（ユーザー提案，sample1 相当）：esp_shim のサービスコールで
+«非E_OK かつ 非E_CTX/E_TMOUT/E_QOVR» を file:line 付きログ（`ESP32C3_BT_APIERR_TRACE`，
+svc_perror は ercd を返す＝挙動不変・ログ追加のみ）。ただし **USB-JTAG コンソール取得が
+本環境で不安定（開くと download-latch＝0バイト）＋ペアリングが段階でばらつく flaky
+（マーカ読取=リセット毎に DUT RAM bond が消えスマホと非同期）で，鍵配布まで到達した
+クリーンな失敗を安定に採れず未収穫**。
+
+**現状の確定**：真因は «our esp_shim の sem/queue E_CTX» ではない（全て反証）。残るは
+(A)controller blob(dfdadb9d，NuttXと同一)自体，(B)controller 直下の統合（init順序・
+os_adapter の意味論・HCI transport）。**次の最も決定的な切り分け＝«NuttX が我々と同一
+blob(dfdadb9d)で BLE bond するか»**（する→blob無罪＝統合バグ／しない→blob）．or blob-swap。
+テストループ安定化（bond の NVS 永続化 or 実機コンソールの安定取得）も要検討。

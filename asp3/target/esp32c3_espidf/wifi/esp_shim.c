@@ -43,6 +43,28 @@
 #endif /* TOPPERS_ESP32C3_WIFI */
 
 /*
+ *  サービスコールのエラーのログ出力（sample1 の SVC_PERROR 相当）．
+ *  E_CTX／E_TMOUT は本シムの «想定内»（CPUロック時のフォールバック・受信
+ *  タイムアウト）なので除外し，«想定外» のエラーだけを file:line 付きで
+ *  記録する．ESP32C3_BT_APIERR_TRACE=ON のときのみ有効（既定OFF＝非回帰）．
+ */
+#ifdef TOPPERS_ESP32C3_BT_APIERR_TRACE
+/*  ★ercd を «そのまま返す»＝ er = SVC_PERROR(sig_sem(...)) で er にエラー
+    コードが入り，かつ想定外エラーだけログする（挙動は不変・ログ追加のみ）．  */
+ER
+esp_shim_svc_perror(const char *file, int_t line, const char *expr, ER ercd)
+{
+	if (ercd < 0 && ercd != E_CTX && ercd != E_TMOUT && ercd != E_QOVR) {
+		t_perror(LOG_ERROR, file, line, expr, ercd);
+	}
+	return(ercd);
+}
+#define SVC_PERROR(expr)	esp_shim_svc_perror(__FILE__, __LINE__, #expr, (expr))
+#else
+#define SVC_PERROR(expr)	(expr)
+#endif
+
+/*
  *  クリティカルセクション（mstatus.MIEの退避・復元＝ネスト対応）
  */
 uint32_t
@@ -107,8 +129,10 @@ esp_shim_exit_critical(void)
 			 *  された送信（D-2c ACL経路等）をここでDTQへflushし，待機中の
 			 *  受信タスク（NimBLEホスト等）を起床させる．保留が無ければ
 			 *  高速パスで即return（非回帰）．
-			 */
+			 *  ★D-2d bond修正：セマフォ側の保留give（E_CTXで消えた
+			 *  controller の give）も同時に精算する．  */
 			esp_shim_queue_flush_pending();
+			esp_shim_sem_flush_pending();
 		}
 	}
 }
@@ -327,6 +351,19 @@ static const ID shim_sem_id[ESP_SHIM_NUM_SEM] = {
 };
 static bool_t shim_sem_used[ESP_SHIM_NUM_SEM];
 
+/*  ★D-2d bond修正：E_CTX（mstatus.MIE==0＝BTクリティカルセクション/ISR文脈）
+    からの sig_sem 消失を防ぐ «保留give»．キューの pend_ring と «同型»．
+    controller blob は osi の _semphr_give_from_isr（→stub xSemaphoreGiveFromISR
+    →esp_shim_sem_give）を MIE==0 文脈から叩くが，本ポートは sense_lock()==
+    (MIE==0) のため sig_sem が E_CTX を返し give が «黙って消える»．D-2c で
+    キューには pend_ring 救済を入れたがセマフォには入れ忘れていた＝これが
+    暗号確立後の «2個目の暗号化ACL» が host に届かない真因（docs/bt-shim.md
+    「D-2d bond診断」）．E_CTX時は保留カウントへ退避し，MIE復帰(exit_critical)
+    や機会的flushで sig_sem を精算する．  */
+static volatile uint32_t	shim_sem_pend[ESP_SHIM_NUM_SEM];
+static volatile uint32_t	shim_sem_pend_total;
+volatile uint32_t	shim_sem_ectx_total;	/* 累計E_CTX give数（診断・非static） */
+
 void *
 esp_shim_sem_create(uint32_t max, uint32_t init)
 {
@@ -381,7 +418,65 @@ esp_shim_sem_take(void *sem, uint32_t block_time_tick)
 int32_t
 esp_shim_sem_give(void *sem)
 {
-	return(sig_sem((ID)(intptr_t)sem) == E_OK ? 1 : 0);
+	ID	semid = (ID)(intptr_t)sem;
+	ER	er = SVC_PERROR(sig_sem(semid));
+
+	if (er == E_OK || er == E_QOVR) {
+		return(1);	/* 成立（E_QOVR=既に上限＝実質signaled） */
+	}
+	if (er == E_CTX) {
+		/*
+		 *  ★D-2d bond修正：mstatus.MIE==0（BTクリティカルセクション/ISR）
+		 *  文脈では sig_sem が E_CTX＝give が消える．保留カウントへ退避し，
+		 *  MIE復帰(exit_critical)や機会的flush(esp_shim_sem_flush_pending)で
+		 *  sig_sem を精算する（キュー pend_ring と同型）．これが無いと
+		 *  controller が ISR/クリティカルから出す give（暗号後の2個目ACL
+		 *  処理の起床等）が失われる（docs/bt-shim.md「D-2d bond診断」）．
+		 */
+		uint_t	i;
+
+		SHIM_LOCK();
+		for (i = 0U; i < ESP_SHIM_NUM_SEM; i++) {
+			if (shim_sem_id[i] == semid) {
+				shim_sem_pend[i]++;
+				shim_sem_pend_total++;
+				shim_sem_ectx_total++;
+				break;
+			}
+		}
+		SHIM_UNLOCK();
+		return(1);	/* 保留＝«成立» 扱い（呼出し元は戻り値を捨てる） */
+	}
+	return(0);
+}
+
+/*
+ *  保留セマフォgiveのflush：MIE==1（サービスコール発行可能）文脈で呼び，
+ *  E_CTX退避されていた give を sig_sem で精算する．呼出し点＝
+ *  esp_shim_exit_critical()の最外解除直後・アプリ定常ループ（機会的）．
+ *  保留0なら即return＝非回帰．
+ */
+void
+esp_shim_sem_flush_pending(void)
+{
+	uint_t	i;
+
+	if (shim_sem_pend_total == 0U) {
+		return;		/* 高速パス（ロック無し読み） */
+	}
+	for (i = 0U; i < ESP_SHIM_NUM_SEM; i++) {
+		while (shim_sem_pend[i] > 0U) {
+			SHIM_LOCK();
+			if (shim_sem_pend[i] == 0U) {
+				SHIM_UNLOCK();
+				break;
+			}
+			shim_sem_pend[i]--;
+			shim_sem_pend_total--;
+			SHIM_UNLOCK();
+			(void) sig_sem(shim_sem_id[i]);
+		}
+	}
 }
 
 /*
@@ -798,7 +893,7 @@ esp_shim_queue_flush_pending(void)
 			q->pend_cnt--;
 			shim_que_pend_total--;
 			SHIM_UNLOCK();
-			er = psnd_dtq(q->dtqid, (intptr_t)slot);
+			er = SVC_PERROR(psnd_dtq(q->dtqid, (intptr_t)slot));
 			if (er != E_OK) {
 				syslog(LOG_ERROR, "esp_shim: flush psnd_dtq er=%d q=%d",
 					   (int)er, (int)q->dtqid);
@@ -862,11 +957,11 @@ esp_shim_queue_send(void *que, void *item, uint32_t block_time_tick,
 		return(0);
 	}
 	memcpy(q->pool + (size_t)slot * q->item_size, item, q->item_size);
-	er = tsnd_dtq(q->dtqid, (intptr_t)slot, tmo);
+	er = SVC_PERROR(tsnd_dtq(q->dtqid, (intptr_t)slot, tmo));
 	if (er == E_CTX) {
 		/*  DTQ容量＝プールdepthのため空きは必ずあり，psnd_dtq（待たない
 		    送信）へフォールバックする．  */
-		er = psnd_dtq(q->dtqid, (intptr_t)slot);
+		er = SVC_PERROR(psnd_dtq(q->dtqid, (intptr_t)slot));
 	}
 	if (er != E_OK) {
 		shim_que_slot_free_notify(q, slot);
@@ -896,7 +991,7 @@ esp_shim_queue_send_from_isr(void *que, void *item)
 		if (slot == 0xFFFFFFFFU) {
 			return(0);	/* 真の満杯（非ブロッキング仕様は不変） */
 		}
-		er = psnd_dtq(q->dtqid, (intptr_t)slot);
+		er = SVC_PERROR(psnd_dtq(q->dtqid, (intptr_t)slot));
 		if (er == E_CTX) {
 			/*  CPUロック状態（MIE==0，BTクリティカルセクション等）：
 			    psnd_dtqも発行できないため保留リングへ退避．  */

@@ -47,9 +47,10 @@
  *  esp_bt_controller_init() より前に呼ぶ必要がある．詳細はdocs/bt-shim.md．
  */
 extern void esp_shim_bt_clock_init(void);
-/*  D-2d bond修正：保留リング(pend_ring)の周期flush用（下記 main_task 定常
-    ループから呼ぶ）．pend残0なら即return＝非回帰．  */
+/*  D-2d bond修正：保留リング(pend_ring)・保留セマフォgiveの周期flush用（下記
+    main_task 定常ループから呼ぶ）．保留0なら即return＝非回帰．  */
 extern void esp_shim_queue_flush_pending(void);
+extern void esp_shim_sem_flush_pending(void);
 
 #ifdef TOPPERS_ESP32C3_BT_SM
 /*
@@ -860,6 +861,7 @@ main_task(EXINF exinf)
 			 *  非回帰・非侵襲（本ループはBLE常駐アプリの心臓部）．
 			 */
 			esp_shim_queue_flush_pending();
+			esp_shim_sem_flush_pending();	/* ★保留セマフォgiveも精算 */
 			(void) tslp_tsk(100000);	/* 100ms */
 			if (++sub < 10U) {
 				continue;		/* notify/security/HBは1秒毎 */

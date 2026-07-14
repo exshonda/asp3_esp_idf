@@ -72,11 +72,15 @@ evt_trace_pack(void)
 	 *  判定：put=0→controller未配送(blob)／put>get→rx_q滞留(host未drain=eventq
 	 *  signal欠落)／get>l2cap→L2CAP前drop(conn_find NULL)／put=get=l2cap>0→
 	 *  SMP層まで到達＝鍵配布PDU数不足 or SMP処理の問題．  */
+	/*  byte3 は «E_CTX セマフォgive累計»（shim_sem_ectx_total）へ転用＝
+	    controller が MIE==0 文脈から give を出したか（sem修正が該当する機序が
+	    実在するか）の判別．0=機序なし(sem説誤り→blob疑い)／>0=機序実在．  */
+	extern volatile uint32_t	shim_sem_ectx_total;
 	uint32_t base = (g_evt_enc_hrt != 0U) ? 1U : 0U;
 	uint32_t p = base ? (g_evt_acl_put   - g_evt_acl_at_enc)   : 0U;
 	uint32_t g = base ? (g_evt_acl_get   - g_evt_get_at_enc)   : 0U;
 	uint32_t x = base ? (g_evt_acl_l2cap - g_evt_l2cap_at_enc) : 0U;
-	uint32_t e = g_evt_enc_chg;
+	uint32_t e = shim_sem_ectx_total;
 
 	if (p > 255U) { p = 255U; }
 	if (g > 255U) { g = 255U; }

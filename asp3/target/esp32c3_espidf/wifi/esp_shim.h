@@ -84,6 +84,9 @@ extern void esp_shim_queue_reset(void *que);
 /*  E_CTX（CPUロック）文脈で保留リングへ退避した送信をDTQへ流し込む
  *  （esp_shim_exit_critical最外解除・queue_send/recv冒頭から呼ぶ．D-2c）．  */
 extern void esp_shim_queue_flush_pending(void);
+/*  ★D-2d bond修正：E_CTX文脈で保留した «セマフォgive» を sig_sem で精算する
+ *  （キューの pend_ring と同型．exit_critical/機会的flushから呼ぶ）．  */
+extern void esp_shim_sem_flush_pending(void);
 
 /*
  *  タスク（CRE_TSKプール．共通エントリ＋関数ポインタ渡し）

@@ -431,6 +431,17 @@ if(ESP32C3_BT_NIMBLE)
     #  (ENC_CHANGE=13=ETIMEOUT) の真因を LL/コントローラ層 vs shim/host 層で
     #  確定する決定的計装．詳細=docs/bt-shim.md「D-2d bond診断」．
     #
+    #
+    #  （D-2d bond診断）esp_shim のサービスコールで «想定外» のエラー
+    #  （非E_OK かつ 非E_CTX/E_TMOUT/E_QOVR）を SVC_PERROR で file:line 付き
+    #  ログする（sample1 の SVC_PERROR 相当）．暗号後の鍵配布で失敗する
+    #  サービスコールを特定する．既定OFF＝非回帰．
+    #
+    option(ESP32C3_BT_APIERR_TRACE "Log unexpected esp_shim svc-call errors (SVC_PERROR, D-2d bond diag)" OFF)
+    if(ESP32C3_BT_APIERR_TRACE)
+        list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_BT_APIERR_TRACE)
+    endif()
+
     option(ESP32C3_BT_EVT_TRACE "Trace HCI EVT (LTK Req/Enc Change) via --wrap (D-2d bond diag)" OFF)
     if(ESP32C3_BT_EVT_TRACE)
         list(APPEND ASP3_SYSSVC_TARGET_C_FILES ${BT_TARGETDIR}/evt_trace.c)
