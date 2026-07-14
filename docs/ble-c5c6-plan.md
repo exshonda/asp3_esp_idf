@@ -870,3 +870,138 @@ SM関連コード分）．C6のRAM残量はWiFi版（89.48%）より大幅に低
    `0x600B100C`のタグ`0x7717`で確認）をC3と同じ`bluetoothctl`手順
    （`gatt.select-attribute`／`read`／`notify on`／`write`）で確認する
    こと。
+
+## 10. D-2c/D-2d実機初投入（2026-07-15）— BLEコントローラenableのPHY-init解析I2Cハングでブロック
+
+`044305a`（§9のD-2c/D-2d本体C6移植）を**初めて実機board Cへ投入**した
+ラウンド。結論：**D-2c/D-2dいずれも実機未達＝ブロック**。真因は
+`044305a`のコードではなく，**BLEコントローラのPHY初期化中に解析I2C
+（regi2c）読出しが無限スピンする起動ハング**であり，D-2c/D-2d本体
+（GATTサービス・SMP・E_CTX修正）は**一度も実行されていない**（ハングの
+手前で停止）。
+
+### 環境（このPC）
+
+- repo `/home/honda/TOPPERS/ASP3CORE/asp3_esp_idf`．GCC=`riscv32-esp-elf
+  esp-14.2.0_20241119`．esptool=`tools/espressif/python_env/
+  idf5.5_py3.12_env`（**このesptoolはサブコマンド/フラグが`_`区切り**：
+  `write_flash`/`dump_mem`/`--before usb_reset`/`--after hard_reset`．
+  `watchdog_reset`はC6非対応→classic RTS hard resetへ自動フォールバック）．
+- DUT=C6 board C：JTAG/USB-Serial-JTAG=`14:C1:9F:E0:5A:9C`（by-id，現ttyACM0），
+  UARTコンソール=CP2102N `125a266b…`（現ttyUSB2）．**C6のsyslogは
+  USB-Serial-JTAG（ttyACM0）へ出る**（`esp32c6_usbjtag_hal.c`）——CP2102N/
+  UART0にはROMブートログのみ．**USB-JTAGコンソールは自機のブートバースト
+  を取れない**（RTSリセットでUSBが再enumerateし，リセット中のログが失われる）．
+  よってブート診断は**esptool read-memのSTOREマーカ＋OpenOCDのPC読み**が
+  主手段（本ラウンドの主判定はこの2系統）．hci0（BLE central）は
+  他エージェント使用中につき本ラウンドでは不使用．
+- OpenOCD=`tools/espressif/tools/openocd-esp32/v0.12.0-esp32-20260703`，
+  C6は`board/esp32c6-builtin.cfg`＋`adapter serial 14:C1:9F:E0:5A:9C`で
+  board C個体を指定．examination時に`abstractcs busy`スタックが出たら
+  `riscv set_command_timeout_sec 12`で回避（初回失敗→リトライで成功）．
+
+### 事前予測（ラウンド開始時）
+
+§9の予測どおり「E_CTX修正済みなのでC6でもC3/C5同様connect→GATT→bondまで
+通る見込み」＝**adv到達→sync→GATTディスカバリまでは最低限通る**と予測．
+→ **外れた**：advにすら到達せず（sync前でハング）．
+
+### 実測と物証（独立2ブート再現）
+
+D-2cビルド（`build/c6ble_d2c_verify/asp_flash.bin`）をflash→RTS
+hard resetでクリーンブート．**LP_AON STORE（esptool `--before usb_reset
+--after no_reset dump_mem 0x600B1000 0x28`，ROMローダ経由でLP_AON生存）**：
+
+| STORE | 意味 | 実測 | 判定 |
+|---|---|---|---|
+| STORE0 0x600B1000 | syncマーカ`0x5ADE51C0` | `0x00000000` | **sync未到達** |
+| STORE2 0x600B1008 | adv開始試行 | `0x00000000` | **adv未試行** |
+| STORE3 0x600B100C | adv-return rc / WRITE | `0x00000000` | adv rc未記録 |
+| STORE4 0x600B1010 | 割込みレート(線1/2)ミラー | `0x00280028` | storm_monitor_task（BLE非依存の別タスク）は稼働 |
+| STORE6 0x600B1018 | reset_cb / ENC_CHANGE | `0x00000000` | ble_hs reset未発火 |
+| STORE7 0x600B101C | intr_allocトレース(0xA1) / PAIRING | `0x00000000` | **`esp_bt_controller_enable`のintr_alloc未到達**（bt_shim.c:255が0xA1…を書く） |
+| STORE8/9 | CONNECT/DISCONNECT | `0x00000000` | 接続イベント無し |
+
+STORE0=0（sync無）とSTORE7=0（controller enable内のintr_alloc無）から，
+`main_task`は`esp_bt_controller_enable`の**PHY初期化段でハング**と局在．
+
+**OpenOCDでPC読み（board C個体，D-2cビルドで独立2ブート）**：
+- boot#1: PC=`0x42041214`（`0x42041212`↔`0x42041214`のタイトスピン），
+  ra=`0x40003dfe`．
+- boot#2（再flash＋再ブート）: PC=`0x42041212`/`0x42041214`，ra=`0x40003dfe`．同一．
+- シンボル解決：PC=`ram_chip_i2c_readReg_org`（アプリflash内RAM関数），
+  ra=`rom_chip_i2c_readReg`（C6 ROM）．周辺逆アセンブル：
+  ```
+  42041210: sw   a3,0(a2)        ; regi2c コマンド書込み
+  42041212: lw   a5,0(a2)        ; ステータス読出し   ← スピン
+  42041214: slli a4,a5,0x6       ; (mtval=0x00679713 と一致)
+  42041218: bltz a4,42041212     ; done ビット待ち → 永久ループ
+  ```
+  ＝**解析I2C（regi2c）マスタのdoneビットが永遠に立たず，
+  `chip_i2c_readReg`が無限スピン**．mtval=`0x00679713`は0x42041214命令と一致．
+
+### 因果切り分け（反証実験・厳密性）
+
+1. **`044305a`のD-2c/D-2dコードは無罪（PROVEN）**：コントローラのみの
+   `bt_smoke_c6`（NimBLEホスト・自前GATT・SMP・esp_shimのE_CTX配列拡張を
+   一切含まない）を現行ツリーからビルド→flash→ブートすると，**同一の
+   `ram_chip_i2c_readReg_org`スピン**（PC=`0x42035c96`，ra=`0x40003dfe`）で
+   ハング．よってハングは**BLEコントローラenableの共有PHY-init経路**であり，
+   D-2c/D-2d移植・E_CTX shim改変とは無関係．
+2. **実施91のICGアンロックは適用済み・かつ不十分（PROVEN＋HYPOTHESIS）**：
+   `bt_smoke_c6`/`ble_host_smoke_c6`とも`esp_shim_bt_clock_init()`→
+   `esp_shim_modem_icg_init()`をcontroller_initより前に呼ぶ．ハング中の
+   OpenOCD mdwで**PMU `0x600B000C`=`0x80000000`＝dig_icg_modem_code=2**を
+   実測＝**ICGアンロックのレジスタ書込みは効いている**．にもかかわらず
+   解析I2Cが完了しない．よって「PMU ICG modem code=0」（実施90-91の真因）は
+   **本BLE経路では必要条件だが十分条件ではない**．（HYPOTHESIS：BLE
+   コントローラenableはWiFiの`esp_phy_enable`が行う追加のクロック/リセット
+   （regi2cマスタクロック等）に依存しており，現行の`esp_shim_bt_clock_init`は
+   それを供給していない——未検証．）
+3. **board Cは大域的にPHY死ではない（PROVEN）**：現行ツリーから`wifi_scan`
+   （`ESP32C6_WIFI=ON`）をビルド→flash→ブートすると，**同一のRTSリセット
+   条件下でPHY初期化を通過**（OpenOCDでPC=`0x4002f478 __riscv_restore_1`／
+   ra=`recv_packet`＝WiFi RX処理中，RF稼働でJTAG examinationが混雑）＝
+   `chip_i2c_readReg`スピンには入らない．よってWiFiのPHY-init経路はcoldで
+   成立し，**BLEコントローラ経路に固有のギャップ**．
+
+### 重要な留保（over-claim回避）
+
+- **全ブートはRTSリセット（`rst:0x15 (USB_UART_HPSYS)`）＝真の電源投入
+  coldブートではない**．「coldブートハング」と断定しない：正しくは
+  「RTSリセット下でハング．真の電源投入coldは未検証（＝MEMORY記載の
+  ユーザー依頼中の物理電源断確認に相当）」．RTS-domain固有の病理か真の
+  coldハングかは未確定．
+- **D-2c/D-2dのGATT／E_CTX／SMPコードはC6実機で一度も実行されていない**．
+  `044305a`のコードは本ハングの原因ではない（無罪）が，その**実挙動は
+  C6で完全に未検証**．したがってE_CTX修正のC6での実効・PVCY挙動は
+  **本ラウンドでは一切検証できていない**（§9「実機確認待ち事項」1-4は全て
+  未達のまま）．
+- `wifi_scan`は「PHY-initを通過（recv_packet到達）」であって「健全」とは
+  書かない（初回halt時のPC=`0x40000000 _start`/debug_reason=8は未解明の
+  loose endにつき依拠しない）．
+
+### board C最終flash状態
+
+D-2cビルド（`build/c6ble_d2c_verify/asp_flash.bin`＝`044305a`）をflash済み．
+**このバイナリはPHY-init（`chip_i2c_readReg`）でハングし，advertisingしない**．
+
+### 次段（申し送り）
+
+1. **PHY-initハングを先に根治**：WiFi（`esp_phy_enable`）がcoldで通過し
+   BLEコントローラenableが通過しない差分＝クロック/リセット設定の差を
+   洗い出す（regi2cマスタクロック，MODEM_LPCON/MODEM_SYSCON，BBPLL等）．
+   `esp_shim_bt_clock_init`にWiFi相当の追加初期化を足す方向．1仮説=1
+   build+flash+OpenOCDサイクルで反証しながら（相関を因果と早合点しない）．
+   可能ならユーザーに**物理電源断→真coldブート**の1回確認を依頼し，
+   RTS-domain固有か真coldハングかを切り分ける．
+2. **PHY-init根治後**：board Cがadvertising（STORE0=`0x5ADE51C0`・
+   STORE2/3のadv rc=0マーカ）まで到達したら，**スマホ（nRF Connect等）
+   でcentral操作**をコーディネータ経由でユーザーへ依頼：
+   scan（ASP3-C6-BLE）→connect→サービス`0xABF0`ディスカバリ→`0xABF1`
+   read／`0xABF3` write／`0xABF2` notify購読．結果はDUT側STOREマーカ
+   （STORE8 CONNECT `0x604E…`／STORE3 WRITE `0x7717…`）をesptool
+   read-memで機械確認．D-2dはさらにpair/bond→STORE6 ENC_CHANGE
+   `0x5DE0…`／STORE7 PAIRING_COMPLETE `0x5DC0…`を確認．
+   （hci0は他エージェント使用中につき使わない運用．）
+
