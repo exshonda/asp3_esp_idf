@@ -628,6 +628,15 @@ main_task(EXINF exinf)
 	}
 #endif
 
+#ifdef TOPPERS_ESP32C3_BT_EVT_TRACE
+	/*  D-2d bond診断：HCI EVT 計装のカウンタ（RTC STORE0=0x50）を0クリア
+	    ＝SYNC マーカ転用を明示（wrapper が最初の EVT で上書きする）．  */
+	{
+		extern void esp_evt_trace_reset(void);
+		esp_evt_trace_reset();
+	}
+#endif
+
 	/*
 	 *  emi.c:164対策：BLEベースバンド(BB)のクロックを有効化する
 	 *  （bt_smoke と同じ．詳細はdocs/bt-shim.md）．

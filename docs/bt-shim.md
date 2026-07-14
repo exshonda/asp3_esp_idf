@@ -2357,3 +2357,36 @@ status=13=BLE_HS_ETIMEOUT）**／PAIRING(0x54)未発火／DISC reason=`0x13`。
 タイムアウトする＝真因は **shim/コントローラの暗号有効化層**（次の一手#1＝S3 の
 動く esp_shim との HCI イベント経路比較へ集約）。`security_initiate` 移植は S3 との
 挙動差を埋める正当な修正として保持（接続で自動ペア要求＝以後の bond 試験も容易）。
+
+#### ★決定的実験の結果（HCI EVT --wrap 計装）：診断が反転＝LL/コントローラは «暗号成功»、真因は host(NimBLE)層のタイムアウト
+`ble_hs_hci_evt_process`（host が処理する全 HCI EVT を通る．ble_hs.c:655 から
+クロスTU 呼出し＝--wrap 確実）を横取りし，controller→host の «LE LTK Request»
+(0x3E/0x05) と «Encryption Change»(0x08) の到着数・status を RTC STORE0(0x50)へ
+記録（`ESP32C3_BT_EVT_TRACE=ON`，`bt/evt_trace.c`）。--wrap 成立を elf 逆アセンブルで
+確認（ble_hs.c 呼出し→__wrap→__real）。
+
+実スマホでペアリング（NOT BONDED）後の物証：
+| reg | 値 | デコード |
+|---|---|---|
+| 0x50 EVT | `0x23000101` | total_host_EVT=**35**／**LTK_Request=1**／**EncChange=1 status=`0x00`=成功** |
+| 0x58 host ENC | `0x5de0000d` | app が見た ENC_CHANGE status=**13=ETIMEOUT** |
+| 0x54 PAIRING | alloc trace | PAIRING_COMPLETE 未発火 |
+
+**★診断反転**：controller は **Encryption Change status=0（暗号有効化成功）** を
+host へ返している＝**LL/コントローラ層は無罪**（「LL層が真因」という前実験の最有力
+仮説を反証）。にもかかわらず NimBLE は app に **ETIMEOUT** を報告＝**真因は
+host(NimBLE)層**。機序の最有力＝**NimBLE の SM 手続きがタイムアウト（〜30s）した
+«後» に，成功の Encryption Change が host 処理された**（SM proc は既に消えており
+app には SM タイマ由来の ETIMEOUT が残る。0x58 は app が見た最後の enc_change＝
+13）。host EVT 総数が 35/接続 と «少ない» のも host タスク処理の «遅さ» を示唆
+（エージェント候補2＝LTK Reply / host タスクのスケジューリング遅延が昇格）。
+
+**次の一手（更新）**：
+1. 遅延の実測＝LTK Request 到着〜Encryption Change 到着〜SM タイムアウトの時間を
+   HRT で記録し，«遅い handshake»（30s 経過）か «SM proc/状態のバグ»（速いのに
+   timeout）かを分離。evt_trace.c に HRT タイムスタンプを追加するのが最小。
+2. host タスク/BT ISR のスケジューリング改善＝C3 の BT ISR は INTMTX 優先度1
+   （最低），S3 は2（bt_shim.c）。優先度を上げて Encryption Change が SM タイム
+   アウト前に処理されるか（安直だが直れば timing 確定）。
+3. NimBLE SM タイムアウト値と，ble_sm_enc_change_rx が Encryption Change を
+   proc に紐付けられているか（conn handle 一致／proc 生存）を確認。

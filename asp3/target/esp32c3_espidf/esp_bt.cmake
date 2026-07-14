@@ -423,6 +423,23 @@ if(ESP32C3_BT_NIMBLE)
         list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_BT_ACL_TRACE)
     endif()
 
+    #
+    #  （D-2d bond診断）HCI EVT 経路計装（既定OFF＝非回帰）．ON時のみ
+    #  evt_trace.c を追加し host 側 ble_hs_hci_evt_process を --wrap して，
+    #  controller が «LE LTK Request»(0x3E/0x05) と «Encryption Change»(0x08)
+    #  を生成しているかを RTC STORE0(0x50) へ記録する．暗号有効化タイムアウト
+    #  (ENC_CHANGE=13=ETIMEOUT) の真因を LL/コントローラ層 vs shim/host 層で
+    #  確定する決定的計装．詳細=docs/bt-shim.md「D-2d bond診断」．
+    #
+    option(ESP32C3_BT_EVT_TRACE "Trace HCI EVT (LTK Req/Enc Change) via --wrap (D-2d bond diag)" OFF)
+    if(ESP32C3_BT_EVT_TRACE)
+        list(APPEND ASP3_SYSSVC_TARGET_C_FILES ${BT_TARGETDIR}/evt_trace.c)
+        list(APPEND ASP3_LINK_OPTIONS
+            -Wl,--wrap=ble_hs_hci_evt_process
+        )
+        list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_BT_EVT_TRACE)
+    endif()
+
 endif()
 
 endif()
