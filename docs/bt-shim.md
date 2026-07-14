@@ -2504,3 +2504,39 @@ svc_perror は ercd を返す＝挙動不変・ログ追加のみ）。ただし
 os_adapter の意味論・HCI transport）。**次の最も決定的な切り分け＝«NuttX が我々と同一
 blob(dfdadb9d)で BLE bond するか»**（する→blob無罪＝統合バグ／しない→blob）．or blob-swap。
 テストループ安定化（bond の NVS 永続化 or 実機コンソールの安定取得）も要検討。
+
+### ★D-2d bond 調査 «別PC引き継ぎ» 要点（2026-07-14 一区切り）
+（メモリはローカル固有で転送されないため，再開に必要な事実を本節に集約）
+
+**確定した現状**：C3 BLE の «暗号確立» までは成功するが «永続 bond» が未達。暗号確立
+（Encryption Change status=0）後の LE SC 鍵配布で，**最初の1個の暗号化 ACL は完全処理
+（put=get=l2cap=1）だが2個目が host に来ない**→SM proc が30秒(実測)で BLE_HS_ETIMEOUT。
+iPhone/Android 非依存。key_dist から ID を外すと SMP は PAIRING_COMPLETE status0 で完了
+するが，DUT 自身の IRK(2 PDU)TX の2個目も届かず bond 不成立。
+
+**反証済み（無罪確定）**：shim キュー E_CTX(D-2c で pend_ring 修正済)／セマフォ E_CTX
+give 消失(sem_ectx=0＝ASP3 は sig_sem を ISR から呼べる)／NimBLE host・NPL タイマ(enc→
+timeout=実測30秒)／トリガ経路(0xABF4/SecReq)／key_dist・controller config(手書き=DEFAULT
+一致)・osi_funcs(全実装)。
+
+**★決定的事実**：stock ESP-IDF v6.1 bleprph(bonding+SC)は «同じ C3 ボード・同じスマホ» で
+**bond 成立**＝コントローラ silicon は能力あり。∴ 真因は (A)controller blob 版差 or
+(B)我々の controller 直下統合。blob md5：我々=esp-hal-3rdparty `b90b1837`＝
+`hal/.../lib_esp32c3_family/esp32c3/libbtdm_app.a` md5 **dfdadb9d**（NuttX apache/master が
+`arch/risc-v/src/common/espressif/Make.defs` で同一 `b90b1837` をピン＝**NuttX と同一 blob**）／
+stock IDF v5.5.4・v6.1 とも md5 **d9753a31**（OSI 0x0B，我々は 0x0A）。
+
+**次の決定打（優先順）**：
+1. **NuttX が «同一 blob dfdadb9d» で BLE bond するか** — する→blob 無罪＝(B)統合バグ確定／
+   しない→(A)blob。NuttX 実ビルド(esp32c3+NimBLE+bonding) or docs/コミュニティ確認。
+2. **blob-swap**：`esp_bt.cmake` の `-L${ESP_HAL_DIR}/.../lib_esp32c3_family` を IDF の
+   `d9753a31` パスへ（＋整合する bt.c/osi 0x0B）て bond テスト。ABI 差に注意。
+3. **テストループ安定化**：bond を NVS 永続化（リセットでスマホと非同期になる悪循環を断つ）＋
+   実機コンソール安定取得（SVC_PERROR 診断＝`ESP32C3_BT_APIERR_TRACE=ON` を成立させる）。
+
+**診断資産（再利用可）**：`tmp/c3ble.sh`（build/flash/boot/mark。★実機は `-DESP32C3_QEMU=OFF`
+必須。by-id ポート固定・watchdog-reset で download-latch 脱出。BOARD_MAC で別機指定）／
+`asp3/target/esp32c3_espidf/bt/evt_trace.c`（`ESP32C3_BT_EVT_TRACE=ON`＝暗号後 RX パイプライン
+put/get/l2cap を RTC 0x50 へ）／`ESP32C3_BT_APIERR_TRACE`（SVC_PERROR）。RTC マーカ一覧＝
+本節上流の各実施を参照。IDF ビルドは `IDF_TOOLS_PATH=~/tools/espressif` で export.sh。
+bleprph 例は `set-target esp32c3`＋`CONFIG_EXAMPLE_BONDING=y`。
