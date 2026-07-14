@@ -20,6 +20,34 @@
 
 #include "netif_esp32c3.h"
 
+/*
+ *  実施50診断（RX/TX判別）：C5では "no time event is processed in hrt
+ *  interrupt." の良性storm（C5実施04の最重要教訓）がsyslogを溢れさせ
+ *  コンソールが信頼できない．そこでDHCP経路の物証はRTC-RAMマーカ
+ *  （0x50000080〜．esptool read-memで回収．C5実施45/D-2cと同一方式）を
+ *  主物証とする．TX側カウンタ（net/netif_esp32c3.cのNETSTALL_TRACE計装＝
+ *  low_level_output＝esp_wifi_internal_txの唯一の呼出し元）をミラーする：
+ *    tx_calls>0 ⇒ dhcp_start到達＋DISCOVER送信路がlwIPまで生きている
+ *                （＝link_upコールバックが走りDHCP開始＝net-task健全）．
+ *    last_tx_ret==0(ESP_OK) ⇒ blob TXがフレームを受理．
+ *    上記が成り立つのにIP未取得 ⇒ 問題はTX後（OFFER受信＝RF/RX側）．
+ *  既定ビルド（NETSTALL_TRACE未定義）は完全no-op＝非回帰．
+ */
+#ifdef TOPPERS_ESP32C5_NETSTALL_TRACE
+extern volatile uint32_t g_netstall_tx_calls;
+extern volatile uint32_t g_netstall_tx_errs;
+extern volatile int32_t  g_netstall_last_tx_ret;
+#define DHCPDIAG(idx, val)	(((volatile uint32_t *)0x50000080U)[(idx)] = (uint32_t)(val))
+/*
+ *  net/netif_esp32c3.c の NETSTALL_TRACE 計装が ping コールバックで呼ぶ
+ *  フック．本アプリ（wifi_dhcp）では ping 停止トリガは不要なので空実装
+ *  （load_test_c5 は自前の実体を持つ）．TX計装カウンタだけを使う．
+ */
+void netstall_trace_ping_result(int ok) { (void) ok; }
+#else
+#define DHCPDIAG(idx, val)	((void)0)
+#endif
+
 static ID	main_tskid;
 static volatile int32_t	conn_state;	/* 0=待機 1=接続 -1=切断 */
 
@@ -293,19 +321,35 @@ main_task(EXINF exinf)
 	 *  DHCPでIPアドレスが割り当たるまで待つ（net_task側で処理．
 	 *  本タスクは読み出し専用ポーリングのみ）
 	 */
+	DHCPDIAG(0, 0xDAC00001U);	/* magic：DHCP待ちループ到達（=connect成功後） */
+	DHCPDIAG(4, 1U);			/* phase=1：待機中 */
 	for (retry = 0; retry < 20; retry++) {
 		(void) tslp_tsk(1000000);	/* 1秒 */
+#ifdef TOPPERS_ESP32C5_NETSTALL_TRACE
+		DHCPDIAG(1, g_netstall_tx_calls);		/* lwIP→blob TX呼出し累積 */
+		DHCPDIAG(2, g_netstall_tx_errs);		/* うちesp_wifi_internal_tx失敗数 */
+		DHCPDIAG(3, (uint32_t)g_netstall_last_tx_ret);	/* 直近TX戻り値（0=OK） */
+		DHCPDIAG(6, (uint32_t)retry);			/* 経過秒 */
+		/*  HRT storm氾濫下でも拾えるよう distinctive tag で毎秒出す
+		    （grep -a "DHCPTX" で回収）．  */
+		syslog(LOG_NOTICE, "DHCPTX t=%d calls=%u errs=%u ret=%d",
+			   (int_t)retry, (uint_t)g_netstall_tx_calls,
+			   (uint_t)g_netstall_tx_errs, (int_t)g_netstall_last_tx_ret);
+#endif
 		ip = netif_esp32c3_get_ipaddr();
 		if (ip != 0) {
 			syslog(LOG_NOTICE, "wifi_dhcp: IP acquired: %d.%d.%d.%d",
 				   (int_t)(ip & 0xff), (int_t)((ip >> 8) & 0xff),
 				   (int_t)((ip >> 16) & 0xff), (int_t)((ip >> 24) & 0xff));
+			DHCPDIAG(4, 2U);	/* phase=2：IP取得 */
+			DHCPDIAG(5, ip);
 			break;
 		}
 	}
 
 	if (ip == 0) {
 		syslog(LOG_NOTICE, "wifi_dhcp: DHCP FAILED (timeout)");
+		DHCPDIAG(4, 3U);		/* phase=3：タイムアウト */
 	}
 	syslog(LOG_NOTICE, "wifi_dhcp: done (ping result logged by net_task)");
 
