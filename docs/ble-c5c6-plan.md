@@ -1358,3 +1358,96 @@ bt_smoke_c6: Phase D-1 milestone reached
   v6.1 側で D-2* へ進む場合は本 esp_bt_idf61.cmake に C5 の NimBLE ブロック
   （§8/実施05 相当）を転写する（今回は D-1 判定に不要のため未移植）．
 
+## 14. IDF v6.1 版に NimBLE ホストを載せて **C6 D-2b 達成**（2026-07-15）— sync→adv rc=0，storm 非再発，2/2ブート
+
+§13.6 の申し送り「v6.1 側で D-2* へ進む場合は C5 の NimBLE ブロックを転写する」を
+実施した．§13 の v6.1 D-1（`esp_bt_idf61.cmake`・controller-only）の上に **IDF v6.1
+（`~/tools/esp-idf-v6.1`）の NimBLE ホスト**を載せ，**D-2a（host-controller sync）→
+D-2b（`ble_gap_adv_start` rc=0）を board C で実機到達**（2/2ブート・RTSリセット）．
+**OTA検出（ホスト/スマホでの電波確認）はユーザー保留**＝デバイス側マーカ（LP_AON
+STORE 直読み）とストーム非再発で確定した．
+
+### 14.1 実装（C5 esp_bt.cmake の IDF v6.1 NimBLE ブロックの C6 転写・トグル非破壊）
+
+- **トグル `ESP32C6_BT_IDF61_NIMBLE`**（既定 OFF，`ble_host_smoke_c6` で自動 ON）を
+  `esp_bt_idf61.cmake` 冒頭に追加し，§13 の FATAL_ERROR（「NimBLE 未対応」）を撤去．
+  `CONFIG_BT_CONTROLLER_ONLY=1` と `hci_driver_standard.c` を `if(NOT
+  ESP32C6_BT_IDF61_NIMBLE)` へ移動（CONTROLLER_ONLY と NIMBLE_ENABLED は排他・
+  `hci_driver_vhci_ops` の多重定義回避）＝**bt_smoke_c6 の D-1 は非回帰**．
+- **ソースは hal ではなく `${IDF}`（v6.1）から採る**——本 D-1 が既に v6.1
+  controller/phy を使うため，nimble も同一 matched set で揃え hal-nimble ＋
+  v6.1-controller の未検証 blob-ABI 境界を作らない（C5 冒頭のライブラリ世代選定と
+  同じ理由）．C5 の NimBLE ブロック（`hci_driver_nimble.c`／`hci_esp_ipc.c`／
+  `nimble_port.c`／`nimble_port_freertos.c`／`esp_nimble_mem.c`＋ホスト本体トリム集合＝
+  `ble_svc_gap`/`gatt` のみ）を逐語転写．
+- **bt_nimble_config.h の隔離**：hal 版 `bt/stub/include/` には `platform/os.h`・
+  `npl_os_bridge.h`・`nimble/nimble_port_os.h`（hal ドリフト吸収シム）が同居し v6.1
+  nimble ヘッダを shadow して壊すため，**`bt/stub_idf61/include/`（bt_nimble_config.h
+  «のみ»・LEGACY_VHCI=0）を新設**し C3 stub より前に PREPEND（C5 と同じ罠対策）．
+  #define 値は build-verified な hal 版と同一．
+- **SM（D-2d）は既定 OFF**（`ESP32C6_BT_IDF61_SM`）＝本ラウンドの目標 D-2a/D-2b は
+  暗号不要のためビルド面を痩せさせ tinycrypt リンクを避ける．`MYNEWT_VAL_BLE_SM_
+  LEGACY/SC=0` で `ble_sm*.c` を near-empty 化・bond store は `ble_store_ram`．
+  ON で C5 と同じ tinycrypt5ソース＋`ble_store_config` へ切替（D-2d 拡張時・可逆）．
+- **アプリ＝`apps/ble_host_smoke_c6`（実施02の D-2b app）を無改変流用**．デバイス名
+  `ASP3-C6-BLE`・LP_AON STORE マーカ体系（STORE0=sync/STORE2=adv試行/STORE3=adv-return
+  rc/STORE4-5=intr線1/2ミラー/STORE7=intr_allocトレース）．
+
+- **ビルドで踏んだ壁＝ゼロ**：C5 の壁（`nimble_mem_free/calloc`→`esp_nimble_mem.c`
+  追加）は転写時に既に織り込み済み．§13 の force-include 群（`bt_esp_timer_ext.h`・
+  `freertos/task.h`）＋NimBLE用（`bt_nimble_config.h`・`syscfg/syscfg.h`）で警告のみ・
+  一発リンク成功．**C5 の申し送りどおり `TRUE=1`／`BT_HCI_LOG_INCLUDED=0`／
+  `-include sdkconfig.h` は不要**（v6.1 の `nimble_port.c` は `bt_common.h` を `#if`
+  より前に include＝hal の順序バグは v6.1 に存在しない）．
+- **v6.1 nimble に乗れている検証点（advisor 提案の tripwire）＝PASS**：`esp_nimble_mem.c`
+  «と» `os_mempool.c` の両方がリンク（v6.1 blob は `nimble_mem_*`/`os_memblock_*` を
+  未解決で残す＝hal blob なら不要）．SM-off ゲート完全＝`tc_aes`/`uECC`/`ble_store_config`
+  シンボル 0 リーク（nm 確認）．`ble_gap_adv_start`/`esp_nimble_init`/`ble_hs_cfg` 在り．
+  FLASH 8.79%・RAM 72.02%．
+
+### 14.2 実機判定（cleared-boot-read・2ブート・氾濫排除＝LP_AON STORE 直読みを主）
+
+board C（`14:C1:9F:E0:5A:9C`，全ブートRTSリセット）に `build/c6bt_idf61_nimble/
+asp_flash.bin` をフラッシュ（esptool v4.12・`--no-stub write_flash 0x0`・hash verified）．
+各ブート前に STORE0/2/3/4/5 を `write_mem 0` で pre-clear（cleared-boot-read）→ RTS boot →
+`read_mem`（`--before usb_reset --after no_reset`＝LP_AON は usb_reset 生存）で採取：
+
+```
+                     boot1        boot2      判定
+STORE0 (0x600B1000)  0x5ade51c0   0x5ade51c0  = BLE_SYNC_MARK_VAL → D-2a sync 成立
+STORE2 (0x600B1008)  0x0ade5000   0x0ade5000  = BLE_ADV_MARK_VAL  → adv_start 試行到達
+STORE3 (0x600B100C)  0xad000000   0xad000000  = 0xAD00_0000|rc(=0) → D-2b adv rc=0 成立
+STORE4 (0x600B1010)  0x00000000   0x00000000  = 割込み線1 累積（source7→線1）
+STORE5 (0x600B1014)  0x000007fb   0x000003f0  = 割込み線2 累積（~70-136/s＝正常域）
+STORE6 (0x600B1018)  0x00000000   0x00000000  = reset_cb 未発火（ble_hs リセット無し）
+STORE7 (0x600B101C)  0xa1020704   0xa1020704  = intr_alloc trace（nalloc=2 src7 src4）
+```
+
+- **D-2a sync＝MEASURED**：`ble_hs_cfg.sync_cb`（`on_sync`）到達＝STORE0 が `0x5ADE51C0`
+  （偶然一致し得ない magic）．NimBLE ホストがコントローラと同期＝ホストスタック起動確認．
+- **D-2b adv rc=0＝MEASURED**：STORE2 set（adv 試行）**かつ** STORE3=`0xAD000000`
+  （`ble_gap_adv_start` の戻り値 rc=0）．advisor の識別（STORE2 set／STORE3 unset なら
+  adv-start でのシンセ・ハング）に照らし **hang せず rc=0 で戻った**＝§11 の
+  `r_ble_lll_adv_start→register_chipv7_phy` シンセ経路も v6.1 で通過．**= C6 D-2b 達成**．
+- **storm 非再発**：STORE7 `0xa1020704`（C6/C5 D-1・実施02 の既知良好シグネチャと一致・
+  多重登録なし）＋線2 累積が ~15s で 1000-2000（=70-136/s，実施02 の hal D-2b 45-48/s と
+  同オーダー）．C3 級ストーム（1-3.8M/s）非再発＝`bt_shim_idf61.c` の INTMTX/PLIC_MX
+  スロット配列予防設計が機能．STORE6=0＝ble_hs リセット無し（ホスト健全）．
+- **2/2 ブート再現**（RTSリセット）．**留保：真cold 未検証（全ブートRTSリセット）＝
+  §10-§13 と同じ．OTA電波確認（ホスト/スマホ）と物理電源断はユーザー保留．**
+
+### 14.3 回帰・board C 最終状態・留保
+
+- **回帰（自スコープ内）**：v6.1 D-1（`bt_smoke_c6`・NimBLE 自動 OFF）を `ESP32C6_BT_
+  IDF61=ON` で再ビルド＝**リンク成功（非回帰）**．hal 版 BT（`ESP32C6_BT_IDF61=OFF`）・
+  wifi_scan は本改変（`esp_bt_idf61.cmake`＋新 `stub_idf61` のみ）に非接触＝影響なし．
+- **board C 最終 flash＝`build/c6bt_idf61_nimble`（v6.1 D-2b 成功ビルド＝既知良好状態）**．
+  task「D-2b 到達すればそのビルド」に従い成功ビルドを載せRTS boot で running 状態で残す．
+  D-1 へ戻すなら `build/c6bt_idf61`（§13）を再フラッシュ，hal 版へ戻すなら
+  `ESP32C6_BT_IDF61=OFF` で再ビルド（トグルで三者両立・可逆）．
+- **ユーザー保留**：(i) OTA検出（`ASP3-C6-BLE` の電波を hci0/スマホで確認）＝hci0 占有・
+  スマホ手動のため未実施，(ii) 物理電源断による真cold起動＝全ブートRTSリセット留保のまま．
+- **次段（申し送り）**：v6.1 側で D-2c（GATT ディスカバリ・自前サービス）／D-2d
+  （`ESP32C6_BT_IDF61_SM=ON`＝SMP/bonding・tinycrypt）へ．app 側は実施02〜のD-2c/D-2d
+  資産（STORE8/9 CONNECT/DISCONNECT・ENC/PAIR マーカ）が既存＝トグル ON で有効化．
+

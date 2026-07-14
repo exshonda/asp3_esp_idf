@@ -40,12 +40,26 @@ get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf 
 set(IDF /home/honda/tools/esp-idf-v6.1)
 set(BT_CHIP_SERIES esp32c6)
 
+#
+#  ★BLE実施14（docs/ble-c5c6-plan.md §14）：v6.1 D-1 の上に NimBLE ホストを
+#  載せて D-2a（host-controller sync）→D-2b（ble_gap_adv_start rc=0）を実機
+#  到達させる．NimBLE 有効化トグル（ESP32C6_BT_IDF61_NIMBLE）で判定を先出し
+#  する（下の「2. ソースファイル」節で hci_driver_standard.c／
+#  hci_driver_nimble.c の二者択一・CONFIG_BT_CONTROLLER_ONLY の D-1 限定化に
+#  使うため．ブロック本体＝NimBLE ソース/インクルード追加は末尾の D-2a 節）．
+#  RAM 予算のため既定 OFF．NimBLE を要するアプリ（ble_host_smoke_c6）で自動 ON．
+#  D-1 の bt_smoke_c6 は痩せたまま保つ．★実装は hal 版（esp_bt.cmake の
+#  ESP32C6_BT_NIMBLE ブロック）ではなく **C5 esp_bt.cmake の IDF v6.1 NimBLE
+#  ブロックを範とする**——本 D-1 が既に v6.1 controller/phy を使うため，
+#  nimble も ${IDF} から採り hal-nimble を混ぜない（C5 冒頭のライブラリ世代
+#  選定と同じ理由．検証則：v6.1 blob は nimble_mem_*／os_memblock_* を未解決の
+#  まま残すため esp_nimble_mem.c と os_mempool.c の «両方» をリンクして初めて
+#  v6.1 nimble に乗れている＝esp_nimble_mem.c 無しでリンクが通ったら hal-nimble を
+#  誤って引いた合図＝要調査）．
+#
+option(ESP32C6_BT_IDF61_NIMBLE "Enable NimBLE host stack on IDF v6.1 controller (Phase D-2a/D-2b, BLE実施14)" OFF)
 if(ASP3_APPLNAME STREQUAL "ble_host_smoke_c6")
-    message(FATAL_ERROR
-        "ESP32C6_BT_IDF61 は D-1（bt_smoke_c6）限定です．NimBLE ホスト "
-        "（ble_host_smoke_c6）は本 IDF v6.1 swap では未対応——RFシンセ・"
-        "ロック判定にホストは不要（docs/ble-c5c6-plan.md §13）．NimBLE を"
-        "使う場合は既定の hal 版（ESP32C6_BT_IDF61=OFF）を使うこと．")
+    set(ESP32C6_BT_IDF61_NIMBLE ON)
 endif()
 
 list(APPEND ASP3_COMPILE_DEFS
@@ -55,9 +69,10 @@ list(APPEND ASP3_COMPILE_DEFS
     CONFIG_BT_CONTROLLER_ENABLED
     CONFIG_IDF_TARGET_ESP32C6=1
     CONFIG_FREERTOS_NUMBER_OF_CORES=1
-    #  D-1（controller-only）限定．CONTROLLER_ONLY と NIMBLE_ENABLED は
-    #  実ESP-IDF Kconfig で排他．本 IDF61 構成は NimBLE を持たないため常に立てる．
-    CONFIG_BT_CONTROLLER_ONLY=1
+    #  CONFIG_BT_CONTROLLER_ONLY=1 は D-1（NimBLE ホスト無し）限定．実ESP-IDF
+    #  Kconfig では CONTROLLER_ONLY と NIMBLE_ENABLED は排他選択のため，NimBLE
+    #  ON 時（ble_host_smoke_c6）には立てない（C5 esp_bt.cmake と同じ分離）．
+    #  実際の定義は下の「2. ソースファイル」節の if(NOT ESP32C6_BT_IDF61_NIMBLE) 内．
     #  VHCI（esp_vhci_host_* 公開API）
     CONFIG_BT_LE_HCI_INTERFACE_USE_RAM=1
     #  msys 初期化をコントローラ内部へ委譲（esp32c6 Kconfig 既定 y）
@@ -132,6 +147,13 @@ list(APPEND ASP3_COMPILE_OPTIONS
 #  ★C3 の bt/stub/include（freertos/*.h＋esp_partition.h）を再利用する
 #  （v6.1 の bt.c は C3 と同じプログラミングモデル）．
 #
+#  ★BLE実施14：NimBLE ON 時，C6 idf61 専用の bt_nimble_config.h（LEGACY_VHCI=0）を
+#  C3 stub（LEGACY_VHCI=1 同梱）より前に PREPEND する（C5 esp_bt.cmake と同じ罠
+#  対策）．順序を誤ると C3 版が先に見つかり LEGACY_VHCI=1＝mbuf 余白計算が
+#  トランスポートと不整合になるサイレントな実行時バッファバグ．D-1（bt_smoke_c6）は
+#  bt_nimble_config.h を include しないため本 PREPEND は無害．
+list(PREPEND ASP3_INCLUDE_DIRS ${TARGETDIR}/bt/stub_idf61/include)
+
 list(APPEND ASP3_INCLUDE_DIRS
     ${C3_TARGETDIR}/bt/stub/include
     ${TARGETDIR}/wifi
@@ -212,8 +234,11 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     ${ESP_HAL_DIR}/components/esp_hal_clock/${BT_CHIP_SERIES}/clk_tree_hal.c
     ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_time.c
     ${IDF}/components/bt/porting/transport/src/hci_transport.c
-    #  D-1＝controller-only＝hci_driver_standard.c（NimBLE 無し）
-    ${IDF}/components/bt/porting/transport/driver/vhci/hci_driver_standard.c
+    #  hci_driver_standard.c（D-1）と hci_driver_nimble.c（D-2a 節）は共に
+    #  hci_driver_vhci_ops を定義するため二者択一（同時リンク不可）．D-1
+    #  （controller-only．bt_smoke_c6）は standard 版を下の
+    #  if(NOT ESP32C6_BT_IDF61_NIMBLE) ブロックで追加する．NimBLE ON 時
+    #  （ble_host_smoke_c6）は D-2a 節が nimble 版を追加する．
     ${BT_TARGETDIR}/bt_shim_idf61.c
     ${IDF}/components/esp_phy/src/phy_init.c
     ${IDF}/components/esp_phy/src/phy_common.c
@@ -228,6 +253,20 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     ${ESP_HAL_DIR}/components/hal/efuse_hal.c
     ${ESP_HAL_DIR}/components/hal/${BT_CHIP_SERIES}/efuse_hal.c
 )
+
+if(NOT ESP32C6_BT_IDF61_NIMBLE)
+    #  ★D-1＝controller-only スモークテスト（NimBLE ホスト無し）限定．
+    #  CONFIG_BT_CONTROLLER_ONLY と CONFIG_BT_NIMBLE_ENABLED は実ESP-IDF の
+    #  Kconfig では同時に 1 にならない排他選択（C5 esp_bt.cmake と同じ分離）．
+    #  NimBLE ON 時は立てず，hci_driver_standard.c も外す
+    #  （hci_driver_vhci_ops の多重定義回避）．
+    list(APPEND ASP3_COMPILE_DEFS
+        CONFIG_BT_CONTROLLER_ONLY=1
+    )
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${IDF}/components/bt/porting/transport/driver/vhci/hci_driver_standard.c
+    )
+endif()
 
 #
 #  ------------------------------------------------------------------
@@ -272,3 +311,164 @@ set(ESP_BT_ROM_LD_FILES
 foreach(_esp_bt_rom_ld ${ESP_BT_ROM_LD_FILES})
     list(APPEND ASP3_LINK_OPTIONS -Wl,-T,${_esp_bt_rom_ld})
 endforeach()
+
+#
+#  ==================================================================
+#  Phase D-2a/D-2b／BLE実施14：NimBLE ホストスタック（IDF v6.1版）
+#  ==================================================================
+#
+#  D-1（コントローラ＋VHCI，bt_smoke_c6）の上に NimBLE ホストを載せ，
+#  D-2a（host-controller sync）→D-2b（ble_gap_adv_start rc=0）を実機到達
+#  させる．★C5 esp_bt.cmake の IDF v6.1 NimBLE ブロックの逐語的な C6 転写
+#  （ソースは hal submodule ではなく IDF v6.1（${IDF}）から採る——本 D-1 が
+#  既に v6.1 controller/phy を使うため，nimble も同一 matched set で揃える．
+#  hal-nimble ＋ v6.1-controller のブロブ ABI 境界を新規に作らない）．
+#
+#  C6/C5 は新世代コントローラ（SOC_ESP_NIMBLE_CONTROLLER=1）のため，
+#  nimble_port.c の esp_nimble_init() 内部で esp_nimble_hci_init() 呼出しが
+#  コンパイルアウトされる＝C3 の LEGACY VHCI 経路は存在しない．
+#  hci_transport.c（D-1で既存）＋hci_driver_nimble.c＋hci_esp_ipc.c を使う
+#  （D-1 の hci_driver_standard.c と hci_driver_vhci_ops を取り合う二者択一．
+#  上の if(NOT ESP32C6_BT_IDF61_NIMBLE) で分離済み）．
+#
+#  ★C5 と同じく，TRUE=1／BT_HCI_LOG_INCLUDED=0／-include sdkconfig.h は
+#  «追加しない»：v6.1 の nimble_port.c は bt_common.h（TRUE／
+#  BT_HCI_LOG_INCLUDED の定義元）を #if より前に include するため，hal 版で
+#  踏んだ順序バグは v6.1 には存在しない（もし実機ビルドで hci_log/
+#  bt_hci_log.h が要求されたら，そのとき C6 hal 版と同じ -DTRUE=1
+#  -DBT_HCI_LOG_INCLUDED=0 を本ブロックへ追加する）．
+#
+if(ESP32C6_BT_IDF61_NIMBLE)
+
+    set(NIMBLE_ROOT ${IDF}/components/bt/host/nimble/nimble/nimble)
+    set(BT_ROOT ${IDF}/components/bt)
+    set(TINYCRYPT_ROOT ${IDF}/components/bt/host/nimble/nimble/ext/tinycrypt)
+
+    #  ---- SMP（ペアリング／ボンディング，D-2d）----
+    #  ★本ラウンド（BLE実施14）の目標は D-2a/D-2b（sync→adv rc=0）＝暗号不要の
+    #  ため既定 OFF（C5/C6-hal は D-2d 到達済みで既定 ON だが，本 v6.1 初 bring-up
+    #  はビルド面を痩せさせ tinycrypt リンクを避ける）．OFF 時は
+    #  MYNEWT_VAL_BLE_SM_LEGACY/SC=0 で ble_sm*.c を near-empty 化し，bond store は
+    #  ble_store_ram（IDF文脈で空＝sync/adv には十分）を使う．ON にすれば C5 と
+    #  同じ tinycrypt5ソース＋ble_store_config へ切替（D-2d 拡張時）．可逆．
+    option(ESP32C6_BT_IDF61_SM "Enable NimBLE SMP pairing/bonding on C6 idf61 (D-2d, tinycrypt)" OFF)
+
+    #  ---- コンパイル定義 ----
+    #  CONFIG_BT_NIMBLE_* 一式は bt/stub_idf61/include/bt_nimble_config.h
+    #  （C6 idf61 専用．LEGACY_VHCI=0）で供給する（上で PREPEND 済み）．
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_BT_NIMBLE)
+    if(ESP32C6_BT_IDF61_SM)
+        list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_BT_SM)
+    else()
+        #  D-2a/D-2b：SECURITY off．NIMBLE_BLE_SM=SM_LEGACY||SM_SC を 0 に落とし
+        #  ble_sm*.c を near-empty 化して tinycrypt/mbedTLS リンクを回避する．
+        list(APPEND ASP3_COMPILE_DEFS
+            MYNEWT_VAL_BLE_SM_LEGACY=0
+            MYNEWT_VAL_BLE_SM_SC=0
+        )
+    endif()
+
+    #  bt_nimble_config.h（CONFIG_BT_NIMBLE_*）・syscfg/syscfg.h（MYNEWT_VAL）を
+    #  強制 include．D-1 の -include soc/soc_caps.h 等と衝突しないよう SHELL: 接頭辞．
+    list(APPEND ASP3_COMPILE_OPTIONS
+        "$<$<COMPILE_LANGUAGE:C>:SHELL:-include bt_nimble_config.h>"
+        "$<$<COMPILE_LANGUAGE:C>:SHELL:-include syscfg/syscfg.h>"
+    )
+
+    #  ---- インクルードパス ----
+    #  porting/nimble/include（syscfg/syscfg.h）・porting/npl/freertos/include・
+    #  host/nimble/port/include（esp_nimble_init/mem）は D-1 のインクルード
+    #  リストに既に含まれる（-I の並びで先に来る＝優先解決）．
+    list(APPEND ASP3_INCLUDE_DIRS
+        ${NIMBLE_ROOT}/host/include
+        ${NIMBLE_ROOT}/include
+        ${NIMBLE_ROOT}/transport/include
+        ${NIMBLE_ROOT}/host/services/gap/include
+        ${NIMBLE_ROOT}/host/services/gatt/include
+        ${NIMBLE_ROOT}/host/util/include
+        ${NIMBLE_ROOT}/host/store/ram/include
+    )
+    if(ESP32C6_BT_IDF61_SM)
+        list(APPEND ASP3_INCLUDE_DIRS
+            ${NIMBLE_ROOT}/host/store/config/include
+            ${TINYCRYPT_ROOT}/include
+        )
+    endif()
+
+    #  ---- ソースファイル ----
+    #  D-1 で既に npl_os_freertos.c／os_msys_init.c／bt_osi_mem.c／os_mempool.c／
+    #  hci_transport.c はリンク済み．
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${BT_ROOT}/porting/transport/driver/vhci/hci_driver_nimble.c
+        ${NIMBLE_ROOT}/transport/esp_ipc/src/hci_esp_ipc.c
+        #  nimble_mem_malloc/calloc/free（ホスト各所が直接呼ぶ．heap_caps_* へ
+        #  委譲）．v6.1 blob は plain 名で未解決参照＝C5 BLE実施05 と同じ壁．
+        #  ★v6.1 に乗れている検証点：hal blob なら不要だが v6.1 では必須．
+        ${BT_ROOT}/host/nimble/port/src/esp_nimble_mem.c
+        ${IDF}/components/bt/host/nimble/nimble/porting/nimble/src/nimble_port.c
+        ${IDF}/components/bt/host/nimble/nimble/porting/npl/freertos/src/nimble_port_freertos.c
+        #  ホストスタック本体（C5/C6-hal と同一トリム集合．ble_svc_gap/gatt のみ）
+        ${NIMBLE_ROOT}/transport/src/transport.c
+        ${NIMBLE_ROOT}/host/util/src/addr.c
+        ${NIMBLE_ROOT}/host/services/gap/src/ble_svc_gap.c
+        ${NIMBLE_ROOT}/host/services/gatt/src/ble_svc_gatt.c
+        ${NIMBLE_ROOT}/host/src/ble_att.c
+        ${NIMBLE_ROOT}/host/src/ble_att_clt.c
+        ${NIMBLE_ROOT}/host/src/ble_att_cmd.c
+        ${NIMBLE_ROOT}/host/src/ble_att_svr.c
+        ${NIMBLE_ROOT}/host/src/ble_eddystone.c
+        ${NIMBLE_ROOT}/host/src/ble_gap.c
+        ${NIMBLE_ROOT}/host/src/ble_gattc.c
+        ${NIMBLE_ROOT}/host/src/ble_gatts.c
+        ${NIMBLE_ROOT}/host/src/ble_gatts_lcl.c
+        ${NIMBLE_ROOT}/host/src/ble_hs.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_adv.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_atomic.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_cfg.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_conn.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_flow.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_hci.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_hci_cmd.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_hci_evt.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_hci_util.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_id.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_log.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_mbuf.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_misc.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_mqueue.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_periodic_sync.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_pvcy.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_resolv.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_shutdown.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_startup.c
+        ${NIMBLE_ROOT}/host/src/ble_hs_stop.c
+        ${NIMBLE_ROOT}/host/src/ble_ibeacon.c
+        ${NIMBLE_ROOT}/host/src/ble_l2cap.c
+        ${NIMBLE_ROOT}/host/src/ble_l2cap_coc.c
+        ${NIMBLE_ROOT}/host/src/ble_l2cap_sig.c
+        ${NIMBLE_ROOT}/host/src/ble_l2cap_sig_cmd.c
+        ${NIMBLE_ROOT}/host/src/ble_sm.c
+        ${NIMBLE_ROOT}/host/src/ble_sm_alg.c
+        ${NIMBLE_ROOT}/host/src/ble_sm_cmd.c
+        ${NIMBLE_ROOT}/host/src/ble_sm_lgcy.c
+        ${NIMBLE_ROOT}/host/src/ble_sm_sc.c
+        ${NIMBLE_ROOT}/host/src/ble_store.c
+        ${NIMBLE_ROOT}/host/src/ble_store_util.c
+        ${NIMBLE_ROOT}/host/src/ble_uuid.c
+    )
+    if(ESP32C6_BT_IDF61_SM)
+        list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+            ${NIMBLE_ROOT}/host/store/config/src/ble_store_config.c
+            ${TINYCRYPT_ROOT}/src/aes_encrypt.c
+            ${TINYCRYPT_ROOT}/src/cmac_mode.c
+            ${TINYCRYPT_ROOT}/src/ecc.c
+            ${TINYCRYPT_ROOT}/src/ecc_dh.c
+            ${TINYCRYPT_ROOT}/src/utils.c
+        )
+    else()
+        list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+            ${NIMBLE_ROOT}/host/store/ram/src/ble_store_ram.c
+        )
+    endif()
+
+endif()  # ESP32C6_BT_IDF61_NIMBLE
