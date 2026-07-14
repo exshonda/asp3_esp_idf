@@ -111,6 +111,20 @@
 #define CONFIG_BT_NIMBLE_HS_FLOW_CTRL_THRESH 2
 #define CONFIG_BT_NIMBLE_HS_FLOW_CTRL_TX_ON_DISCONNECT 0
 #define CONFIG_BT_NIMBLE_HOST_BASED_PRIVACY 0
+/*
+ *  ★D-2d bond 真因修正（docs/bt-shim.md「D-2d bond 真因確定」節）：
+ *  MYNEWT_VAL(BLE_HS_PVCY) が 0 だと ble_sm.c:2365-2426 の «responder の
+ *  Identity 鍵配布（Identity Info/Address の ble_sm_tx）» が丸ごと
+ *  `#if MYNEWT_VAL(BLE_HS_PVCY)` でコンパイルアウトされる．SC では
+ *  ble_sm_key_dist が ENC フラグをクリアするため，our_key_dist=ENC|ID でも
+ *  «送る鍵が1つも残らず» ble_sm_tx=0＝Pairing Response で約束した Identity 鍵を
+ *  送れずに peer が待ち→30s SM timeout→ENC_CHANGE ETIMEOUT で bond 不成立
+ *  （実機 RXTRACE で確定：sm_tx=0・delta=30s）．working S3 も同一理由で
+ *  CONFIG_BT_NIMBLE_HS_PVCY=1 を設定（bt_nimble_config.h:202）．
+ *  HOST_BASED_PRIVACY（RPA 解決変種）は bonding には不要のため 0 のまま．
+ *  ble_hs_pvcy.c/ble_hs_resolv.c は esp_bt.cmake に既にリンク済＝1 で body 有効化．
+ */
+#define CONFIG_BT_NIMBLE_HS_PVCY 1
 #define CONFIG_BT_NIMBLE_SM_LVL 0
 #define CONFIG_BT_NIMBLE_SMP_ID_RESET 0
 #define CONFIG_BT_NIMBLE_SM_SC_DEBUG_KEYS 0

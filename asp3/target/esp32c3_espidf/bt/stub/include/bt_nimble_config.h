@@ -168,4 +168,17 @@
 #define CONFIG_BT_CTRL_SLEEP_MODE_EFF 0
 #define CONFIG_BT_CTRL_SLEEP_CLOCK_EFF 0
 
+/*
+ *  ★D-2d bond 真因修正（docs/bt-shim.md「D-2d bond 真因確定」節，C5 で実機実証）：
+ *  MYNEWT_VAL(BLE_HS_PVCY)=0 だと ble_sm.c:2365-2426 の «responder の Identity 鍵
+ *  配布（Identity Info/Address の ble_sm_tx）» が `#if MYNEWT_VAL(BLE_HS_PVCY)` で
+ *  丸ごとコンパイルアウトされ，SC では ble_sm_key_dist が ENC もクリアするため
+ *  our_key_dist=ENC|ID でも送る鍵が残らず ble_sm_tx=0＝約束した Identity 鍵を送れず
+ *  peer が待ち→30s SM timeout→bond 不成立．C5 実機で PVCY=1 にして sm_tx=2・
+ *  ENC status=0・bond 成功を実証（C3 も同一 blob 非依存の同一失敗＝同じ真因）．
+ *  working S3 も CONFIG_BT_NIMBLE_HS_PVCY=1（bt_nimble_config.h:202）．
+ *  ble_hs_pvcy.c/ble_hs_resolv.c は esp_bt.cmake:364-365 に既にリンク済．
+ */
+#define CONFIG_BT_NIMBLE_HS_PVCY 1
+
 #endif /* TOPPERS_BT_NIMBLE_CONFIG_H */
