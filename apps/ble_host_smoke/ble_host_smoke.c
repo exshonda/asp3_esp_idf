@@ -277,6 +277,14 @@ main_task(EXINF exinf)
 	sil_wrw_mem(BLE_CONN_MARK_ADDR, 0U);
 	sil_wrw_mem(BLE_DISC_MARK_ADDR, 0U);
 
+#ifdef TOPPERS_ESP32C3_BT_ACL_TRACE
+	/*  D-2c：RX-data dispatch 計装のカウンタ（RTC STORE2）を0クリア．  */
+	{
+		extern void esp_acl_trace_reset(void);
+		esp_acl_trace_reset();
+	}
+#endif
+
 	/*
 	 *  emi.c:164対策：BLEベースバンド(BB)のクロックを有効化する
 	 *  （bt_smoke と同じ．詳細はdocs/bt-shim.md）．

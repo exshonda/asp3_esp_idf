@@ -354,6 +354,27 @@ if(ESP32C3_BT_NIMBLE)
         ${NIMBLE_ROOT}/host/store/ram/src/ble_store_ram.c
     )
 
+    #
+    #  （D-2c 診断）RX-data dispatch 局在化計装（既定OFF＝非回帰）．
+    #  ON時のみ acl_trace.c を追加し ble_mqueue_put/get・ble_l2cap_rx・
+    #  ble_hs_conn_find を --wrap して呼出し数を RTC STORE2 へ記録する．
+    #  仮説(a)host未dispatch / (b)conn_find NULL を1回のdump-memで切り分け．
+    #  詳細=docs/bt-shim.md Phase D-2c．
+    #
+    option(ESP32C3_BT_ACL_TRACE "Trace RX ACL dispatch via --wrap (D-2c diag)" OFF)
+    if(ESP32C3_BT_ACL_TRACE)
+        list(APPEND ASP3_SYSSVC_TARGET_C_FILES ${BT_TARGETDIR}/acl_trace.c)
+        list(APPEND ASP3_LINK_OPTIONS
+            -Wl,--wrap=ble_mqueue_put
+            -Wl,--wrap=ble_mqueue_get
+            -Wl,--wrap=ble_l2cap_rx
+            -Wl,--wrap=ble_hs_conn_find
+            -Wl,--wrap=ble_hci_trans_hs_acl_tx
+            -Wl,--wrap=esp_vhci_host_send_packet
+        )
+        list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_BT_ACL_TRACE)
+    endif()
+
 endif()
 
 endif()

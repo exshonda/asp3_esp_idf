@@ -80,6 +80,10 @@ extern int32_t esp_shim_queue_send_from_isr(void *que, void *item);
 extern int32_t esp_shim_queue_recv(void *que, void *item,
 								   uint32_t block_time_tick);
 extern uint32_t esp_shim_queue_msg_waiting(void *que);
+extern void esp_shim_queue_reset(void *que);
+/*  E_CTX（CPUロック）文脈で保留リングへ退避した送信をDTQへ流し込む
+ *  （esp_shim_exit_critical最外解除・queue_send/recv冒頭から呼ぶ．D-2c）．  */
+extern void esp_shim_queue_flush_pending(void);
 
 /*
  *  タスク（CRE_TSKプール．共通エントリ＋関数ポインタ渡し）
