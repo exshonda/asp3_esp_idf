@@ -107,6 +107,13 @@ extern volatile uint32_t esp_shim_int_count[];
 #define LP_AON_STORE9		0x600B1024UL	/* GAP DISCONNECT マーカ */
 #define BLE_CONN_MARK_ADDR	((void *) LP_AON_STORE8)
 #define BLE_DISC_MARK_ADDR	((void *) LP_AON_STORE9)
+#ifdef TOPPERS_ESP32C5_BT_SM
+/*  ★D-2d（SM）：ENC_CHANGE／PAIRING_COMPLETE マーカ（LP_AON STORE10/11＝
+    usb-reset生存．C3 の 0x58/0x54 相当）．値のフォーマットも C3 D-2d に揃える：
+    ENC=0x5DE0<status:8>／PAIRING=0x5DC0<status:8><our_sec:4><peer_sec:4>．  */
+#define LP_AON_STORE10		0x600B1028UL	/* ENC_CHANGE マーカ */
+#define LP_AON_STORE11		0x600B102CUL	/* PAIRING_COMPLETE マーカ */
+#endif
 
 #define BLE_SYNC_MARK_VAL	0x5ADE51C0UL
 
@@ -126,6 +133,13 @@ volatile uint32_t	g_gap_event_count;
 volatile uint8_t	g_own_addr_type;
 volatile int32_t	g_reset_reason = 0x7fffffff;
 volatile uint32_t	g_reset_count;
+#ifdef TOPPERS_ESP32C5_BT_SM
+/*  ★D-2d（SM）：接続ハンドルと slave Security Request 計時（S3/C3 D-2d 移植）．  */
+volatile uint16_t	g_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+volatile uint32_t	g_conn_secs;
+volatile uint8_t	g_sec_initiated;
+extern void			ble_store_config_init(void);
+#endif
 
 #define BLE_DEVICE_NAME		"ASP3-C5-BLE"
 
@@ -277,10 +291,22 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 			g_adv_active = 0U;
 			start_advertising();
 		}
+#ifdef TOPPERS_ESP32C5_BT_SM
+		else {
+			/*  D-2d：接続ハンドル記録＋接続5秒後 SecReq のための計時開始  */
+			g_conn_handle = event->connect.conn_handle;
+			g_conn_secs = 0U;
+			g_sec_initiated = 0U;
+		}
+#endif
 		break;
 	case BLE_GAP_EVENT_DISCONNECT:
 		g_gap_disc_count++;
 		g_adv_active = 0U;
+#ifdef TOPPERS_ESP32C5_BT_SM
+		g_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+		g_sec_initiated = 0U;
+#endif
 		/*  ★ビルド未検証（同上）  */
 		sil_wrw_mem(BLE_DISC_MARK_ADDR,
 					0xD15C0000UL
@@ -290,6 +316,44 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 			   (int_t) event->disconnect.reason);
 		start_advertising();
 		break;
+#ifdef TOPPERS_ESP32C5_BT_SM
+	case BLE_GAP_EVENT_ENC_CHANGE:
+		/*  D-2d：暗号化結果．STORE10 に 0x5DE0<status>（C3 D-2d と同形式）．  */
+		sil_wrw_mem((void *) LP_AON_STORE10,
+					0x5DE00000UL | ((uint32_t) event->enc_change.status & 0xffUL));
+		syslog(LOG_NOTICE, "ble_host_smoke_c5: GAP ENC_CHANGE status=%d",
+			   (int_t) event->enc_change.status);
+		break;
+	case BLE_GAP_EVENT_REPEAT_PAIRING:
+		{
+			struct ble_gap_conn_desc	desc;
+
+			if (ble_gap_conn_find(event->repeat_pairing.conn_handle,
+								  &desc) == 0) {
+				ble_store_util_delete_peer(&desc.peer_id_addr);
+			}
+		}
+		return BLE_GAP_REPEAT_PAIRING_RETRY;
+	case BLE_GAP_EVENT_PARING_COMPLETE:
+		/*  D-2d：SMP完了（status=0成功）．STORE11 に 0x5DC0<status><our><peer>．
+		    ★C5初のbond成否判定＝status=0かつour_sec>=1でDUT側bond成立．  */
+		{
+			int	our_cnt = 0, peer_cnt = 0;
+
+			(void) ble_store_util_count(BLE_STORE_OBJ_TYPE_OUR_SEC, &our_cnt);
+			(void) ble_store_util_count(BLE_STORE_OBJ_TYPE_PEER_SEC, &peer_cnt);
+			sil_wrw_mem((void *) LP_AON_STORE11,
+						0x5DC00000UL
+						| (((uint32_t) event->pairing_complete.status & 0xffUL) << 8)
+						| (((uint32_t) our_cnt & 0xfUL) << 4)
+						| ((uint32_t) peer_cnt & 0xfUL));
+			syslog(LOG_NOTICE,
+				   "ble_host_smoke_c5: GAP PAIRING_COMPLETE status=%d bonds our=%d peer=%d",
+				   (int_t) event->pairing_complete.status,
+				   (int_t) our_cnt, (int_t) peer_cnt);
+		}
+		break;
+#endif
 	case BLE_GAP_EVENT_ADV_COMPLETE:
 		g_adv_active = 0U;
 		syslog(LOG_NOTICE, "ble_host_smoke_c5: GAP ADV_COMPLETE reason=%d",
@@ -330,6 +394,36 @@ ble_host_task(void *param)
 	nimble_port_run();		/*  戻らない（nimble_port_stopまで）  */
 	nimble_port_freertos_deinit();
 }
+
+#ifdef TOPPERS_ESP32C5_BT_SM
+/*
+ *  ★D-2d：接続5秒後に «未暗号» なら slave Security Request を1回だけ送る
+ *  （S3/C3 D-2d 移植．1秒周期ループから呼ぶ）．central にペアリングを開始
+ *  させる＝bond のトリガ（暗号必須特性が無くても接続だけで pair 要求が出る）．
+ */
+static void
+bt5_security_tick(void)
+{
+	struct ble_gap_conn_desc	desc;
+	uint16_t					ch = g_conn_handle;
+	int							rc;
+
+	if (ch == BLE_HS_CONN_HANDLE_NONE) {
+		return;
+	}
+	g_conn_secs++;
+	if (g_conn_secs < 5U || g_sec_initiated != 0U) {
+		return;
+	}
+	g_sec_initiated = 1U;
+	if (ble_gap_conn_find(ch, &desc) != 0 || desc.sec_state.encrypted) {
+		return;
+	}
+	rc = ble_gap_security_initiate(ch);
+	syslog(LOG_NOTICE,
+		   "ble_host_smoke_c5: BT5 security_initiate(slave SecReq) rc=%d", (int_t) rc);
+}
+#endif /* TOPPERS_ESP32C5_BT_SM */
 
 void
 main_task(EXINF exinf)
@@ -411,6 +505,23 @@ main_task(EXINF exinf)
 		}
 	}
 
+#ifdef TOPPERS_ESP32C5_BT_SM
+	/*
+	 *  ★D-2d：SMP（ペアリング／ボンディング）設定（C3/S3 と同一）．
+	 *  bond store を先に初期化（未初期化だと Pairing Request 直後に
+	 *  ble_store_read=ENOTSUP で即失敗．S3 §5）．Just Works / SC．
+	 */
+	ble_store_config_init();
+	ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
+	ble_hs_cfg.sm_bonding = 1;
+	ble_hs_cfg.sm_mitm = 0;
+	ble_hs_cfg.sm_sc = 1;
+	ble_hs_cfg.sm_our_key_dist =
+		BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+	ble_hs_cfg.sm_their_key_dist =
+		BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+#endif
+
 	ble_hs_cfg.sync_cb = on_sync;
 	ble_hs_cfg.reset_cb = on_reset;
 
@@ -442,4 +553,15 @@ main_task(EXINF exinf)
 	report_intr_rate();
 
 	syslog(LOG_NOTICE, "ble_host_smoke_c5: done (host task continues in background)");
+#ifdef TOPPERS_ESP32C5_BT_SM
+	/*
+	 *  ★D-2d：定常ループ（1秒周期）．接続5秒後に slave Security Request を
+	 *  送って bond をトリガする（bt5_security_tick）．main_task を返さず保持＝
+	 *  adv/接続/pairing を無期限に続ける（実機で bond を追試できる本番形）．
+	 */
+	for (;;) {
+		bt5_security_tick();
+		(void) tslp_tsk(1000000);	/* 1s */
+	}
+#endif
 }

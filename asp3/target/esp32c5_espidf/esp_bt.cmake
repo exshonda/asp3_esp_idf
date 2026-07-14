@@ -364,17 +364,30 @@ if(ESP32C5_BT_NIMBLE)
 
     set(NIMBLE_ROOT ${IDF}/components/bt/host/nimble/nimble/nimble)
     set(BT_ROOT ${IDF}/components/bt)
+    set(TINYCRYPT_ROOT ${IDF}/components/bt/host/nimble/nimble/ext/tinycrypt)
+
+    #  ---- ★D-2d：SMP（ペアリング／ボンディング）有効化 ----
+    #  C3 の ESP32C3_BT_SM の C5 版（tinycrypt は IDF パス）．ON時は
+    #  MYNEWT_VAL_BLE_SM_LEGACY/SC=0 の «蓋» を外し，SC=ECDH P-256 の crypto を
+    #  vendored tinycrypt で供給，bond store は ble_store_ram（IDF文脈で空）でなく
+    #  ble_store_config（PERSIST=0＝RAM）を使う（S3 §5.2）．OFF で D-2a(sync/adv)
+    #  構成へ完全復帰＝可逆．C5 は C3 と別 blob(015db3db)＝C3 の «2個目暗号化ACL»
+    #  の壁は非該当の公算（docs/bt-shim.md「別PC引き継ぎ要点」）．
+    option(ESP32C5_BT_SM "Enable NimBLE SMP pairing/bonding on C5 (Phase D-2d, tinycrypt)" ON)
 
     #  ---- コンパイル定義 ----
-    #  MYNEWT_VAL_BLE_SM_LEGACY/SCはble_sm*.cをnear-empty化しmbedTLS/
-    #  tinycryptのリンクを回避する（C3/C6のD-2aと同じ判断．sync/adv到達に
-    #  暗号は不要）．CONFIG_BT_NIMBLE_*一式はbt/stub/include/
-    #  bt_nimble_config.h（C5専用版．LEGACY_VHCI=0）で供給する．
-    list(APPEND ASP3_COMPILE_DEFS
-        TOPPERS_ESP32C5_BT_NIMBLE
-        MYNEWT_VAL_BLE_SM_LEGACY=0
-        MYNEWT_VAL_BLE_SM_SC=0
-    )
+    #  CONFIG_BT_NIMBLE_*一式はbt/stub/include/bt_nimble_config.h（C5専用版．
+    #  LEGACY_VHCI=0）で供給する．SM OFF時のみ SM_LEGACY/SC=0 でble_sm*.cを
+    #  near-empty化しtinycrypt/mbedTLSリンクを回避する（C3/C6のD-2aと同じ判断）．
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_BT_NIMBLE)
+    if(ESP32C5_BT_SM)
+        list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_BT_SM)
+    else()
+        list(APPEND ASP3_COMPILE_DEFS
+            MYNEWT_VAL_BLE_SM_LEGACY=0
+            MYNEWT_VAL_BLE_SM_SC=0
+        )
+    endif()
 
     #  bt_nimble_config.h（CONFIG_BT_NIMBLE_*）・syscfg/syscfg.h（MYNEWT_VAL）
     #  を強制include．D-1の -include soc/soc_caps.h 等と衝突しないよう
@@ -397,6 +410,13 @@ if(ESP32C5_BT_NIMBLE)
         ${NIMBLE_ROOT}/host/util/include
         ${NIMBLE_ROOT}/host/store/ram/include
     )
+    if(ESP32C5_BT_SM)
+        #  D-2d：ble_store_config と tinycrypt（SC の uECC P-256 ＋ AES-CMAC）
+        list(APPEND ASP3_INCLUDE_DIRS
+            ${NIMBLE_ROOT}/host/store/config/include
+            ${TINYCRYPT_ROOT}/include
+        )
+    endif()
 
     #  ---- ソースファイル ----
     #  D-1で既に npl_os_freertos.c／os_msys_init.c／bt_osi_mem.c／
@@ -460,8 +480,24 @@ if(ESP32C5_BT_NIMBLE)
         ${NIMBLE_ROOT}/host/src/ble_store.c
         ${NIMBLE_ROOT}/host/src/ble_store_util.c
         ${NIMBLE_ROOT}/host/src/ble_uuid.c
-        ${NIMBLE_ROOT}/host/store/ram/src/ble_store_ram.c
     )
+    if(ESP32C5_BT_SM)
+        #  D-2d：bond store は ble_store_config（PERSIST=0＝RAM，NVS不使用．
+        #  ble_store_ram.c は IDF文脈で空＝S3 §5.2 の真因）＋ tinycrypt 必要5ソース
+        #  （ble_sm_alg.c の tc_aes*/tc_cmac_*/uECC_* 参照に対応）．
+        list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+            ${NIMBLE_ROOT}/host/store/config/src/ble_store_config.c
+            ${TINYCRYPT_ROOT}/src/aes_encrypt.c
+            ${TINYCRYPT_ROOT}/src/cmac_mode.c
+            ${TINYCRYPT_ROOT}/src/ecc.c
+            ${TINYCRYPT_ROOT}/src/ecc_dh.c
+            ${TINYCRYPT_ROOT}/src/utils.c
+        )
+    else()
+        list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+            ${NIMBLE_ROOT}/host/store/ram/src/ble_store_ram.c
+        )
+    endif()
 
 endif()
 
