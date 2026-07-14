@@ -436,6 +436,9 @@ if(ESP32C3_BT_NIMBLE)
         list(APPEND ASP3_SYSSVC_TARGET_C_FILES ${BT_TARGETDIR}/evt_trace.c)
         list(APPEND ASP3_LINK_OPTIONS
             -Wl,--wrap=ble_hs_hci_evt_process
+            -Wl,--wrap=ble_mqueue_put
+            -Wl,--wrap=ble_mqueue_get
+            -Wl,--wrap=ble_l2cap_rx
         )
         list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_BT_EVT_TRACE)
     endif()

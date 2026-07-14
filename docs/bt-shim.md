@@ -2416,3 +2416,39 @@ ENC_CHANGE ハンドラで `fch_hrt() - g_evt_enc_hrt` を 0x58 byte1 へ）、(
 put が増えない → controller/LL 未配送で確定（blob層）。put○get✗/get○l2cap✗ なら
 host/L2CAP 側の別問題。計装の 100ms flush は «防御的安全網» として残置（bond は
 直さないが pend_ring 滞留一般への保険。pend残0で即return＝非回帰）。
+
+#### ★真因を controller/LL 層に確定：暗号確立後「最初の1個の暗号化ACLは通るが2個目が通らない」（RX/TX パイプライン+key_dist 実験）
+反証を積み上げて真因を局在化した最終ラウンド。
+
+**RXパイプライン計装**（evt_trace.c に `ble_mqueue_put`/`ble_mqueue_get`/`ble_l2cap_rx`
+を --wrap、暗号確立時点でスナップショット→0x50 に put/get/l2cap の «暗号後» 増分を格納）。
+実機（their=ID/our=ID 原本）：**暗号後 ACL = put=1, get=1, l2cap=1**（=届いた1個は
+host rx_q→drain→L2CAP まで完全処理＝**RX経路は正常**）。しかし LE SC 鍵配布は central が
+Identity Information + Identity Address の **2 PDU** を送る＝**2個目が来ない**（put が 1 で
+止まる）。∴ 詰まりは shim/host の RX 経路ではない。
+
+**key_dist 切替実験**（真因の裏取り）：
+| 設定 | DUT 結果 |
+|---|---|
+| their=ID / our=ID（原本） | 暗号後 ACL 1個→**30秒 ETIMEOUT**（central 2個目 Identity PDU 未達） |
+| their=**no-ID** / our=ID | **PAIRING_COMPLETE status=0（SMP完了！）** だが phone 未 bond・bond件数0 |
+| their=no-ID / our=**no-ID** | 暗号手前で拒否（peripheral 鍵ゼロを central が拒否） |
+
+their から ID を外すと DUT は central の鍵を待たず **PAIRING_COMPLETE status=0 で完了**した
+（＝«待ち» が原因だった裏取り）。だが phone は依然 bond せず＝今度は **DUT 自身の IRK
+（our=ID の 2 PDU）TX の2個目が central に届かない**（central 不満足で切断）。
+
+**∴ 真因確定：C3 コントローラ(blob)の LL 暗号層で、暗号確立«後»の «2個目以降の暗号化
+ACL パケット» が復号/配送されない**（RX=central の2個目 Identity PDU が put まで来ない／
+TX=DUT の2個目 IRK が central に届かない）。最初の1個は RX/TX とも成功する。これは
+memory の «iOS 再接続 MIC failure»（暗号リンク上の MIC/復号失敗）と同族＝**host/shim/
+アプリでは回避できない controller/blob 層の問題**。shim(pend_ring/flush)・host(NimBLE)・
+key_dist いずれも真因ではない（全て反証済み）。
+
+**到達点と残**：C3 BLE は「暗号確立（Encryption Change status0）」「暗号後 最初の1パケット
+の RX/TX」「their=no-ID で SMP PAIRING_COMPLETE status0」までは到達。**永続 bond は
+コントローラの «複数暗号化パケット» 不成立により未達**。次は controller/blob 層＝(a)別
+blob版/IDF stock コントローラでの2個目暗号化ACL挙動の対照、(b)LL 暗号(CCM/nonce/pktcnt)
+関連の controller 設定・ROM 依存の確認、(c)暗号を要求しない運用（平文 GATT）での確定。
+key_dist は spec 準拠（ENC|ID）へ復帰。診断計装 evt_trace.c(ESP32C3_BT_EVT_TRACE)・
+100ms flush は残置（非回帰）。

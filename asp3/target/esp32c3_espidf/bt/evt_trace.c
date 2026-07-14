@@ -54,19 +54,35 @@ volatile uint32_t	g_evt_delta_us;		/* LTK Req〜Enc Change の差(μs)  */
 volatile uint32_t	g_evt_enc_hrt;		/* Encryption Change(0x08) の HRT(μs)．
 										   ★app が ETIMEOUT を受けた時刻との差＝
 										   «実30秒待ち»(PDU欠落) vs «早発火»(NPL)の判別 */
+volatile uint32_t	g_evt_acl_put;		/* ble_mqueue_put 数＝ACL が host rx_q へ */
+volatile uint32_t	g_evt_acl_get;		/* ble_mqueue_get 非NULL数＝host が drain */
+volatile uint32_t	g_evt_acl_l2cap;	/* ble_l2cap_rx 数＝L2CAP 到達 */
+volatile uint32_t	g_evt_acl_at_enc;	/* Enc Change 時点の put スナップショット */
+volatile uint32_t	g_evt_get_at_enc;	/* 同 get スナップショット */
+volatile uint32_t	g_evt_l2cap_at_enc;	/* 同 l2cap スナップショット */
 
 static void
 evt_trace_pack(void)
 {
-	uint32_t d = g_evt_delta_us / 1000000U;	/* μs→秒 */
-	uint32_t l = g_evt_ltk_req > 255U ? 255U : g_evt_ltk_req;
-	uint32_t c = g_evt_enc_chg > 255U ? 255U : g_evt_enc_chg;
-	uint32_t s = g_evt_enc_status & 0xffU;
+	/*  ★暗号確立«後» の ACL RX パイプラインを可視化（各バイト飽和255）:
+	 *    [ 7: 0] put   ＝ ACL が host rx_q へ届いた数（ble_mqueue_put）
+	 *    [15: 8] get   ＝ host が drain した数（ble_mqueue_get 非NULL）
+	 *    [23:16] l2cap ＝ L2CAP へ回った数（ble_l2cap_rx）
+	 *    [31:24] enc_chg ＝ Encryption Change 到着数（暗号到達の sanity）
+	 *  判定：put=0→controller未配送(blob)／put>get→rx_q滞留(host未drain=eventq
+	 *  signal欠落)／get>l2cap→L2CAP前drop(conn_find NULL)／put=get=l2cap>0→
+	 *  SMP層まで到達＝鍵配布PDU数不足 or SMP処理の問題．  */
+	uint32_t base = (g_evt_enc_hrt != 0U) ? 1U : 0U;
+	uint32_t p = base ? (g_evt_acl_put   - g_evt_acl_at_enc)   : 0U;
+	uint32_t g = base ? (g_evt_acl_get   - g_evt_get_at_enc)   : 0U;
+	uint32_t x = base ? (g_evt_acl_l2cap - g_evt_l2cap_at_enc) : 0U;
+	uint32_t e = g_evt_enc_chg;
 
-	if (d > 255U) {
-		d = 255U;
-	}
-	*EVT_TRACE_RTC = (d << 24) | (s << 16) | (c << 8) | l;
+	if (p > 255U) { p = 255U; }
+	if (g > 255U) { g = 255U; }
+	if (x > 255U) { x = 255U; }
+	if (e > 255U) { e = 255U; }
+	*EVT_TRACE_RTC = (e << 24) | (x << 16) | (g << 8) | p;
 }
 
 /*  app が起動時に一度呼ぶ（.bss は0初期化だが SYNC マーカ転用を明示化）  */
@@ -80,6 +96,12 @@ esp_evt_trace_reset(void)
 	g_evt_ltk_hrt = 0U;
 	g_evt_delta_us = 0U;
 	g_evt_enc_hrt = 0U;
+	g_evt_acl_put = 0U;
+	g_evt_acl_get = 0U;
+	g_evt_acl_l2cap = 0U;
+	g_evt_acl_at_enc = 0U;
+	g_evt_get_at_enc = 0U;
+	g_evt_l2cap_at_enc = 0U;
 	evt_trace_pack();
 }
 
@@ -99,6 +121,9 @@ __wrap_ble_hs_hci_evt_process(void *ev)
 			g_evt_enc_chg++;
 			g_evt_enc_status = p[2];	/* status バイト */
 			g_evt_enc_hrt = fch_hrt();	/* Enc Change 到着時刻 */
+			g_evt_acl_at_enc = g_evt_acl_put;	/* 暗号後 ACL 基点(put) */
+			g_evt_get_at_enc = g_evt_acl_get;	/* 同(get) */
+			g_evt_l2cap_at_enc = g_evt_acl_l2cap;	/* 同(l2cap) */
 			if (g_evt_ltk_hrt != 0U) {
 				g_evt_delta_us = g_evt_enc_hrt - g_evt_ltk_hrt;
 			}
@@ -112,4 +137,46 @@ __wrap_ble_hs_hci_evt_process(void *ev)
 		evt_trace_pack();
 	}
 	return __real_ble_hs_hci_evt_process(ev);
+}
+
+/*  --wrap 対象＝ACL RX を host rx_q(ble_hs_rx_q)へ積む点．呼出し数を数えて
+    «暗号確立後» に ACL RX が届くかを局在化する（引数はポインタのみ＝void*）．
+    acl_trace.c と同一シグネチャ（ESP32C3_BT_ACL_TRACE と同時ONは二重定義に
+    なるため排他．本計装は EVT_TRACE 側でのみ有効）．  */
+extern int __real_ble_mqueue_put(void *mq, void *evq, void *om);
+
+int
+__wrap_ble_mqueue_put(void *mq, void *evq, void *om)
+{
+	g_evt_acl_put++;
+	evt_trace_pack();
+	return __real_ble_mqueue_put(mq, evq, om);
+}
+
+/*  host が rx_q を drain した点（非NULL＝実際に1件取り出せた）．  */
+extern void *__real_ble_mqueue_get(void *mq);
+
+void *
+__wrap_ble_mqueue_get(void *mq)
+{
+	void	*om = __real_ble_mqueue_get(mq);
+
+	if (om != (void *) 0) {
+		g_evt_acl_get++;
+		evt_trace_pack();
+	}
+	return om;
+}
+
+/*  ACL が L2CAP へ回った点．  */
+extern int __real_ble_l2cap_rx(void *conn, void *hdr, void *om,
+							   void *out_rx_cb, void *out_reject_cid);
+
+int
+__wrap_ble_l2cap_rx(void *conn, void *hdr, void *om,
+					void *out_rx_cb, void *out_reject_cid)
+{
+	g_evt_acl_l2cap++;
+	evt_trace_pack();
+	return __real_ble_l2cap_rx(conn, hdr, om, out_rx_cb, out_reject_cid);
 }
