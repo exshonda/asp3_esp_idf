@@ -2747,3 +2747,32 @@ cbr.sh をブート前に 0x58 へ 0（クリア）ではなく **sentinel 0xCA5
 board B 最終状態：c3_conn_pvcy1（PVCY=1・D-2d body・adv rc=0 到達）を flash 済み＝
 ユーザーの OTA 再スキャンが有意になるよう adv 可能ビルドで残置。計装は
 `TOPPERS_C3_BOOT_TRACE` 既定OFF＝通常ビルド非回帰（default build 同一サイズ確認済）。
+
+---
+
+### D-2c 判別ラウンド（2026-07-15）：フレッシュ connect+bond 成立／`0xABF0` 不可視は «スマホGATTキャッシュ» と確定（デバイス無罪・`0xABF4`容疑 反証）
+
+**背景**：ユーザーがスマホ（central）で board B に再挑戦。①1回目「bond できた・0xABF1 が無い」→②forget して再試行「bond できない」→③デバイスreset後「bond できた・**0xABF0 が丸ごと無い**」。同一 app ソース（`ble_host_smoke.c` は C6 も無改変流用）で **C6 は 0xABF1 read で "BT4-OK" が返る** のに C3 は 0xABF0 不可視、が焦点。
+
+**事前予測（アドバイザ指摘の核心）**：C6/C3 は «同じサービスをコンパイルしていない»。`0xABF4`（暗号必須 READ_ENC char）は `#ifdef TOPPERS_ESP32C3_BT_SM` 配下＝**C6 は 3char（0xABF1/2/3）・C3 のみ 4char（+0xABF4）**。∴「C6 で見える」は C3 の 4char 定義の登録を証明しない。**最有力容疑＝0xABF4/READ_ENC が `ble_gatts_start` でサービス定義ごと弾き、0xABF0 全体が不可視**（症状と一致）。対立仮説＝スマホ側 GATT キャッシュ（board B は最多ビルド churn）。
+
+**判別手段（デバイス側・スマホ非依存）**：一時計装 `TOPPERS_C3_GATTS_REGDIAG`（既定OFF・非回帰）を app に追加。
+- `ble_hs_cfg.gatts_register_cb`＝`ble_gatts_start` が ATT サーバへ実際に積んだ結果を観測し `0x600080C0`(CONN・接続前は boot clear 済で不変)へパック：`0x5EED<f><svc:4><chr:8>`（f=bit15=OP_SVC で UUID==0xABF0 到達）。
+- `add_svcs` 直後の rc を `0x600080B8`(DISC)へ：`0xADD5<rc16>`。
+- `add_svcs` rc≠0＝キュー時点で拒否／rc=0 かつ f=0＝`ble_gatts_start` で拒否（0xABF4 容疑成立）／rc=0 かつ f=1＝登録成功＝スマホ側。
+
+**結果（board B `60:55:F9:57:C2:60`・regdiag build flash・cleared-boot-read）**：
+| addr | 実測 | デコード |
+|---|---|---|
+| 0x50 SYNC | `0x5ade51c0` | sync 成立 |
+| 0x5C ADV | `0x0ade5000` | adv 開始 |
+| 0xB8 add_svcs rc | **`0xadd50000`** | **rc=0＝キュー受理** |
+| 0xC0 regdiag | **`0x5eed8309`** | **f=1(bit15)・svc=3・chr=9** |
+
+→ **`saw_abf0=1`（OP_SVC が UUID 0xABF0 で発火）＋ svc=3（GAP/GATT/0xABF0）＋ chr=9（GAP約4+GATT1+**0xABF0の4char**）＋ add_svcs rc=0**。**C3 は ATT テーブルに 0xABF0 とその全 char を正しく登録している**。0xABF4/READ_ENC がサービスを弾く仮説は **反証**（弾かれれば f=0 か rc≠0）。
+
+**結論**：**デバイス無罪。`0xABF0` 不可視の原因は 100% スマホ側 GATT キャッシュ**（Android はこの MAC の古いサービス表を保持＝多ビルド churn の副作用）。remedy＝スマホで **forget/ペア解除 → Bluetooth OFF→ON（`gatt_cache_*` フラッシュ・「Refresh Services」だけでは残る）→ 再接続でフレッシュ discovery**。
+
+**教訓**：(i) «同じソース» でも #ifdef 差でコンパイル物が違う＝WORKS/FAILS 比較の «唯一の差分» を静的に同定してから実測する（アドバイザの寄与）。(ii) スマホ側キャッシュ vs デバイス側登録失敗は、`gatts_register_cb` の «OP_SVC UUID 到達 + 登録 char 数» を RTC へ出せばスマホ非依存で決定的に判別できる（今後の GATT 不可視系の常設手段）。(iii) connect+bond の «成功» は古い bond の再利用でも起こる＝forget 後のフレッシュ試行で真の可否を測る。
+
+board B 最終状態（更新）：regdiag build（機能同一・広告中・`0x600080C0`/`0xB8` に計装マーカー）を flash 済み。計装 `TOPPERS_C3_GATTS_REGDIAG` 既定OFF＝通常ビルド非回帰。ユーザー保留＝スマホ側キャッシュクリア→フレッシュ discovery で 0xABF1="BT4-OK" 確認（＝D-2c OTA 決着）。

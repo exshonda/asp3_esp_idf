@@ -312,6 +312,43 @@ static const struct ble_gatt_svc_def custom_svcs[] = {
 	{ 0 }	/* 終端 */
 };
 
+#ifdef TOPPERS_C3_GATTS_REGDIAG
+/*
+ *  ★一時計装（0xABF0不可視 判別ラウンド・既定OFF）：ble_gatts_start が
+ *  実際にATTサーバへ積んだ結果を register_cb で観測し，接続前に読める
+ *  0x600080C0(CONN・main_task start でクリア済・接続まで不変) へパックする．
+ *    値：0x5EED<f><svc:4><chr:8>
+ *      f  bit15 = OP_SVC で UUID==0xABF0 が来た（=自前サービス登録成立）
+ *      svc = 登録された service 数（GAP/GATT/0xABF0 で 3 が期待値）
+ *      chr = 登録された chr 総数（全サービス合算．0xABF0 分は SM=ON で 4）
+ *  C6=可視／C3=不可視の差分（C3のみ 0xABF4 READ_ENC を持つ）を，svc定義が
+ *  ble_gatts_start で «丸ごと弾かれた»(f=0)のか «積まれたがスマホ側キャッシュ»
+ *  (f=1)のかで決定的に判別する．esptool の cleared-boot-read で 0xC0 を読む．
+ */
+static void
+gatts_regdiag_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
+{
+	static uint8_t	n_svc = 0U;
+	static uint8_t	n_chr = 0U;
+	static uint8_t	saw_abf0 = 0U;
+
+	(void) arg;
+	if (ctxt->op == BLE_GATT_REGISTER_OP_SVC) {
+		n_svc++;
+		if (ble_uuid_u16(ctxt->svc.svc_def->uuid) == 0xABF0) {
+			saw_abf0 = 1U;
+		}
+	}
+	else if (ctxt->op == BLE_GATT_REGISTER_OP_CHR) {
+		n_chr++;
+	}
+	sil_wrw_mem((void *) 0x600080C0UL,
+				0x5EED0000UL | ((uint32_t) saw_abf0 << 15)
+				| (((uint32_t) n_svc & 0xFUL) << 8)
+				| ((uint32_t) n_chr & 0xFFUL));
+}
+#endif /* TOPPERS_C3_GATTS_REGDIAG */
+
 /*  subscribe中なら1回notifyを送る（1秒周期ループから呼ぶ．S3 bt5_notify_tick）  */
 static void
 notify_tick(void)
@@ -845,6 +882,12 @@ main_task(EXINF exinf)
 		if (rc != 0) {
 			syslog(LOG_ERROR, "ble_host_smoke: gatts svc reg rc=%d", (int_t) rc);
 		}
+#ifdef TOPPERS_C3_GATTS_REGDIAG
+		/*  診断：count_cfg→add_svcs 後の rc（キュー時点の受理可否）を
+		    0x600080B8(DISC・接続前は0) へ．0xADD5<rc16>．rc=0=キュー受理．  */
+		sil_wrw_mem((void *) 0x600080B8UL,
+					0xADD50000UL | ((uint32_t) rc & 0xFFFFUL));
+#endif
 		rc = ble_svc_gap_device_name_set(BLE_DEVICE_NAME);
 		if (rc != 0) {
 			syslog(LOG_ERROR, "ble_host_smoke: gap_device_name_set rc=%d",
@@ -857,6 +900,10 @@ main_task(EXINF exinf)
 	 */
 	ble_hs_cfg.sync_cb = on_sync;
 	ble_hs_cfg.reset_cb = on_reset;
+#ifdef TOPPERS_C3_GATTS_REGDIAG
+	/*  診断：ble_gatts_start の登録結果を register_cb で 0x600080C0 へ観測．  */
+	ble_hs_cfg.gatts_register_cb = gatts_regdiag_cb;
+#endif
 
 	syslog(LOG_NOTICE, "ble_host_smoke: nimble_port_freertos_init");
 	nimble_port_freertos_init(ble_host_task);
