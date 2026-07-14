@@ -1127,3 +1127,104 @@ chipv7_phy`を呼ぶだけの**診断トレースラッパ**（`wifi/wifi_trace.
   （本ラウンドで確認）．**「done」とは主張しない**：regi2c修正は検証済みの
   部分前進，WIFIPWRはカウンタ健全化の必要条件だがD-1寄与は未証明．
 
+## 12. register_chipv7_phy 入力差分（BT vs WiFi）— 入力同一を実測確定，非収束はlibphy内部（2026-07-15）
+
+§11の申し送り「まずBT vs WiFiの`register_chipv7_phy`入力を実機で差分」を
+実行したラウンド．**結論：BTとWiFiが`register_chipv7_phy`に渡す入力
+（init_data／cal_data／モード）は実測で完全一致，かつ呼出し直前の
+マシン状態（サンプルした11レジスタ）も機能的に同一．よって「入力差」は
+反証され，RFシンセ非収束の分岐点は`register_chipv7_phy`内部（＝hal
+`libphy.a`のBT依存サブパス）にある．次段はv6.1 matched setフォールバック
+だが，C5実施09とは性質が異なり“効く保証は無い”（下記）＝申し送り．**
+
+### 手法（HWブレークポイント＝ビルド改変も再フラッシュも不要で採取）
+
+§11のバックトレースが示す通りハングは`register_chipv7_phy`の**内部**
+（`register_chipv7_phy+0x110`がスタック上）＝関数には確実に到達している．
+そこで両ビルド既存物にJTAG HWブレークポイントを`register_chipv7_phy`
+エントリへ置き，命中時にa0-a3／ra（呼出し元）＋MMIOマシン状態を
+`read_memory`で採取した（`mdw`はコンソール専用で採取不可，`read_memory`
+は値を返すのでこちらを使用．flash直読みはstallするためinit_data内容は
+ELFの`objdump -s`で静的に突合せ）．
+- BTビルド＝`build/c6bt_fix`，`register_chipv7_phy`=`0x42032590`．
+- WiFiビルド＝`build/c6_wifiscan_works`，`register_chipv7_phy`=`0x4202a1de`．
+- OpenOCD＝`board/esp32c6-builtin.cfg`＋`adapter serial 14:C1:9F:E0:5A:9C`，
+  別エージェントが既定ポート占有中のため`gdb/tcl/telnet port`を3355/4455/6655へ退避．
+
+### 実測：入力は完全一致（3要素すべてMEASURED）
+
+`register_chipv7_phy(const esp_phy_init_data_t* a0, esp_phy_calibration_data_t* a1, esp_phy_calibration_mode_t a2)`．
+
+| 要素 | BT | WiFi | 判定 |
+|---|---|---|---|
+| a2 モード | `0x2`=PHY_RF_CAL_FULL | `0x2`=PHY_RF_CAL_FULL | **一致** |
+| a1 cal_data 先頭24語 | 全0 | 全0 | **一致**（mac未memcpy＝両者ともNVS無し#else枝：phy_init.c:942） |
+| a0 init_data 128B内容 | `0a005050…51`（末尾チェックサム0x51） | 同一バイト列 | **一致**（objdump -s でバイト単位突合せ） |
+| ra 呼出し元 | `0x420046d2`=`esp_phy_load_cal_and_init`（phy_init.c:958，直接） | `0x420048e0`=`__wrap_register_chipv7_phy`→同じ`esp_phy_load_cal_and_init`が呼ぶ | **同一ソース関数** |
+
+- **決定打＝ra（呼出し元）**：BT側は`--wrap`が無いため生の呼出し元が
+  読め，`esp_phy_load_cal_and_init`（phy_init.c，WiFiと同一のソース関数）．
+  §11のバックトレース「r_ble_lll_adv_start→register_chipv7_phy」は
+  スタック上位のフレームで，直接の呼出し元は`esp_phy_enable`経由の
+  phy_init.cソース＝**blobが独自init_dataで直接呼ぶのではない**．
+  init_dataは両者とも`esp_phy_get_init_data()`（同一`phy_init_data.c`
+  テーブル），cal_dataは同一ゼロ初期化バッファ，モードは同一リテラル
+  `PHY_RF_CAL_FULL`．**入力差の余地は構造上も実測上も無い＝H「入力差」は反証**．
+
+### 実測：エントリのマシン状態も機能的に同一（差はLP_TIMERのみ＝良性）
+
+`register_chipv7_phy`エントリ命中時にサンプルした11 MMIO：
+
+| レジスタ | BT | WiFi | 判定 |
+|---|---|---|---|
+| `0x600af018` LPCON_CLK | `0x0f` | `0x07` | **差**＝bit3 `CLK_LP_TIMER_EN`（BTのみON） |
+| `0x600af010` I2C_MST_CLK(sel_160m) | `0x1` | `0x1` | 一致（§11修正） |
+| `0x600a00cc` synth-lock | `0x25824e50` | `0x25824e50` | 一致（bit8=0，未走行） |
+| `0x600ad000` PWR0カウンタ | `0xdde9` | `0x9b3a` | 両者フリーラン（値＝経過時間，一致相当） |
+| `0x600a9804/9810/981c` SYSCON clk/rst/bb_cfg | `7e600000/0/0` | 同 | 一致 |
+| `0x6009600c/60096028` PMU ICG/REG0 | `1/1` | `1/1` | 一致 |
+| `0x600a0460/600a7030` FE_txrx/AGC_en | `06000000/c3c4bef5` | 同 | 一致 |
+
+- 唯一の差＝**LPCON bit3 `CLK_LP_TIMER_EN`**（`modem_lpcon_reg.h`：bit0
+  WIFIPWR/bit1 COEX/bit2 I2C_MST/**bit3 LP_TIMER**）．BTは`bt.c`の
+  `modem_clock_module_enable(PERIPH_BT_MODULE)`がmodem LPタイマを使うため
+  正当にONにする（WiFi scanは使わずOFF）．LP_TIMERは低消費電力の
+  計時クロックで**RF/PLLクロックではない**＝synth-lock（`0x600a00cc`
+  bit8）非成立の原因とは考えにくい良性差．
+- ※「マシン状態同一」は**サンプルした11レジスタの範囲**での同一．
+  synth-lock非成立は`register_chipv7_phy`**実行中**の動的な発散
+  （エントリでは両者bit8=0，WiFiは実行中にbit8をラッチ・BTはしない）．
+
+### 結論と次段（性質を正しくスコープした申し送り）
+
+- **入力差ハングは反証（MEASURED）**：init_data 128B・cal_data・モードの
+  3要素すべて一致，呼出し元も同一ソース関数，エントリ状態もLP_TIMER以外
+  一致．**同一のhal libphy `register_chipv7_phy`が同一入力・同一状態で
+  WiFiでは収束しBTでは非収束**＝発散点は関数内部で確定．
+- **内部分岐の機構（＝仮説・未実測）**：`register_chipv7_phy`が
+  phy modem-flag（`phy_set_modem_flag`／`phy_get_modem_flag`：
+  `PHY_MODEM_BT` vs `PHY_MODEM_WIFI`）を読んでBT依存サブパスへ分岐する，
+  というのが最有力機構仮説だが，**本ラウンドではflagの読値も分岐も未計装**
+  ＝因果として主張しない（rigor基準準拠．firmするなら両ビルドでbpにて
+  `phy_get_modem_flag`を読むのが安価）．
+- **フォールバック＝v6.1 matched set swap（ただしC5実施09とは性質が異なる）**：
+  C5実施09は**libphy版数がeco silicon不適合でWiFiも非収束**したため
+  libphy全体swapで解決した．C6は**逆にWiFiが同じhal libphyで収束**する
+  （§11 nm事実）＝BT経路固有の問題．したがってv6.1 swapが効くのは
+  **v6.1のBT経路が異なる場合のみ**——差はlibphy本体ではなく`libble_app.a`
+  のenable前セットアップに在る可能性が高く，**C5のように収束が保証される
+  わけではない**．次段はこの前提でv6.1 bt/phy/coex matched setへ
+  `esp_bt.cmake`を切替え（C5 `esp_bt.cmake` 9-16行の参照実装）て
+  実機で可否判定する，が「効く保証なし」を明記して過度な期待を置かない．
+  §11のクロック2修正（regi2c sel_160m＋WIFIPWR）はいずれの次段でも前提
+  として維持．
+
+### board C最終状態・留保
+
+- **board C最終flash**＝`build/c6bt_fix`（§11と同一，本ラウンドで再フラッシュ・
+  同一挙動：regi2cスピン無し・RFシンセ・ロック待ちハング）．採取のため
+  一時的に`c6_wifiscan_works`をフラッシュしたが最終はBT版へ戻した．
+- 留保：全ブートRTSリセット（真cold未検証）継続．D-1未達．本ラウンドは
+  「入力差の反証＝クリーンなチェックポイント」で停止し，v6.1 swap本体は
+  次段（効く保証なしの前提で）へ申し送る．
+
