@@ -50,6 +50,9 @@ void netstall_trace_ping_result(int ok) { (void) ok; }
 
 static ID	main_tskid;
 static volatile int32_t	conn_state;	/* 0=待機 1=接続 -1=切断 */
+#ifdef ESP32C5_FORCE_5GHZ
+static volatile bool_t	scan_done;	/* WIFI_EVENT_SCAN_DONE受信フラグ */
+#endif
 
 /*
  *  実施45診断計装：CPU例外フォルト捕捉ハンドラ
@@ -138,6 +141,11 @@ wifi_event_handler(void *arg, const char *base, int32_t id, void *data)
 	(void) arg; (void) base;
 
 	switch (id) {
+#ifdef ESP32C5_FORCE_5GHZ
+	case WIFI_EVENT_SCAN_DONE:
+		scan_done = true;
+		break;
+#endif
 	case WIFI_EVENT_STA_START:
 		syslog(LOG_NOTICE, "event: STA_START");
 		conn_state = 2;		/* 2=STA_START受信（main_taskがconnect） */
@@ -273,6 +281,90 @@ main_task(EXINF exinf)
 		rtc_probe2[2] = (uint32_t) g_ic;
 	}
 #endif /* ESP32C5_R45_PROBE_GIC */
+
+#ifdef ESP32C5_FORCE_5GHZ
+	/*
+	 *  実施NN診断（5GHz強制接続）：ドライバ既定はch9(2.4GHz)を選ぶため，
+	 *  connect前にscanし WIFI_SSID に一致する 5GHz(ch>=36) BSS を探して
+	 *  bssid/channel をピンする．これで «同一SSIDの5GHz radio» を明示的に
+	 *  ターゲットにする．物証はRTC-RAM(0x500000C0〜．esptool read-memで回収．
+	 *  C5実施04/50のHRT storm氾濫下でもコンソールに依らず読める)へ退避．
+	 *  既定ビルド（ESP32C5_FORCE_5GHZ未定義）は完全no-op＝非回帰．
+	 *  スキャン出力自体は氾濫で化けるので，AP一覧は使わずRTCマーカで判別する。
+	 */
+	{
+		volatile uint32_t	*fg = (volatile uint32_t *)0x500000C0U;
+		wifi_ap_record_t	*srecs;
+		uint16_t		snum = 0;
+		int			best = -1;
+		int			match_any = 0, match_5g = 0;
+		int			i, sec;
+
+		fg[0] = 0x5F5C0001U;	/* 5GHz scan到達マーカ */
+		scan_done = false;
+		(void) esp_wifi_scan_start(NULL, false);	/* 非同期・全ch(両band) */
+		for (sec = 0; sec < 15 && !scan_done; sec++) {
+			(void) tslp_tsk(1000000);
+		}
+		(void) esp_wifi_scan_get_ap_num(&snum);
+		fg[1] = (uint32_t) snum;
+		if (snum > 40) {
+			snum = 40;
+		}
+		srecs = (wifi_ap_record_t *)
+					esp_shim_calloc(snum, sizeof(wifi_ap_record_t));
+		if (srecs != NULL && snum > 0 &&
+			esp_wifi_scan_get_ap_records(&snum, srecs) == 0) {
+			for (i = 0; i < (int) snum; i++) {
+				if (strncmp((const char *) srecs[i].ssid, WIFI_SSID,
+							sizeof(srecs[i].ssid)) != 0) {
+					continue;
+				}
+				match_any++;
+				if (srecs[i].primary < 36) {
+					continue;	/* 2.4GHz radio はスキップ */
+				}
+				match_5g++;
+				if (best < 0 || srecs[i].rssi > srecs[best].rssi) {
+					best = i;	/* 最強RSSIの5GHz BSSを選ぶ */
+				}
+			}
+		}
+		fg[2] = (uint32_t) match_any;
+		fg[3] = (uint32_t) match_5g;
+		if (best >= 0) {
+			memcpy(wc.sta.bssid, srecs[best].bssid, 6);
+			wc.sta.bssid_set = true;
+			wc.sta.channel = srecs[best].primary;
+			wc.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+			(void) esp_wifi_set_config(WIFI_IF_STA, &wc);
+			fg[4] = (uint32_t) srecs[best].primary;
+			fg[5] = ((uint32_t) srecs[best].bssid[0]) |
+					((uint32_t) srecs[best].bssid[1] << 8) |
+					((uint32_t) srecs[best].bssid[2] << 16) |
+					((uint32_t) srecs[best].bssid[3] << 24);
+			fg[6] = ((uint32_t) srecs[best].bssid[4]) |
+					((uint32_t) srecs[best].bssid[5] << 8);
+			fg[7] = (uint32_t)(int32_t) srecs[best].rssi;
+			fg[8] = 0x5F5C0002U;	/* 5GHz BSS選択・ピン成功 */
+			syslog(LOG_NOTICE,
+				   "FORCE5G pinned ch=%d rssi=%d bssid=%02x:%02x:%02x:%02x:%02x:%02x",
+				   (int_t) srecs[best].primary, (int_t) srecs[best].rssi,
+				   srecs[best].bssid[0], srecs[best].bssid[1],
+				   srecs[best].bssid[2], srecs[best].bssid[3],
+				   srecs[best].bssid[4], srecs[best].bssid[5]);
+		}
+		else {
+			fg[8] = 0x5F5CFA11U;	/* 5GHz BSS見つからず（=SSIDは5GHz非展開） */
+			syslog(LOG_NOTICE,
+				   "FORCE5G no 5GHz BSS: total=%d match_any=%d match_5g=%d",
+				   (int_t) fg[1], match_any, match_5g);
+		}
+		if (srecs != NULL) {
+			esp_shim_free(srecs);
+		}
+	}
+#endif /* ESP32C5_FORCE_5GHZ */
 
 	/*
 	 *  STA_START後にmain_task文脈からconnectする（イベントハンドラ＝

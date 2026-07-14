@@ -10430,3 +10430,87 @@ lwIP まで生存，`last_tx_ret==0`⇒blob TX がフレーム受理，それで
 - esp_shim／net／target ファイルは**無変更**（同型バグ仮説の反証により
   移植不要と確定）。C3 BLE 関連・submodule は不接触。
 - コミットはしない（ユーザー確認用の作業ツリー変更）。
+
+## 実施51：★v8 で **5GHz 帯 connect→DHCP を実機実証**（channel=40／IP 192.168.1.21／ping OK）——ドライバ既定の ch9(2.4GHz) を回避するため connect 前 scan で 5GHz(ch>=36) BSS を探して bssid/channel をピンする診断計装（`ESP32C5_FORCE_5GHZ`）を追加。実施50 の 2.4GHz(ch9) 成功と明確に区別
+
+### 背景・狙い
+
+実施50 で v8 の connect→DHCP は実証済みだが，**接続先は ch9=2.4GHz** で
+5GHz は未検証だった（v8 削除 gate の残り＝実施48/49 が挙げた「v8 5GHz」）。
+実施45 の 5GHz(ch48) 実証は **v9 のみ**。本実施は **v8 既定ビルドで 5GHz 帯
+の AP に接続し DHCP で IP 取得**を実機実証する。
+
+### 手法：connect 前 scan → 5GHz BSS を bssid/channel でピン（force 5GHz）
+
+`apps/wifi_dhcp/wifi_dhcp.c` に `#ifdef ESP32C5_FORCE_5GHZ` ガードの診断
+ブロックを追加（既定ビルドは完全 no-op＝非回帰）：`esp_wifi_start` 後・
+connect 前に **scan（全ch・両band）**→ 結果を走査し SSID 一致かつ
+`primary >= 36`（5GHz）の BSS を最強 RSSI で 1 つ選び，`wc.sta.bssid`＋
+`bssid_set=true`＋`wc.sta.channel` をピンして `esp_wifi_set_config` 再適用→
+その後の connect が **同一 SSID の 5GHz radio** を明示ターゲットにする。
+物証は RTC-RAM `0x500000C0〜`（FORCE5G マーカ）へ退避＝実施04/50 の HRT
+storm 氾濫下でもコンソールに依らず esptool read-mem で回収できる（scan
+出力自体は氾濫で化けるので AP 一覧は信用せず，接続後 1 行の
+`AP info: channel=N` と RTC マーカで判別）。
+
+### 実機結果（DUT＝C5#1 `d0:cf:13:f0:a7:44`＝MAC照合，UART `b04e3b…`／書込 native USB ttyACM4，認証情報はビルド注入・非記載）
+
+ビルド `build/c5_v8_5ghz`（既定 v8＝`ESP32C5_WIFI=ON`・IDF 非依存，
+`ESP32C5_FORCE_5GHZ`＋`TOPPERS_ESP32C5_NETSTALL_TRACE`，RAM 81.05%・リンク
+0 エラー）を `--no-stub write-flash 0x0` でフル4MB書込。UART は pyserial
+`dtr=False,rts=False`（`cat` は 0 バイト＝実施49 の教訓）で観測。
+
+- **接続後 1 行ログ**：`wifi_dhcp: AP info: channel=40 rssi=-63`＝**ch40＝5GHz**
+  （5GHz は 36,40,44,48…）。実施50 の ch9(2.4GHz) と明確に区別。
+- **DHCP**：`net: DHCP bound ip=192.168.1.21 gw=192.168.1.1`→
+  `wifi_dhcp: IP acquired: 192.168.1.21`→`net: ping gateway -> OK`（×2）。
+  TX 計装 `DHCPTX calls=2→7 errs=0 ret=0`＝lwIP→blob TX 健全，OFFER 受信→
+  bound＝RX 健全。
+- **FORCE5G RTC マーカ**（`esptool read-mem`，DUT を download mode で回収）：
+
+  | RTC | 値 | 意味 |
+  |---|---|---|
+  | `0x500000C0` fg0 | `0x5f5c0001` | scan ブロック到達 |
+  | `0x500000C4` fg1 | `0x37`=55 | scan 総 AP 数 |
+  | `0x500000C8` fg2 | `5` | SSID 一致 BSS 数（両band） |
+  | `0x500000CC` fg3 | `2` | うち **5GHz(ch>=36)＝2 BSS**＝当該 SSID は 5GHz 展開あり |
+  | `0x500000D0` fg4 | `0x28`=**40** | 選択 channel＝5GHz |
+  | `0x500000D4/D8` fg5/6 | `0xffc93608`/`0x630e` | 選択 BSSID＝`08:36:c9:ff:0e:63` |
+  | `0x500000DC` fg7 | `0xffffffc1`=**-63** | 選択 RSSI |
+  | `0x500000E0` fg8 | `0x5f5c0002` | **5GHz BSS 選択・ピン成功** |
+  | `0x50000094` | `0x1501a8c0` | DHCP IP＝192.168.1.21（LE） |
+
+  選択 BSSID `08:36:c9:ff:0e:63` は接続後の `<ba-add> TALO:0xffc93608
+  TAHI:0x100630e`（実際に BA を張った peer の TA）と一致＝ピンした 5GHz
+  radio にそのまま association したことの裏取り。
+
+### 反証・偽陰性対策（実施04/50 の氾濫教訓に忠実）
+
+- **ch40 はピンの結果**：実施50 で同一アプリ・同一環境のドライバ既定は
+  **ch9(2.4GHz)** を選んだ。今回 `bssid_set+channel` をピンして初めて ch40。
+  RTC fg8=0x5f5c0002（pin 成功）＋fg4=40 が「forced 5GHz」を裏付ける。
+- **scan 出力は信用しない**：判別は接続後 1 行の `AP info: channel=40` と
+  RTC マーカのみ。氾濫コンソールで FORCE5G ログ行は化けて消えたが，RTC
+  マーカで確実に回収した（コンソール依存を排した実施50 の読み方を踏襲）。
+- **board latch 無し**：POWERON ブート→scan→connect→DHCP→ping まで一気通貫，
+  WDT ループ／`0x40038598` 兆候なし。read-mem は `--after no-reset` で
+  download mode に留め置き＝reset 連打を避けた（`c5-latched-board-state`）。
+
+### 結論（ゴール3問）
+
+1. **5GHz で connect+DHCP できたか**：**Yes**。channel=**40**（5GHz）・
+   IP=**192.168.1.21**・ping gateway OK。当該 SSID は 5GHz に 2 BSS 展開。
+2. **v8 削除 gate の残り**：実施48（scan）・50（2.4GHz connect+DHCP）・本実施
+   （**5GHz connect+DHCP**）で v8 の主要経路は網羅。残るは「持続負荷／
+   TCP・UDP エコーの長時間安定」のみ（実施45 の v9 と同水準の追試）。
+3. **真因（不要）**：5GHz は最初から動作。ドライバ既定が 2.4GHz を優先する
+   だけで，明示ピンで 5GHz 到達＝コード欠陥ではない。
+
+### 変更ファイル（実施51）
+
+- `apps/wifi_dhcp/wifi_dhcp.c`：`ESP32C5_FORCE_5GHZ` ガードの scan→5GHz BSS
+  ピン診断ブロック＋`WIFI_EVENT_SCAN_DONE` 処理＋`scan_done` フラグ。
+  すべて `#ifdef ESP32C5_FORCE_5GHZ` 内＝既定ビルドは完全 no-op（default
+  ビルドで compile 確認済み・RAM 81.05% で ±16B のみ＝非回帰）。
+- esp_shim／net／target／submodule／C3 BLE 関連は**無変更・不接触**。
+- コミットはしない（ユーザー確認用の作業ツリー変更）。認証情報は非記載。
