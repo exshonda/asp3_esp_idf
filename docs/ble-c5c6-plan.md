@@ -1005,3 +1005,109 @@ D-2cビルド（`build/c6ble_d2c_verify/asp_flash.bin`＝`044305a`）をflash済
    `0x5DE0…`／STORE7 PAIRING_COMPLETE `0x5DC0…`を確認．
    （hci0は他エージェント使用中につき使わない運用．）
 
+## 11. PHY-initハング根因調査（2026-07-15）— regi2c/WIFIPWRクロック2件を根治，ただしD-1は未達（RF較正 register_chipv7_phy が収束せず）
+
+§10のPHY-initハングを実機board C（`14:C1:9F:E0:5A:9C`，全ブートRTS
+リセット）で根因調査したラウンド．**結論：クロック側の欠落を2件特定・
+根治し，第1ハング（regi2c読出しスピン）は消滅したが，PHY初期化は次段の
+RF較正（`register_chipv7_phy`）で新たにハングし，D-1（HCI_Reset往復）は
+未達．この第2ハングはPHYブロブ内部のRFシンセ・ロック不成立で，明確な
+レジスタゲートが無く，本ラウンドのスコープ（クロック/regi2c前提の欠落）
+を超える＝申し送り．**
+
+### 手法（WORKS/FAILS差分→単一ビット注入→読み戻し→ソース恒久修正→2ブート再現）
+
+`bt_smoke_c6`（コントローラのみ・D-2c/D-2dコード非含有）を対象に，
+無改造ベースライン→修正→wifi_scan(WORKS)比較の順で反証しながら進めた．
+OpenOCD＝`board/esp32c6-builtin.cfg`＋`adapter serial 14:C1:9F:E0:5A:9C`，
+`riscv set_command_timeout_sec 12`をinit前に置いてabstractcs busyを回避．
+
+### 第1ハング＝regi2cマスタのクロック源未選択（sel_160m）——根治済み（PROVEN）
+
+- **FAILS実測（無改造bt_smoke_c6，ハング中）**：PC=`ram_chip_i2c_readReg_org`
+  （`0x42035d6x`），ra=`0x40003dfe`＝§10と同一のregi2c doneビット待ち無限スピン．
+  MODEM_LPCON `0x600af018`=`0x0e`（`CLK_I2C_MST_EN` bit2は**既に1**——bt.cの
+  `modem_clock_module_enable(PERIPH_BT_MODULE)`が立てる）だが，
+  `0x600af010`（`I2C_MST_CLK_CONF`）=`0x00`＝`CLK_I2C_MST_SEL_160M` bit0が**0**
+  ＝**解析I2Cマスタのクロック源（160M）が未選択**．PMU ICG `0x600b000c`=
+  `0x80000000`（code=2，実施91のICGは効いている）．
+- **ソース差分の特定**：WiFiパス（`wifi/esp_wifi_adapter.c`
+  `wifi_clock_enable_wrapper`）は`esp_phy_enable`前に
+  `_regi2c_ctrl_ll_master_enable_clock(true)`＋`regi2c_ctrl_ll_master_configure_clock()`
+  （＝sel_160m=1）の**両方**を呼ぶが，BTパス`esp_shim_bt_clock_init()`は
+  `esp_shim_modem_icg_init()`（ICG）だけで，sel_160mを一度も設定していなかった．
+  `bt_shim.c`冒頭コメントの「BTに追加で要るのはICGアンロックだけ」は誤前提．
+- **恒久修正（`asp3/target/esp32c6_espidf/bt/bt_shim.c`）**：
+  `esp_shim_bt_clock_init()`にWiFiと同じ2行を追加．
+  `#include "hal/regi2c_ctrl_ll.h"`はBT単体ビルド（`ESP32C6_BT=ON`,`WIFI=OFF`）
+  でも解決しコンパイル成功を確認．
+- **2ブート再現でPROVEN**：修正版でPC=`ram_chip_i2c_readReg_org`スピンが
+  **消滅**し，`0x600af010`=`0x1`（sel_160m）が起動時から立つ．制御フローが
+  次段へ前進した（＝この修正はregi2cスピンの直接因果を解消した）．
+
+### 第2ハング＝RFシンセのロック不成立（register_chipv7_phy 非収束）——未解決・申し送り
+
+第1修正後，PC=`ram_set_chan_freq_sw_start+0x1e`（`0x42033104`）へ移動して
+新たにハング：
+```
+420330fc: lui   a4,0x600a0
+42033100: lw    a5,204(a4)   ; 0x600a00cc（PHY/FE領域＝0x600a0000ブロック）
+42033104: andi  a5,a5,256    ; bit8（synth-lock/freq-done）
+42033108: beqz  a5,42033100  ; bit8が永久に立たず無限スピン
+```
+- **バックトレース（sp=`0x4084e370`からの復帰アドレスをaddr2line）**：
+  `r_ble_lll_adv_start+0x868` → `register_chipv7_phy+0x110` → `bb_init+0x5c`
+  → `tx_cap_init_loop` → `ram_set_chan_freq_sw_start`（現PC）．
+  ＝**RF較正 `register_chipv7_phy`（＝esp_phy_enable(PHY_MODEM_BT)相当の
+  full RF cal）は実際に走っている**．「esp_phy_enable呼出しの欠落」（H2の
+  素朴形）は**反証**．ハングはPHYブロブのRFブリングアップ内部で，
+  ベースバンド初期化→TXキャップ較正→チャネル周波数設定のシンセ・ロック
+  待ちが成立しないこと．
+- **WIFIPWRクロックの因果確認（副次発見・counter起因の切り分け）**：
+  MODEM_PWRフリーランカウンタ`0x600ad000`はFAILSで0凍結・WORKS（wifi_scan
+  のRX稼働時）でincrement継続．差分は`0x600af018` bit0（`CLK_WIFIPWR_EN`）＝
+  WORKS=1／FAILS=0．**ハング中に`0x600af018 |= bit0`を単一注入すると
+  `0x600ad000`が即座に凍結解除しフリーラン化（0→0x3e85→0x798e→…）**
+  ＝WIFIPWRがこのカウンタのクロックゲートであることをPROVEN．
+  →`esp_shim_bt_clock_init()`にWIFIPWR有効化（`0x600af018 |= 0x1`のRMW）を
+  追加．修正版でカウンタは起動時からフリーラン（`0x600af018`=`0x0f`確認）．
+  **しかしPCは`0x42033104`のまま前進せず**＝シンセ・ロックはこのmodem
+  クロックドメインではゲートされていない（`0x600a00cc`=`0x25824e50`は
+  クロックON/OFF・WORKS/FAILSに関わらず不変）．よってWIFIPWR修正は
+  **カウンタ健全化に必要でWORKS一致・無害だが，D-1クリティカルパス上の
+  寄与は未証明**（正直な位置づけ）．
+
+### 根因の位置づけと次段の最有力仮説（コーディネータ情報を反映）
+
+第2ハングの症状（`register_chipv7_phy`が走るがRFシンセ・ロックが収束
+しない）は，**C5でhal版libphy（v8/os_adapter 0x08）がeco2でPHY較正収束
+せずハングした事象（docs/ble-c5c6.md／C5実施09）と同型**．C5は
+`esp_bt.cmake`でBLEをESP-IDF v6.1 matched set（v9/0x09 libphy）へ切替えて
+収束させた（BTの`esp_phy_enable(PHY_MODEM_BT)`もWiFiと同一libphy経路の
+ため）．**C6 BLEは現状hal submodule（esp-hal-3rdparty）のbt.c/libble_app.a/
+libphyを使用**している．
+- C6 `wifi_scan`はhal版libphyで`register_chipv7_phy`を通過（RF稼働）する
+  ため，**hal libphy自体はC6シリコンで収束する**＝「libphy世代不整合」を
+  単純な主因とは断定できない．
+- しかしBTの`esp_phy_enable(PHY_MODEM_BT)`はWiFiと**微妙に異なるcalデータ
+  ／コードパス**（`phy_init_data`もバックトレース上に存在）を通る可能性が
+  あり，C5の前例が示す通りBT-enable経路固有にlibphy世代依存が出うる．
+- **次段の最有力候補＝C6 BLEもC5同様にIDF v6.1 matched set（bt/phy/coex）へ
+  切替**（`asp3/target/esp32c6_espidf/esp_bt.cmake`をC5の`esp_bt.cmake` 9-16行
+  の参照実装に倣って改修）．本ラウンドのクロック2修正（regi2c sel_160m＋
+  WIFIPWR）は，modemクロック状態をWORKS一致へ揃える前提として**維持**する
+  （v6.1切替後もこの前提は必要）．
+
+### 回帰・board C最終状態・留保
+
+- **wifi_scanビルド回帰**：`ESP32C6_WIFI=ON`で無傷ビルド（543856B FLASH
+  12.97%／377496B RAM 89.48%）．本ラウンドの変更は`bt_shim.c`のみで
+  `ESP32C6_WIFI`ビルドは同ファイルをコンパイルしないため影響なし．
+- **board C最終flash**：`build/c6bt_fix`（regi2c＋WIFIPWR修正版bt_smoke_c6）．
+  regi2cスピンは消え，RFシンセ・ロック待ち（`ram_set_chan_freq_sw_start`）で
+  ハング＝advertisingしない．2ブートで同一挙動再現．
+- **留保**：全ブートRTSリセット（真cold未検証）は§10のまま．D-1未達．
+  第2ハングはPHYブロブ内部でありクロック/regi2c前提の追加では解けない
+  （本ラウンドで確認）．**「done」とは主張しない**：regi2c修正は検証済みの
+  部分前進，WIFIPWRはカウンタ健全化の必要条件だがD-1寄与は未証明．
+

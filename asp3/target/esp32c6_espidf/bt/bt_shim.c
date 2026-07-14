@@ -56,6 +56,8 @@
 #include "esp_shim.h"
 #include "bt/bt_cfg.h"
 
+#include "hal/regi2c_ctrl_ll.h"	/* BLE実施(C6 PHY-init regi2cハング根治) */
+
 #define BT_LOCK()	uint32_t bt_lock_ = esp_shim_int_disable()
 #define BT_UNLOCK()	esp_shim_int_restore(bt_lock_)
 
@@ -79,6 +81,46 @@ void
 esp_shim_bt_clock_init(void)
 {
 	esp_shim_modem_icg_init();
+
+	/*
+	 *  ★BLE実施（C6 PHY-init regi2cハング根治，docs/ble-c5c6-plan.md §11）：
+	 *  解析I2C（regi2c）マスタのクロック源選択（160M）を明示的に行う．
+	 *  WiFiパス（wifi/esp_wifi_adapter.c wifi_clock_enable_wrapper）は
+	 *  esp_phy_enable前に _regi2c_ctrl_ll_master_enable_clock(true) と
+	 *  regi2c_ctrl_ll_master_configure_clock()（＝MODEM_LPCON
+	 *  i2c_mst_clk_conf.clk_i2c_mst_sel_160m=1）の両方を呼ぶが，BTパスは
+	 *  bt.cのmodem_clock_module_enable(PERIPH_BT_MODULE)がi2c_mst_enビット
+	 *  （MODEM_LPCON_CLK_CONF bit2）を立てるものの，clk源選択（sel_160m）を
+	 *  一度も行わなかった．board C実機JTAG実測：ハング中に
+	 *  MODEM_LPCON_CLK_CONF(0x600af018)=0x0e（i2c_mst_en=1）だが
+	 *  i2c_mst_clk_conf(0x600af010)=0x00（sel_160m=0）＝clk源未選択で
+	 *  regi2cのdoneビットが永久に立たず chip_i2c_readReg が無限スピン
+	 *  （PC=ram_chip_i2c_readReg_org，MODEM_PWR0(0x600ad000)フリーラン
+	 *  カウンタも0凍結）．ICG（esp_shim_modem_icg_init，code=2＋bitmap＋
+	 *  update-latch）は実施91で実装済みだが本経路では必要条件にとどまる．
+	 *  以下2行がWiFi成立／BTハングの残る唯一のソース差分．
+	 */
+	_regi2c_ctrl_ll_master_enable_clock(true);
+	regi2c_ctrl_ll_master_configure_clock();
+
+	/*
+	 *  ★BLE実施（C6 PHY-init 第2ハング根治，docs/ble-c5c6-plan.md §11）：
+	 *  MODEM_LPCON_CLK_CONF(0x600af018) の CLK_WIFIPWR_EN(bit0) を有効化する．
+	 *  上のregi2c修正でchip_i2c_readRegスピンは抜けるが，PHY初期化は次段の
+	 *  ram_set_chan_freq_sw_start（RFシンセ周波数設定）で 0x600a00cc bit8
+	 *  （synth-lock）待ちに再びハングする．board C実機JTAGのWORKS/FAILS差分：
+	 *    - WORKS（wifi_scanのRX稼働時）：0x600af018=0x07（bit0 WIFIPWR=1），
+	 *      MODEM_PWR0フリーランカウンタ(0x600ad000)が increment 継続．
+	 *    - FAILS（BT）：0x600af018=0x0e（bit0=0），0x600ad000が0で凍結．
+	 *  ハング中の単一ビット注入で因果確認：0x600af018 |= bit0 を書くと
+	 *  0x600ad000が即座に凍結解除しフリーラン化（0→0x3e85→0x798e→…）．
+	 *  clk_wifipwr_enはWiFi専用名だがC6の統合modemでは共有のmodem電源/PLL
+	 *  クロックをゲートしており，BLEのRFシンセもこのカウンタに依存する．
+	 *  bt.cのmodem_clock_module_enable(PERIPH_BT_MODULE)はこのビットを
+	 *  立てないため（FAILS実測=0x0e），target側で明示的に補う．
+	 *  ※read-modify-writeでbt.cが後段で立てる他ビットを温存する．
+	 */
+	*(volatile uint32_t *)0x600af018U |= 0x1U;	/* MODEM_LPCON_CLK_WIFIPWR_EN */
 }
 
 /*
