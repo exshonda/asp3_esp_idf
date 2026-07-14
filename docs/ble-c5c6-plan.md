@@ -1451,3 +1451,31 @@ STORE7 (0x600B101C)  0xa1020704   0xa1020704  = intr_alloc trace（nalloc=2 src7
   （`ESP32C6_BT_IDF61_SM=ON`＝SMP/bonding・tinycrypt）へ．app 側は実施02〜のD-2c/D-2d
   資産（STORE8/9 CONNECT/DISCONNECT・ENC/PAIR マーカ）が既存＝トグル ON で有効化．
 
+
+## 15. IDF v6.1 版に SMP を載せて **C6 D-2c/D-2d ビルド＋device-side D-2a/D-2b 非回帰達成**（2026-07-15）— SM=ON でも sync→adv rc=0，storm 非再発
+
+§14 の申し送り「v6.1 側で D-2c/D-2d（`ESP32C6_BT_IDF61_SM=ON`）へ」を実施．**C3 が同日 D-2c/D-2d を実機フル達成**（connect+bond+0xABF1="BT4-OK"+0xABF2 notify+0xABF3 write+**0xABF4 暗号 read**＝bond LTK 実効・`docs/bt-shim.md` 末尾）した直後で，同一設計の自前サービス（0xABF0〜4）を C6 v6.1 NimBLE に SM=ON で載せる段階．
+
+### 15.1 ビルド（トグル ON のみ・ソース改変ゼロ）
+`esp_bt_idf61.cmake` の `ESP32C6_BT_IDF61_SM` トグル（§14 で既設・既定 OFF）を ON にするだけ．app（`apps/ble_host_smoke_c6/ble_host_smoke_c6.c`）は既に D-2c/D-2d 完備（0xABF0 PRIMARY／0xABF1 READ／0xABF2 READ|NOTIFY／0xABF3 WRITE／**0xABF4 READ|READ_ENC**・`ble_store_config_init`・`sm_bonding=1`・`ble_gatts_count_cfg`→`add_svcs`）で SM ガードは `TOPPERS_ESP32C6_BT_SM`（トグルが定義）．**C3 のような追加壁ゼロ**——C5 の壁（`esp_nimble_mem.c`）は §14 転写時に織込み済，SM 分（`ble_store_config.c`＋tinycrypt `aes_encrypt/cmac_mode/ecc/ecc_dh/utils`＋config include）は cmake の `if(ESP32C6_BT_IDF61_SM)` が追加．
+
+ビルド＝`-DESP32C6_BT_IDF61_SM=ON`（他は §14 と同一）→ **一発リンク成功**（FLASH 9.73%・RAM 72.35%＝収まる）．
+**tripwire（SM/暗号が実リンク＝near-empty でない）**：`ble_sm_pair_initiate`・`ble_sm_alg_encrypt`（`ble_sm_` シンボル 87 個）・`ble_store_config_init`・`tc_aes_encrypt`（tinycrypt）・`uECC_make_key/secp256r1/shared_secret`（SC 用 EC 暗号）・`ble_gatts_add_svcs`・`custom_svcs`/`custom_chrs`（0xABF0〜4）全リンク確認．
+
+### 15.2 device-side 実機判定（board C `14:C1:9F:E0:5A:9C`・RTS リセット・LP_AON STORE 直読み）
+SM=ON 版を board C へ flash→boot．**★C6 は `watchdog_reset` 非対応＝esptool が RTS ハードリセットへ自動フォールバック**（これが「RTS」の正体・記録）．
+
+| STORE | 実測 | 判定 |
+|---|---|---|
+| 0x600B1000 sync | `0x5ade51c0` | **D-2a sync 成立** |
+| 0x600B1008 adv試行 | `0x0ade5000` | adv_start 到達 |
+| 0x600B100C adv-return | `0xad000000` | **D-2b adv rc=0 成立** |
+| 0x600B101C intr trace | `0xa1020704` | nalloc=2・**storm 非再発** |
+| 0x600B1018 reset_cb | `0x00000000` | ble_hs リセット無し |
+
+→ **SM/tinycrypt/uECC フルスタックをリンクしても D-2a/D-2b は非回帰**（sync+adv rc=0+storm 無）．adv-start の `register_chipv7_phy` シンセ経路（§10-12 で hal がハングした箇所）も v6.1 で通過．**∴C6 D-2c/D-2d ビルドは正しくブート＆広告する device-side 確定**．
+
+### 15.3 残り（OTA＝ユーザー保留）と board C 最終状態
+- **D-2c（GATT ディスカバリ）/D-2d（bond・暗号 read）の実効確認は OTA**＝スマホ central を `ASP3-C6-BLE`（board C）へ．C3 の同一手順：connect→bond→0xABF1="BT4-OK"／0xABF2 notify／0xABF3 write／**0xABF4 暗号 read で "BT4-OK"（=bond LTK 実効）**．★スマホ側 GATT キャッシュ罠（C3 で実証＝`docs/bt-shim.md`）に注意：過去に `ASP3-C6-BLE` を別ビルドで接続していれば forget→BT OFF/ON→再接続でフレッシュ discovery．
+- 物理電源断による真 cold 起動＝全ブート RTS のまま留保（§14 同様）．
+- **board C 最終 flash＝`build/c6bt_idf61_sm`**（D-2c/D-2d ビルド・広告中・SM=ON）．D-2b（SM off）へ戻すなら `build/c6bt_idf61_nimble`，D-1 は `build/c6bt_idf61`，hal 版はトグル OFF 再ビルド（全て可逆）．
