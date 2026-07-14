@@ -375,6 +375,15 @@ if(ESP32C5_BT_NIMBLE)
     #  の壁は非該当の公算（docs/bt-shim.md「別PC引き継ぎ要点」）．
     option(ESP32C5_BT_SM "Enable NimBLE SMP pairing/bonding on C5 (Phase D-2d, tinycrypt)" ON)
 
+    #  （D-2d bond診断）SVC_PERROR：esp_shim の «想定外» サービスコールエラー
+    #  （非E_OK かつ 非E_CTX/E_TMOUT/E_QOVR）を g_svc_err_* グローバルへ記録＝
+    #  app が RTC STORE へミラーして esptool で回収（C5はコンソール不安定のため
+    #  RTC経由）．暗号後の鍵配布で失敗する API を特定する．既定OFF＝非回帰．
+    option(ESP32C5_BT_APIERR_TRACE "Record unexpected esp_shim svc-call errors to globals (D-2d bond diag)" OFF)
+    if(ESP32C5_BT_APIERR_TRACE)
+        list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_BT_APIERR_TRACE)
+    endif()
+
     #  ---- コンパイル定義 ----
     #  CONFIG_BT_NIMBLE_*一式はbt/stub/include/bt_nimble_config.h（C5専用版．
     #  LEGACY_VHCI=0）で供給する．SM OFF時のみ SM_LEGACY/SC=0 でble_sm*.cを

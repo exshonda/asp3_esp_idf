@@ -565,6 +565,20 @@ main_task(EXINF exinf)
 	 */
 	for (;;) {
 		bt5_security_tick();
+#ifdef TOPPERS_ESP32C5_BT_APIERR_TRACE
+		/*  ★SVC_PERROR：esp_shim の想定外 API エラーを STORE3(0x600B100C)へ
+		    ミラー＝esptool で回収（0=エラー無し／非0＝<count:8><line:8><ercd:16>）．  */
+		{
+			extern volatile int32_t		g_svc_err_last;
+			extern volatile uint32_t	g_svc_err_count;
+			extern volatile int32_t		g_svc_err_line;
+
+			sil_wrw_mem((void *) LP_AON_STORE3,
+						((g_svc_err_count & 0xffUL) << 24)
+						| (((uint32_t) g_svc_err_line & 0xffUL) << 16)
+						| ((uint32_t) g_svc_err_last & 0xffffUL));
+		}
+#endif
 		(void) tslp_tsk(1000000);	/* 1s */
 	}
 #endif

@@ -58,12 +58,21 @@
  *  記録する．ESP32C3_BT_APIERR_TRACE=ON のときのみ有効（既定OFF＝非回帰）．
  */
 #ifdef TOPPERS_ESP32C5_BT_APIERR_TRACE
-/*  ★ercd を «そのまま返す»＝ er = SVC_PERROR(sig_sem(...)) で er にエラー
-    コードが入り，かつ想定外エラーだけログする（挙動は不変・ログ追加のみ）．  */
+/*  ★C5 SVC_PERROR：想定外エラー（非E_OK かつ 非E_CTX/E_TMOUT/E_QOVR）を
+    «グローバルにも記録»＝コンソール不安定な C5 で app が RTC STORE へミラー
+    して esptool で回収できるようにする（g_svc_err_last=直近ercd／
+    g_svc_err_count=累計／g_svc_err_line=直近行）．ercd はそのまま返す（挙動不変）．  */
+volatile int32_t	g_svc_err_last;		/* 直近の想定外エラーコード（負） */
+volatile uint32_t	g_svc_err_count;	/* 想定外エラー累計 */
+volatile int32_t	g_svc_err_line;		/* 直近エラーの行番号 */
+
 ER
 esp_shim_svc_perror(const char *file, int_t line, const char *expr, ER ercd)
 {
 	if (ercd < 0 && ercd != E_CTX && ercd != E_TMOUT && ercd != E_QOVR) {
+		g_svc_err_last = (int32_t) ercd;
+		g_svc_err_line = (int32_t) line;
+		g_svc_err_count++;
 		t_perror(LOG_ERROR, file, line, expr, ercd);
 	}
 	return(ercd);
