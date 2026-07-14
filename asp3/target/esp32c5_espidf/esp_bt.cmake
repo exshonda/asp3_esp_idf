@@ -384,6 +384,24 @@ if(ESP32C5_BT_NIMBLE)
         list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_BT_APIERR_TRACE)
     endif()
 
+    #  （D-2d bond診断）RXTRACE：暗号確立«後» の SMP 鍵配布フェーズで «どちら向きの
+    #  ACL が止まるか» を局在化する --wrap 計装。ble_hs_hci_evt_process(暗号検出ゲート)・
+    #  ble_mqueue_put(RX)・ble_sm_tx(我々のSMP送出試行)・ble_transport_to_ll_acl_impl
+    #  (host→controller ACL)を横取りし LP_AON STORE3 へ記録（bt/rx_trace.c）。
+    #  STORE3 を使うため APIERR_TRACE とは排他（同時ONで二重書込み）。既定OFF＝非回帰。
+    option(ESP32C5_BT_RXTRACE "Trace post-encryption RX/TX ACL pipeline via --wrap (D-2d bond diag)" OFF)
+    if(ESP32C5_BT_RXTRACE)
+        list(APPEND ASP3_SYSSVC_TARGET_C_FILES ${BT_TARGETDIR}/rx_trace.c)
+        list(APPEND ASP3_LINK_OPTIONS
+            -Wl,--wrap=ble_hs_hci_evt_process
+            -Wl,--wrap=ble_mqueue_put
+            -Wl,--wrap=ble_sm_tx
+            -Wl,--wrap=ble_transport_to_ll_acl_impl
+            -Wl,--wrap=ble_sm_enc_change_rx
+        )
+        list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_BT_RXTRACE)
+    endif()
+
     #  ---- コンパイル定義 ----
     #  CONFIG_BT_NIMBLE_*一式はbt/stub/include/bt_nimble_config.h（C5専用版．
     #  LEGACY_VHCI=0）で供給する．SM OFF時のみ SM_LEGACY/SC=0 でble_sm*.cを

@@ -322,9 +322,24 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 		break;
 #ifdef TOPPERS_ESP32C5_BT_SM
 	case BLE_GAP_EVENT_ENC_CHANGE:
-		/*  D-2d：暗号化結果．STORE6 共用に 0x5DE0<status>（PAIRING が後で上書き）．  */
-		sil_wrw_mem((void *) LP_AON_STORE_SM,
-					0x5DE00000UL | ((uint32_t) event->enc_change.status & 0xffUL));
+		/*  D-2d：暗号化結果．STORE6 共用に 0x5DE0<delta_s><status>．
+		    delta_s＝«HCI Encryption Change が host に届いてから この app ENC_CHANGE
+		    (通常 ETIMEOUT) を受けるまでの秒»（RXTRACE の tick 差）．~30 なら enc は
+		    早く届いたのに SM が進まず30s待ち＝host SM/proc 問題／~0 なら enc が30sで
+		    遅れて届いた＝配送遅延．  */
+		{
+			uint32_t	sm_mark = 0x5DE00000UL
+						| ((uint32_t) event->enc_change.status & 0xffUL);
+#ifdef TOPPERS_ESP32C5_BT_RXTRACE
+			extern volatile uint32_t	g_rx_tick;
+			extern volatile uint32_t	g_rx_enc_tick;
+			uint32_t	delta_s = g_rx_tick - g_rx_enc_tick;
+
+			if (delta_s > 0xffUL) { delta_s = 0xffUL; }
+			sm_mark |= (delta_s << 8);
+#endif
+			sil_wrw_mem((void *) LP_AON_STORE_SM, sm_mark);
+		}
 		syslog(LOG_NOTICE, "ble_host_smoke_c5: GAP ENC_CHANGE status=%d",
 			   (int_t) event->enc_change.status);
 		break;
@@ -565,6 +580,14 @@ main_task(EXINF exinf)
 	 */
 	for (;;) {
 		bt5_security_tick();
+#ifdef TOPPERS_ESP32C5_BT_RXTRACE
+		/*  RXTRACE の粗タイマ（1s毎）．enc 到着→ETIMEOUT の経過秒測定用．  */
+		{
+			extern volatile uint32_t	g_rx_tick;
+
+			g_rx_tick++;
+		}
+#endif
 #ifdef TOPPERS_ESP32C5_BT_APIERR_TRACE
 		/*  ★SVC_PERROR：esp_shim の想定外 API エラーを STORE3(0x600B100C)へ
 		    ミラー＝esptool で回収（0=エラー無し／非0＝<count:8><line:8><ercd:16>）．  */
