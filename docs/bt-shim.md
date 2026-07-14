@@ -2780,5 +2780,12 @@ board B 最終状態（更新）：regdiag build（機能同一・広告中・`0
 **★OTA 決着（2026-07-15・ユーザー実機）**：スマホ側キャッシュクリア（forget→BT OFF/ON→再接続）
 後、**フレッシュ bond 成立＋`0xABF1` read で "BT4-OK" が出た**。予測どおり原因は 100% スマホ
 GATT キャッシュ、デバイスは終始無罪と実機確定。**∴C3 BLE は connect + bond（D-2d）+ カスタム
-GATT サービス 0xABF0 の read（0xABF1="BT4-OK"）を OTA で実証＝D-2c 達成**。残り＝0xABF2 notify /
-0xABF3 write / 0xABF4 暗号 read の追試（任意）。物理電源断 cold boot は依然ユーザー保留。
+GATT サービス 0xABF0 の read（0xABF1="BT4-OK"）を OTA で実証＝D-2c 達成**。
+
+**★D-2c/D-2d 完全達成（2026-07-15・ユーザー実機・同一 OTA セッション）**：続けて全 4 特性を追試し全 PASS：
+- `0xABF1` READ = "BT4-OK" ✅
+- `0xABF2` READ|NOTIFY = カウンタ通知受信 ✅
+- `0xABF3` WRITE = 送信成立 ✅（デバイス側 write マーカ 0x60008058 での裏取りは «接続維持のため» 未読＝任意）
+- **`0xABF4` 暗号必須 READ = "BT4-OK" ✅ ＝bond で確立した LTK 暗号が実効**（未ペアなら insufficient-authentication・暗号確立後のみ平文 read が通る＝**D-2d bond の実効性を end-to-end 実証**）
+
+**∴C3 BLE ブリングアップの実機ゴール到達＝connect + bond/暗号（D-2d）+ フル GATT サービス（read/notify/write/encrypted-read, D-2c）**。残り任意＝0xABF3 write のデバイス側裏取り（0x58 read・接続切れる）・物理電源断 cold boot（warm 残留判別・依然ユーザー保留）。
