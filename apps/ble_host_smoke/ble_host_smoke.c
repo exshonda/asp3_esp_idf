@@ -149,6 +149,20 @@ raw_systimer_lo(void)
     使うので衝突するが，本番/検証は OFF）．
     0x7717<write_count:8><先頭バイト:8> をパックし単発 dump-mem で確認する．  */
 #define BLE_WRITE_MARK_ADDR	((void *) 0x60008058UL)
+/*  D-2d(bond確認)：PAIRING_COMPLETE を ENC_CHANGE(0x58) と別レジスタへ分離＝
+    SM最終段（鍵配布→bond登録）まで到達したかを独立に観測する（0x58 は
+    ENC_CHANGE が «後勝ち» で上書きするため PAIRING_COMPLETE が隠れる＝
+    bt-shim.md D-2d「次の一手#1」）．
+    ★レジスタ選定：8個の STORE は全て使用中（0x50 SYNC/0x54 alloc/0x58 ENC・
+    write/0x5C ADV/0xB8 DISC/0xBC esp_shim/0xC0 CONN/0xC4 adv-rc）．うち
+    «接続→ペアリング→切断→再adv» の間に書かれないのは 0x54（bt_shim の
+    esp_intr_alloc トレース＝BTコントローラ init 時のみ書込み，以後セッション
+    中は不変）だけ．0xC4 は start_advertising 毎に adv-rc(0xAD00xxxx)で上書き
+    されるため «切断→再adv» で PAIRING マーカが消える＝不可．よって 0x54 を使う．
+    値：0x5DC0<status:8><our_sec:4><peer_sec:4>．status=0 かつ our_sec>=1 で
+    «DUT側 bond 成立»．«未発火» は init の alloc トレース値が残る＝0x5DC0 タグの
+    有無で判別（alloc トレースは 0x5DC0xxxx を生成しない）．  */
+#define BLE_PAIR_MARK_ADDR	((void *) 0x60008054UL)
 
 static int gap_event_cb(struct ble_gap_event *event, void *arg);
 
@@ -244,6 +258,18 @@ static const struct ble_gatt_chr_def custom_chrs[] = {
 		.access_cb = gatt_write_access,
 		.flags = BLE_GATT_CHR_F_WRITE,
 	},
+#ifdef TOPPERS_ESP32C3_BT_SM
+	/*  D-2d(bond確認)：暗号必須 READ 特性（0xABF4）．未ペアの central が
+	    これを READ すると NimBLE が insufficient-authentication を返し，
+	    central が pairing/bonding を «決定論的に» 開始する＝スマホ/BlueZ
+	    双方で bond を強制トリガして PAIRING_COMPLETE の status を採取する
+	    ための入口（暗号確立後は "BT4-OK" を平文READと同じく返す）．  */
+	{
+		.uuid = BLE_UUID16_DECLARE(0xABF4),
+		.access_cb = gatt_read_access,
+		.flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC,
+	},
+#endif
 	{ 0 }	/* 終端 */
 };
 
@@ -460,13 +486,25 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 	case BLE_GAP_EVENT_PARING_COMPLETE:
 		/*  SMP手続き完了（status=0成功／BLE host error code）．enc_cb系
 		    （bond再利用のLTK再暗号化）でも発火する（S3 BT-5注記）  */
-		/*  SMP診断マーカ（STORE2 0x58）：tag 0x5DC0＝PAIRING_COMPLETE 到達，
-		    下位バイト=status（0=成功 / BLE_SM_ERR_* 系）．  */
-		sil_wrw_mem((void *) 0x60008058UL,
-					0x5DC00000UL
-					| ((uint32_t) event->pairing_complete.status & 0xffUL));
-		syslog(LOG_NOTICE, "ble_host_smoke: GAP PAIRING_COMPLETE status=%d",
-			   (int_t) event->pairing_complete.status);
+		/*  D-2d(bond確認)：ENC_CHANGE と別 reg(STORE7 0xC4)へ分離記録し，同時に
+		    DUT側 bond store 件数（our_sec/peer_sec）をパックする＝鍵が実際に
+		    保存され bond が成立したかを status と併せて判定する（0x58 共用では
+		    ENC_CHANGE 後勝ちで PAIRING_COMPLETE が見えなかった）．  */
+		{
+			int	our_cnt = 0, peer_cnt = 0;
+
+			(void) ble_store_util_count(BLE_STORE_OBJ_TYPE_OUR_SEC, &our_cnt);
+			(void) ble_store_util_count(BLE_STORE_OBJ_TYPE_PEER_SEC, &peer_cnt);
+			sil_wrw_mem(BLE_PAIR_MARK_ADDR,
+						0x5DC00000UL
+						| (((uint32_t) event->pairing_complete.status & 0xffUL) << 8)
+						| (((uint32_t) our_cnt & 0xfUL) << 4)
+						| ((uint32_t) peer_cnt & 0xfUL));
+			syslog(LOG_NOTICE,
+				   "ble_host_smoke: GAP PAIRING_COMPLETE status=%d bonds our=%d peer=%d",
+				   (int_t) event->pairing_complete.status,
+				   (int_t) our_cnt, (int_t) peer_cnt);
+		}
 		break;
 #endif /* TOPPERS_ESP32C3_BT_SM */
 	default:
@@ -530,6 +568,11 @@ main_task(EXINF exinf)
 	    混同回避．watchdog-resetはRTC domainを消さないため明示クリア）．  */
 	sil_wrw_mem(BLE_CONN_MARK_ADDR, 0U);
 	sil_wrw_mem(BLE_DISC_MARK_ADDR, 0U);
+
+	/*  D-2d(bond確認)：PAIRING_COMPLETE マーカ(0x54)は bt_shim の
+	    esp_intr_alloc トレースと共用．init で alloc トレース値が上書きする
+	    ため boot クリアはしない＝«発火/未発火» は 0x5DC0 タグの有無で判別する
+	    （BLE_PAIR_MARK_ADDR のコメント参照）．  */
 
 #ifdef TOPPERS_ESP32C3_BT_ACL_TRACE
 	/*  D-2c：RX-data dispatch 計装のカウンタ（RTC STORE2）を0クリア．  */
