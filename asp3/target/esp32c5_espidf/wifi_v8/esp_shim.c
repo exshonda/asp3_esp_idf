@@ -12,15 +12,7 @@
  */
 
 /*
- *  Wi-Fi os_adapter shimの基盤プリミティブ実装（ASP3用．ESP32-C5版）
- *
- *  esp32c6版（asp3_target/esp32c6_espidf/wifi/esp_shim.c）からのコピー・
- *  C5対応（docs/c5-port-design.md §5.4）。チップ非依存の設計・ロジックは
- *  無変更．変更点は (1) TOPPERS_ESP32C5_WIFIガードの追加，(2) systimer
- *  読出し関数のrename（esp32c5_systimer_read／target_timer.h参照），
- *  (3) HW RNG（esp_shim_random）のレジスタ差替え，(4) C6専用診断計装
- *  （wifi_trace.c／wifi_trace.h．C6のAGC/deaf-RX調査専用）への依存除去
- *  （docs/c5-port-design.md §8.3「C6資産の非移植方針」）の4点のみ。
+ *  Wi-Fi os_adapter shimの基盤プリミティブ実装（ASP3用）
  *
  *  設計はdocs/wifi-shim.md．FreeRTOS流の動的生成要求を，ASP3の静的
  *  生成オブジェクトのプール（esp_shim.cfg）＋shim実装で提供する：
@@ -43,13 +35,43 @@
 #include "esp_shim.h"
 #include "esp_shim_cfg.h"
 #include "target_timer.h"		/* esp32c5_systimer_read */
-#if defined(TOPPERS_ESP32C3_WIFI) || defined(TOPPERS_ESP32C6_WIFI) \
-	|| defined(TOPPERS_ESP32C5_WIFI)
+#ifdef TOPPERS_ESP32C5_WIFI
 #include "psa/crypto.h"			/* psa_crypto_init（後述．Wi-Fi固有＝
 								   WPA2ハンドシェイクのPTK/MIC導出に必要．
 								   Bluetooth単体ビルドではmbedtlsを
 								   リンクしないため未定義時は除外する） */
-#endif /* TOPPERS_ESP32C3_WIFI || TOPPERS_ESP32C6_WIFI || TOPPERS_ESP32C5_WIFI */
+#endif /* TOPPERS_ESP32C5_WIFI */
+#ifdef TOPPERS_ESP32C5_BT_NIMBLE
+/*  ★C5 BT用：esp_shim_modem_icg_init（modem ICG覚醒）に必要な hal LL ヘッダ．
+    BT単体ビルドでは esp_wifi_adapter.c（この関数のもう1つの static 定義を持つ）が
+    コンパイルされないため，ここに非static版を用意する（BLE実施05／c5-port-design.md §8.3．
+    v9削除の回帰修正でC3版esp_shim.c再生成に伴い C5固有の本関数を再追加）．  */
+#include "hal/pmu_ll.h"
+#include "hal/modem_syscon_ll.h"
+#include "hal/modem_lpcon_ll.h"
+#endif /* TOPPERS_ESP32C5_BT_NIMBLE */
+
+/*
+ *  サービスコールのエラーのログ出力（sample1 の SVC_PERROR 相当）．
+ *  E_CTX／E_TMOUT は本シムの «想定内»（CPUロック時のフォールバック・受信
+ *  タイムアウト）なので除外し，«想定外» のエラーだけを file:line 付きで
+ *  記録する．ESP32C3_BT_APIERR_TRACE=ON のときのみ有効（既定OFF＝非回帰）．
+ */
+#ifdef TOPPERS_ESP32C5_BT_APIERR_TRACE
+/*  ★ercd を «そのまま返す»＝ er = SVC_PERROR(sig_sem(...)) で er にエラー
+    コードが入り，かつ想定外エラーだけログする（挙動は不変・ログ追加のみ）．  */
+ER
+esp_shim_svc_perror(const char *file, int_t line, const char *expr, ER ercd)
+{
+	if (ercd < 0 && ercd != E_CTX && ercd != E_TMOUT && ercd != E_QOVR) {
+		t_perror(LOG_ERROR, file, line, expr, ercd);
+	}
+	return(ercd);
+}
+#define SVC_PERROR(expr)	esp_shim_svc_perror(__FILE__, __LINE__, #expr, (expr))
+#else
+#define SVC_PERROR(expr)	(expr)
+#endif
 
 /*
  *  クリティカルセクション（mstatus.MIEの退避・復元＝ネスト対応）
@@ -68,6 +90,59 @@ esp_shim_int_restore(uint32_t state)
 {
 	if (state != 0U) {
 		Asm("csrsi mstatus, 8");
+	}
+}
+
+/*
+ *  ネスト対応クリティカルセクション（FreeRTOS portENTER/EXIT_CRITICAL用）
+ *
+ *  esp_shim_int_disable()の退避値を「muxに格納」する方式は，同一muxを
+ *  入れ子で取得する（BTコントローラのGLOBAL_INT_DISABLE系＝osiの
+ *  _global_intr_disable/restoreはRW/LLDスタックが深くネストする）と，
+ *  内側の取得が外側の退避値（MIE=1）をMIE=0で上書きし，最外の解放でも
+ *  MIEが復元されず割込み禁止（CPUロック）のまま残る．その文脈で
+ *  block-foreverのtwai_semを呼ぶとブロック不可でE_CTX→take失敗→
+ *  btdm_controller_taskがexit→RTC_SW_SYS_RESET（docs/bt-shim.md
+ *  「リセット点の局所化」）．
+ *  ESP-IDF FreeRTOSと同じく，割込み状態はコア単位（単一コアなので大域）に
+ *  ネストカウンタで退避し，最外(0→1)で退避・最外(1→0)でのみ復元する．
+ *  muxは単一コアでは無意味なため参照しない．
+ */
+static volatile uint32_t	esp_shim_crit_nest = 0U;
+static volatile uint32_t	esp_shim_crit_saved = 0U;
+
+void
+esp_shim_enter_critical(void)
+{
+	uint32_t state;
+
+	/* mstatus.MIEを読みつつクリア（この時点以降はISRが入らない＝以降の
+	   カウンタ/退避値更新はアトミック） */
+	Asm("csrrci %0, mstatus, 8" : "=r"(state));
+	if (esp_shim_crit_nest == 0U) {
+		esp_shim_crit_saved = state & 8U;
+	}
+	esp_shim_crit_nest++;
+}
+
+void
+esp_shim_exit_critical(void)
+{
+	if (esp_shim_crit_nest > 0U) {
+		esp_shim_crit_nest--;
+		if ((esp_shim_crit_nest == 0U) && (esp_shim_crit_saved != 0U)) {
+			Asm("csrsi mstatus, 8");
+			/*
+			 *  最外解除でMIEを復帰した＝サービスコール発行可能になった．
+			 *  BTクリティカルセクション内でE_CTXのため保留リングへ退避
+			 *  された送信（D-2c ACL経路等）をここでDTQへflushし，待機中の
+			 *  受信タスク（NimBLEホスト等）を起床させる．保留が無ければ
+			 *  高速パスで即return（非回帰）．
+			 *  ★D-2d bond修正：セマフォ側の保留give（E_CTXで消えた
+			 *  controller の give）も同時に精算する．  */
+			esp_shim_queue_flush_pending();
+			esp_shim_sem_flush_pending();
+		}
 	}
 }
 
@@ -106,22 +181,39 @@ uint32_t
 esp_shim_random(void)
 {
 	/*
-	 *  HW乱数生成器（RNG_DATA_REG）．無線が有効になるとRFノイズ由来の
-	 *  真性乱数になる（無効時はエントロピー低）．
-	 *
-	 *  C5の真のHW RNG読出しレジスタはWDEV_RND_REG＝
-	 *  LPPERI_RNG_DATA_SYNC_REG（DR_REG_LPPERI_BASE(0x600B2800)+0x28＝
-	 *  0x600B2828）．C6はWDEV_RND_REGがLPPERI_RNG_DATA_REG（+0x8）を
-	 *  指していたが，C5ではWDEV_RND_REGのエイリアス先が"sync"版
-	 *  （+0x28）へ変わっている（esp-hal-3rdparty:
-	 *  soc/esp32c5/include/soc/wdev_reg.hのWDEV_RND_REG定義，
-	 *  および同soc/lpperi_reg.hのLPPERI_RNG_DATA_SYNC_REGで確認．
-	 *  docs/c5-port-design.md §3・§9参照）．C3→C6でWDEV_RND_REGの
-	 *  実体を正しく引くことがWPA2 SNonce不具合の修正だった教訓を踏まえ，
-	 *  C5でも値を転記せずwdev_reg.h同値を採用する．
+	 *  HW乱数生成器．無線が有効になるとRFノイズ由来の真性乱数になる
+	 *  （無効時はエントロピー低）．★C5レジスタ差替え：C3の SYSCON_RND_DATA_REG
+	 *  (0x600260B0) ではなく，C5は LPPERI_RNG_DATA_SYNC_REG (WDEV_RND_REG)
+	 *  = 0x600B2828（docs/c5-port-design.md §8.3・C5実施の再生成方針）．
 	 */
 	return(sil_rew_mem((void *)0x600B2828U));	/* LPPERI_RNG_DATA_SYNC_REG (WDEV_RND_REG) */
 }
+
+#ifdef TOPPERS_ESP32C5_BT_NIMBLE
+/*
+ *  C5 modem ICG（Internal Clock Gating）初期化＝MODEMデジタルドメインを
+ *  覚醒させる（docs/c5-bringup.md C5実施13・esp_wifi_adapter.c の static 版と
+ *  同一実装）．BT clock init（bt_shim.c の esp_shim_bt_clock_init）から呼ぶ．
+ *  ★C5レジスタ：pmu=0x600B0000・modem_lpcon=0x600AF000・modem_syscon=
+ *  0x600A9C00（C6の0x600A9800から+0x400移動．c5-port-design.md §9）．
+ *  v9削除の回帰修正でC3版esp_shim.c再生成に伴い C5固有の本関数を再追加．
+ */
+void
+esp_shim_modem_icg_init(void)
+{
+	pmu_dev_t			*pmu = (pmu_dev_t *)0x600B0000U;
+	modem_lpcon_dev_t	*lpcon = (modem_lpcon_dev_t *)0x600AF000U;
+	modem_syscon_dev_t	*syscon = (modem_syscon_dev_t *)0x600A9C00U;
+	uint32_t			code_bit = 1U << 2;	/* BIT(PMU_HP_ICG_MODEM_CODE_ACTIVE=2) */
+
+	pmu_ll_hp_set_icg_modem(pmu, PMU_MODE_HP_ACTIVE, 2U);
+	modem_syscon_ll_set_modem_apb_icg_bitmap(syscon, code_bit);
+	modem_lpcon_ll_set_i2c_master_icg_bitmap(lpcon, code_bit);
+	modem_lpcon_ll_set_lp_apb_icg_bitmap(lpcon, code_bit);
+	pmu_ll_imm_update_dig_icg_modem_code(pmu, true);
+	pmu_ll_imm_update_dig_icg_switch(pmu, true);
+}
+#endif /* TOPPERS_ESP32C5_BT_NIMBLE */
 
 /*
  *  ログ（blobの_log_write系・lwIPのLWIP_PLATFORM_DIAG/ASSERT等，
@@ -279,8 +371,24 @@ static const ID shim_sem_id[ESP_SHIM_NUM_SEM] = {
 	SHIM_SEM13, SHIM_SEM14, SHIM_SEM15, SHIM_SEM16,
 	SHIM_SEM17, SHIM_SEM18, SHIM_SEM19, SHIM_SEM20,
 	SHIM_SEM21, SHIM_SEM22, SHIM_SEM23, SHIM_SEM24
+#ifdef TOPPERS_ESP32C5_BT_NIMBLE
+	, SHIM_SEM25, SHIM_SEM26, SHIM_SEM27, SHIM_SEM28
+#endif
 };
 static bool_t shim_sem_used[ESP_SHIM_NUM_SEM];
+
+/*  ★D-2d bond修正：E_CTX（mstatus.MIE==0＝BTクリティカルセクション/ISR文脈）
+    からの sig_sem 消失を防ぐ «保留give»．キューの pend_ring と «同型»．
+    controller blob は osi の _semphr_give_from_isr（→stub xSemaphoreGiveFromISR
+    →esp_shim_sem_give）を MIE==0 文脈から叩くが，本ポートは sense_lock()==
+    (MIE==0) のため sig_sem が E_CTX を返し give が «黙って消える»．D-2c で
+    キューには pend_ring 救済を入れたがセマフォには入れ忘れていた＝これが
+    暗号確立後の «2個目の暗号化ACL» が host に届かない真因（docs/bt-shim.md
+    「D-2d bond診断」）．E_CTX時は保留カウントへ退避し，MIE復帰(exit_critical)
+    や機会的flushで sig_sem を精算する．  */
+static volatile uint32_t	shim_sem_pend[ESP_SHIM_NUM_SEM];
+static volatile uint32_t	shim_sem_pend_total;
+volatile uint32_t	shim_sem_ectx_total;	/* 累計E_CTX give数（診断・非static） */
 
 void *
 esp_shim_sem_create(uint32_t max, uint32_t init)
@@ -336,7 +444,79 @@ esp_shim_sem_take(void *sem, uint32_t block_time_tick)
 int32_t
 esp_shim_sem_give(void *sem)
 {
-	return(sig_sem((ID)(intptr_t)sem) == E_OK ? 1 : 0);
+	ID	semid = (ID)(intptr_t)sem;
+	ER	er = SVC_PERROR(sig_sem(semid));
+
+	if (er == E_OK || er == E_QOVR) {
+		return(1);	/* 成立（E_QOVR=既に上限＝実質signaled） */
+	}
+	if (er == E_CTX) {
+		/*
+		 *  ★D-2d bond修正：mstatus.MIE==0（BTクリティカルセクション/ISR）
+		 *  文脈では sig_sem が E_CTX＝give が消える．保留カウントへ退避し，
+		 *  MIE復帰(exit_critical)や機会的flush(esp_shim_sem_flush_pending)で
+		 *  sig_sem を精算する（キュー pend_ring と同型）．これが無いと
+		 *  controller が ISR/クリティカルから出す give（暗号後の2個目ACL
+		 *  処理の起床等）が失われる（docs/bt-shim.md「D-2d bond診断」）．
+		 */
+		uint_t	i;
+
+		SHIM_LOCK();
+		for (i = 0U; i < ESP_SHIM_NUM_SEM; i++) {
+			if (shim_sem_id[i] == semid) {
+				shim_sem_pend[i]++;
+				shim_sem_pend_total++;
+				shim_sem_ectx_total++;
+				break;
+			}
+		}
+		SHIM_UNLOCK();
+		return(1);	/* 保留＝«成立» 扱い（呼出し元は戻り値を捨てる） */
+	}
+	return(0);
+}
+
+/*
+ *  保留セマフォgiveのflush：MIE==1（サービスコール発行可能）文脈で呼び，
+ *  E_CTX退避されていた give を sig_sem で精算する．呼出し点＝
+ *  esp_shim_exit_critical()の最外解除直後・アプリ定常ループ（機会的）．
+ *  保留0なら即return＝非回帰．
+ */
+void
+esp_shim_sem_flush_pending(void)
+{
+	uint_t	i;
+
+	if (shim_sem_pend_total == 0U) {
+		return;		/* 高速パス（ロック無し読み） */
+	}
+	for (i = 0U; i < ESP_SHIM_NUM_SEM; i++) {
+		while (shim_sem_pend[i] > 0U) {
+			SHIM_LOCK();
+			if (shim_sem_pend[i] == 0U) {
+				SHIM_UNLOCK();
+				break;
+			}
+			shim_sem_pend[i]--;
+			shim_sem_pend_total--;
+			SHIM_UNLOCK();
+			(void) sig_sem(shim_sem_id[i]);
+		}
+	}
+}
+
+/*
+ *  現在のセマフォ資源数（FreeRTOS uxSemaphoreGetCount相当．NimBLE NPL用）
+ */
+uint32_t
+esp_shim_sem_get_count(void *sem)
+{
+	T_RSEM		rsem;
+
+	if (ref_sem((ID)(intptr_t)sem, &rsem) != E_OK) {
+		return(0U);
+	}
+	return((uint32_t)rsem.semcnt);
 }
 
 /*
@@ -352,6 +532,9 @@ typedef struct {
 static const ID shim_mtx_id[ESP_SHIM_NUM_MTX] = {
 	SHIM_MTX1, SHIM_MTX2, SHIM_MTX3, SHIM_MTX4,
 	SHIM_MTX5, SHIM_MTX6, SHIM_MTX7, SHIM_MTX8
+#ifdef TOPPERS_ESP32C5_BT_NIMBLE
+	, SHIM_MTX9, SHIM_MTX10, SHIM_MTX11, SHIM_MTX12
+#endif
 };
 static SHIM_MTX shim_mtx[ESP_SHIM_NUM_MTX];
 
@@ -430,38 +613,72 @@ esp_shim_mutex_unlock(void *mtx)
 }
 
 /*
- *		キュー（DTQプール＋固定プールitem．S3 commit dd7a76d移植．
- *		C3 (asp3/target/esp32c3_espidf/wifi/esp_shim.c) 実施1の修正を
- *		hal(v8)統一（docs/c5-hal-v8-unification-memo.md）でC5 v9側
- *		実施46からそのまま移植．C5固有差なし＝v9版から無改変で移植
- *		可能だった（docs/load-test-c3c5c6.md「C5」節，実施46参照）。
+ *		キュー（DTQプール＋固定プールitem．S3 commit dd7a76d移植）
  *
  *  旧実装は送受信のたびに esp_shim_malloc/free でitemバッファを
  *  確保していた．これは
  *   (1) ISR文脈（queue_send_from_isr．WiFi MAC ISRから呼ばれる）での
  *       malloc失敗がtx-done完了通知の取りこぼしに直結し，WiFi動的TX
  *       バッファが永久未回収になって送信自己ロックを招く，
- *   (2) 持続高レート送受信でのalloc/freeチャーンがシムヒープを
- *       断片化させる，
- *  という潜在欠陥だった（docs/s3-throughput-findings-for-c6.md参照）。
+ *   (2) 持続高レート送受信でのalloc/freeチャーンがシムヒープ
+ *       （192KB・first-fit）を断片化させる，
+ *  という潜在欠陥だった（ESP32-S3側の実機調査JTAG_DEBUG追記30で
+ *  特定．docs/s3-throughput-findings-for-c6.md参照．C3のシムは
+ *  S3と同一コードパターンで同じ欠陥を持っていたため，S3の対策
+ *  （固定プール化）をそのまま移植する）．
  *
  *  対策：生成時にdepth*item_sizeのプールとスロット空きスタックを
- *  1回だけ確保し，送受信ではmallocせずスロット番号のみをDTQで運ぶ。
- *
- *  なお v9側のesp_shim_queue_reset（NimBLE eventq_reset用．BT対応で
- *  追加）はv8統一＝WiFi専用ビルドには不要のため移植しない。
+ *  1回だけ確保し，送受信ではmallocせずスロット番号のみをDTQで運ぶ．
  */
 typedef struct {
 	ID			dtqid;		/* 0なら未使用スロット */
+	ID			semid;		/* 空きスロット数を表すカウンティングセマフォ
+							 * （shim_qsem_idからdtqidと同じindexで1:1対応）．
+							 * esp_shim_queue_send()のブロッキング契約
+							 * （portMAX_DELAY＝満杯時は待つ）をtwai_semで
+							 * 実現する（D-2c／S3 BT-4調査 §8.5/§10）． */
 	uint32_t	item_size;
 	uint8_t		*pool;		/* depth*item_size．生成時に1回だけ確保 */
 	uint16_t	*free_stk;	/* 空きスロット番号スタック（LIFO） */
 	uint32_t	depth;
 	volatile uint32_t free_top;	/* 空きスロット数 */
+	/*
+	 *  ★E_CTX文脈（CPUロック状態＝mstatus.MIE==0）からの送信用の
+	 *  「保留リング」（S3 BT-4調査 steering §13のC3移植）．本ポートの
+	 *  sense_lock()はmstatus.MIE==0で真になるため（core_kernel_impl.h），
+	 *  BTクリティカルセクション（esp_shim_enter_critical＝MIEクリア保持）
+	 *  内では twai_sem/pol_sem/psnd_dtq/sig_sem を含む全サービスコールが
+	 *  E_CTXになる．そこでこの文脈では：スロットを直接確保（カーネル
+	 *  呼出し無し）→itemをコピー→スロット番号をpend_ringへ積んで成功を
+	 *  返し，MIE復帰時（esp_shim_exit_criticalの最外解除，または次の
+	 *  queue_send/recv冒頭）にpsnd_dtqへ流し込む（flush）．sem_debtは
+	 *  「トークンを消費せずに確保したスロット数」で，解放時に sig_sem を
+	 *  1回スキップして返済する（トークンは不可分＝どの解放で返済しても
+	 *  会計は一致する）．
+	 */
+	uint16_t	*pend_ring;	/* 保留スロット番号リング（容量depth） */
+	uint32_t	pend_rd;	/* リング読み出しindex（SHIM_LOCK下で更新） */
+	uint32_t	pend_wr;	/* リング書き込みindex（SHIM_LOCK下で更新） */
+	volatile uint32_t	pend_cnt;	/* 保留数 */
+	volatile uint32_t	sem_debt;	/* 未返済トークン数 */
 } SHIM_QUE;
+
+/*  全キュー合計の保留数（exit_critical側の高速チェック用．SHIM_LOCK下で
+ *  更新，読み出しはロック無し＝0/非0の判定にのみ使う）． */
+static volatile uint32_t	shim_que_pend_total;
 
 static const ID shim_dtq_id[ESP_SHIM_NUM_DTQ] = {
 	SHIM_DTQ1, SHIM_DTQ2, SHIM_DTQ3, SHIM_DTQ4
+#ifdef TOPPERS_ESP32C5_BT_NIMBLE
+	, SHIM_DTQ5, SHIM_DTQ6, SHIM_DTQ7, SHIM_DTQ8
+#endif
+};
+/*  shim_dtq_idと同じindexで1:1対応する「空きスロット数」セマフォ． */
+static const ID shim_qsem_id[ESP_SHIM_NUM_DTQ] = {
+	SHIM_QSEM1, SHIM_QSEM2, SHIM_QSEM3, SHIM_QSEM4
+#ifdef TOPPERS_ESP32C5_BT_NIMBLE
+	, SHIM_QSEM5, SHIM_QSEM6, SHIM_QSEM7, SHIM_QSEM8
+#endif
 };
 static SHIM_QUE shim_que[ESP_SHIM_NUM_DTQ];
 
@@ -473,20 +690,23 @@ esp_shim_queue_create(uint32_t len, uint32_t item_size)
 	SHIM_QUE	*q = NULL;
 	uint8_t		*pool;
 	uint16_t	*stk;
+	uint16_t	*pring;
 
 	if (depth > ESP_SHIM_DTQ_CNT) {
 		syslog(LOG_NOTICE, "esp_shim: queue len %u > pool depth %u",
 			   (uint_t)len, (uint_t)ESP_SHIM_DTQ_CNT);
 		depth = ESP_SHIM_DTQ_CNT;
 	}
-	/*  プールと空きスタックを生成時に1回だけ確保（以後mallocしない）。 */
+	/*  プール・空きスタック・保留リングを生成時に1回だけ確保（以後mallocしない）。 */
 	pool = (uint8_t *) esp_shim_malloc((size_t)depth * item_size);
 	stk = (uint16_t *) esp_shim_malloc((size_t)depth * sizeof(uint16_t));
+	pring = (uint16_t *) esp_shim_malloc((size_t)depth * sizeof(uint16_t));
 	syslog(LOG_NOTICE, "esp_shim: queue create depth=%u item=%u pool=%uB",
 		   (uint_t)depth, (uint_t)item_size, (uint_t)(depth * item_size));
-	if (pool == NULL || stk == NULL) {
+	if (pool == NULL || stk == NULL || pring == NULL) {
 		esp_shim_free(pool);
 		esp_shim_free(stk);
+		esp_shim_free(pring);
 		syslog(LOG_ERROR, "esp_shim: queue pool alloc failed");
 		return(NULL);
 	}
@@ -495,6 +715,7 @@ esp_shim_queue_create(uint32_t len, uint32_t item_size)
 		if (shim_que[i].dtqid == 0) {
 			q = &shim_que[i];
 			q->dtqid = shim_dtq_id[i];
+			q->semid = shim_qsem_id[i];
 			q->item_size = item_size;
 			q->pool = pool;
 			q->free_stk = stk;
@@ -503,6 +724,11 @@ esp_shim_queue_create(uint32_t len, uint32_t item_size)
 				stk[k] = (uint16_t)k;
 			}
 			q->free_top = depth;
+			q->pend_ring = pring;
+			q->pend_rd = 0U;
+			q->pend_wr = 0U;
+			q->pend_cnt = 0U;
+			q->sem_debt = 0U;
 			break;
 		}
 	}
@@ -511,7 +737,20 @@ esp_shim_queue_create(uint32_t len, uint32_t item_size)
 	if (q == NULL) {
 		esp_shim_free(pool);
 		esp_shim_free(stk);
+		esp_shim_free(pring);
 		syslog(LOG_ERROR, "esp_shim: queue pool exhausted");
+	} else {
+		/*
+		 *  空きスロット数セマフォ（q->semid）の初期値をdepthに合わせる．
+		 *  スロット再利用（旧queue_deleteでdrain済み）に備えてまず0まで
+		 *  読み捨ててから，depth回sig_semしてカウントを積む．
+		 */
+		while (pol_sem(q->semid) == E_OK) {
+			;	/* 前回利用分の残トークンを捨てる */
+		}
+		for (k = 0U; k < depth; k++) {
+			(void) sig_sem(q->semid);
+		}
 	}
 	return((void *)q);
 }
@@ -526,10 +765,19 @@ esp_shim_queue_delete(void *que)
 		while (prcv_dtq(q->dtqid, &data) == E_OK) {
 			;	/* スロットはプール管理のため個別freeしない */
 		}
+		while (pol_sem(q->semid) == E_OK) {
+			;	/* 空きスロット数セマフォも0まで読み捨てる（再利用に備える） */
+		}
+		SHIM_LOCK();
+		shim_que_pend_total -= q->pend_cnt;	/* 保留リング残も破棄 */
+		q->pend_cnt = 0U;
+		SHIM_UNLOCK();
 		esp_shim_free(q->pool);
 		esp_shim_free(q->free_stk);
+		esp_shim_free(q->pend_ring);
 		q->pool = NULL;
 		q->free_stk = NULL;
+		q->pend_ring = NULL;
 		q->dtqid = 0;
 	}
 }
@@ -553,29 +801,196 @@ shim_que_slot_free(SHIM_QUE *q, uint32_t slot)
 	q->free_top++;
 }
 
+/*
+ *  スロットを1つ解放し，対応する空きスロット数セマフォへトークンを1つ
+ *  返却する（esp_shim_queue_send()のブロッキング待ちを解除するため）．
+ *  SHIM_LOCK外から呼ぶこと（sig_semはSHIM_LOCK内で呼ぶべきでないため）．
+ *  sem_debt（トークンを消費せずに確保されたスロット数＝E_CTX保留送信分）
+ *  が残っている場合は，sig_semを1回スキップして返済する．
+ */
+static void
+shim_que_slot_free_notify(SHIM_QUE *q, uint32_t slot)
+{
+	bool_t	repay = false;
+
+	SHIM_LOCK();
+	shim_que_slot_free(q, slot);
+	if (q->sem_debt > 0U) {
+		q->sem_debt--;
+		repay = true;
+	}
+	SHIM_UNLOCK();
+	if (!repay) {
+		(void) sig_sem(q->semid);
+	}
+}
+
+/*
+ *  トークン（q->semid）を消費せずにスロットを確保してitemをコピーする．
+ *  E_CTX文脈（pol_sem不可）からの送信の共通前段：sem_debt++で会計を
+ *  保存し（解放時にsig_semを1回スキップして返済），コピーまで済ませた
+ *  スロット番号を返す．スロット枯渇（真の満杯）なら0xFFFFFFFF．
+ */
+static uint32_t
+shim_que_slot_alloc_debt_copy(SHIM_QUE *q, const void *item)
+{
+	uint32_t	slot;
+
+	SHIM_LOCK();
+	slot = shim_que_slot_alloc(q);
+	if (slot != 0xFFFFFFFFU) {
+		q->sem_debt++;	/* トークン未消費で確保＝解放時にsig_semを1回スキップ */
+		memcpy(q->pool + (size_t)slot * q->item_size, item, q->item_size);
+	}
+	SHIM_UNLOCK();
+	return(slot);
+}
+
+/*  保留経路の利用実績カウンタ（初回のみsyslogに痕跡を残す＝E_CTX
+ *  フォールバック発動の実機証跡）． */
+static volatile uint32_t	shim_que_pend_used;
+
+/*
+ *  確保・コピー済みのスロット番号を保留リングへ公開する．CPUロック状態
+ *  （mstatus.MIE==0，BTクリティカルセクション等）＝psnd_dtqすら発行
+ *  できない文脈向けの最終手段で，MIE復帰後のflushでDTQへ流し込まれる．
+ */
+static void
+shim_que_pend_push_slot(SHIM_QUE *q, uint32_t slot)
+{
+	SHIM_LOCK();
+	q->pend_ring[q->pend_wr] = (uint16_t)slot;
+	q->pend_wr = (q->pend_wr + 1U >= q->depth) ? 0U : q->pend_wr + 1U;
+	q->pend_cnt++;		/* スロット数で上限が押さえられておりdepthを超えない */
+	shim_que_pend_total++;
+	shim_que_pend_used++;
+	SHIM_UNLOCK();
+	if (shim_que_pend_used == 1U) {
+		syslog(LOG_NOTICE, "esp_shim: pend path engaged (dtqid=%d)",
+			   (int)q->dtqid);
+	}
+}
+
+/*
+ *  E_CTX文脈（CPUロック状態）からの送信の実体：カーネル呼出しを一切
+ *  使わずスロットを確保してitemをコピーし，スロット番号を保留リングへ
+ *  積む．成功なら1，スロット枯渇（真の満杯）なら0を返す．
+ */
+static int32_t
+shim_que_pend_push(SHIM_QUE *q, const void *item)
+{
+	uint32_t	slot = shim_que_slot_alloc_debt_copy(q, item);
+
+	if (slot == 0xFFFFFFFFU) {
+		return(0);	/* 真の満杯 */
+	}
+	shim_que_pend_push_slot(q, slot);
+	return(1);
+}
+
+/*
+ *  保留リングのflush：MIE==1（サービスコール発行可能な文脈）で呼び，
+ *  保留中のスロット番号をpsnd_dtqでDTQへ流し込む．呼出し文脈はタスク・
+ *  非タスクいずれでも良い（psnd_dtqは待ちに入らない送信）．呼出し点：
+ *    - esp_shim_exit_critical()の最外解除直後
+ *    - esp_shim_queue_send()/esp_shim_queue_recv()の冒頭（機会的）
+ */
+void
+esp_shim_queue_flush_pending(void)
+{
+	uint_t		i;
+	uint32_t	slot;
+	SHIM_QUE	*q;
+	ER			er;
+
+	if (shim_que_pend_total == 0U) {
+		return;		/* 高速パス（ロック無し読み） */
+	}
+	for (i = 0U; i < ESP_SHIM_NUM_DTQ; i++) {
+		q = &shim_que[i];
+		while (q->dtqid != 0 && q->pend_cnt > 0U) {
+			SHIM_LOCK();
+			if (q->pend_cnt == 0U) {
+				SHIM_UNLOCK();
+				break;
+			}
+			slot = (uint32_t)q->pend_ring[q->pend_rd];
+			q->pend_rd = (q->pend_rd + 1U >= q->depth) ? 0U : q->pend_rd + 1U;
+			q->pend_cnt--;
+			shim_que_pend_total--;
+			SHIM_UNLOCK();
+			er = SVC_PERROR(psnd_dtq(q->dtqid, (intptr_t)slot));
+			if (er != E_OK) {
+				syslog(LOG_ERROR, "esp_shim: flush psnd_dtq er=%d q=%d",
+					   (int)er, (int)q->dtqid);
+				shim_que_slot_free_notify(q, slot);
+			}
+		}
+	}
+}
+
+/*
+ *  esp_shim_queue_send()：タスク文脈からのキュー送信．
+ *
+ *  ★D-2c/S3 BT-4調査 §8.5/§10/§13で確定したバグの修正：旧実装は
+ *  block_time_tick（portMAX_DELAY等）を無視し，かつBTクリティカル
+ *  セクション内（MIE==0＝CPUロック相当）ではtsnd_dtqがE_CTXになるため
+ *  即失敗（0）を返していた．NimBLEのnpl_freertos_eventq_put（呼出し元）は
+ *  この契約違反を検出できずBLE_LL_ASSERT／event->queued残置で接続後の
+ *  ATT/GATT要求（ACL）を取りこぼしていた（ServicesResolved未解決）．
+ *
+ *  修正：空きスロット数セマフォ（twai_sem）でブロッキング契約を実現し，
+ *  E_CTX文脈では pol_sem→保留リング（shim_que_pend_push）へフォール
+ *  バックする（MIE復帰時のflushでDTQへ）．
+ */
 int32_t
 esp_shim_queue_send(void *que, void *item, uint32_t block_time_tick,
 					bool_t to_front)
 {
 	SHIM_QUE	*q = (SHIM_QUE *)que;
 	uint32_t	slot;
+	TMO			tmo;
+	ER			er;
 
 	if (q == NULL) {
 		return(0);
+	}
+	esp_shim_queue_flush_pending();	/* 機会的flush（保留残の滞留防止） */
+	tmo = esp_shim_tick_to_tmo(block_time_tick);
+	(void) to_front;	/* 先頭送信は非対応（通常送信で代用） */
+	er = twai_sem(q->semid, tmo);
+	if (er == E_CTX) {
+		/*
+		 *  ディスパッチ保留／CPUロック状態．まずpol_sem（待たない取得）を
+		 *  試し，本ポートのsense_lock()はMIE==0で真になるため（BT
+		 *  クリティカルセクション内）pol_semもE_CTXになる場合は，カーネル
+		 *  呼出しを一切使わない保留リングで送信を成立させる．
+		 */
+		er = pol_sem(q->semid);
+		if (er == E_CTX) {
+			return(shim_que_pend_push(q, item));
+		}
+	}
+	if (er != E_OK) {
+		return(0);	/* 真の満杯（トークン取得できず） */
 	}
 	SHIM_LOCK();
 	slot = shim_que_slot_alloc(q);
 	SHIM_UNLOCK();
 	if (slot == 0xFFFFFFFFU) {
-		return(0);	/* 満杯 */
+		/* 到達しないはず（トークン確保後は空きが保証される）が防御的に */
+		(void) sig_sem(q->semid);
+		return(0);
 	}
 	memcpy(q->pool + (size_t)slot * q->item_size, item, q->item_size);
-	(void) to_front;	/* 先頭送信は非対応（通常送信で代用） */
-	if (tsnd_dtq(q->dtqid, (intptr_t)slot,
-				 esp_shim_tick_to_tmo(block_time_tick)) != E_OK) {
-		SHIM_LOCK();
-		shim_que_slot_free(q, slot);
-		SHIM_UNLOCK();
+	er = SVC_PERROR(tsnd_dtq(q->dtqid, (intptr_t)slot, tmo));
+	if (er == E_CTX) {
+		/*  DTQ容量＝プールdepthのため空きは必ずあり，psnd_dtq（待たない
+		    送信）へフォールバックする．  */
+		er = SVC_PERROR(psnd_dtq(q->dtqid, (intptr_t)slot));
+	}
+	if (er != E_OK) {
+		shim_que_slot_free_notify(q, slot);
 		return(0);
 	}
 	return(1);
@@ -586,21 +1001,48 @@ esp_shim_queue_send_from_isr(void *que, void *item)
 {
 	SHIM_QUE	*q = (SHIM_QUE *)que;
 	uint32_t	slot;
+	ER			er;
 
 	if (q == NULL) {
 		return(0);
+	}
+	er = pol_sem(q->semid);
+	if (er == E_CTX) {
+		/*
+		 *  非タスク文脈（Wi-Fi ISR等）またはCPUロック状態：pol_semは
+		 *  使えないので，トークン未消費でスロットを確保・コピーし
+		 *  （sem_debtで会計保存），まずpsnd_dtqでの直接送信を試みる．
+		 */
+		slot = shim_que_slot_alloc_debt_copy(q, item);
+		if (slot == 0xFFFFFFFFU) {
+			return(0);	/* 真の満杯（非ブロッキング仕様は不変） */
+		}
+		er = SVC_PERROR(psnd_dtq(q->dtqid, (intptr_t)slot));
+		if (er == E_CTX) {
+			/*  CPUロック状態（MIE==0，BTクリティカルセクション等）：
+			    psnd_dtqも発行できないため保留リングへ退避．  */
+			shim_que_pend_push_slot(q, slot);
+			return(1);
+		}
+		if (er != E_OK) {
+			shim_que_slot_free_notify(q, slot);
+			return(0);
+		}
+		return(1);
+	}
+	if (er != E_OK) {
+		return(0);	/* 満杯（非ブロッキング仕様は不変） */
 	}
 	SHIM_LOCK();
 	slot = shim_que_slot_alloc(q);
 	SHIM_UNLOCK();
 	if (slot == 0xFFFFFFFFU) {
+		(void) sig_sem(q->semid);
 		return(0);
 	}
 	memcpy(q->pool + (size_t)slot * q->item_size, item, q->item_size);
 	if (psnd_dtq(q->dtqid, (intptr_t)slot) != E_OK) {
-		SHIM_LOCK();
-		shim_que_slot_free(q, slot);
-		SHIM_UNLOCK();
+		shim_que_slot_free_notify(q, slot);
 		return(0);
 	}
 	return(1);
@@ -611,18 +1053,22 @@ esp_shim_queue_recv(void *que, void *item, uint32_t block_time_tick)
 {
 	SHIM_QUE	*q = (SHIM_QUE *)que;
 	intptr_t	data;
+	ER			er;
 
 	if (q == NULL) {
 		return(0);
 	}
-	if (trcv_dtq(q->dtqid, &data,
-				 esp_shim_tick_to_tmo(block_time_tick)) != E_OK) {
+	esp_shim_queue_flush_pending();	/* 機会的flush（保留残の滞留防止） */
+	er = trcv_dtq(q->dtqid, &data, esp_shim_tick_to_tmo(block_time_tick));
+	if (er == E_CTX) {
+		/*  ディスパッチ保留／CPUロック状態ではprcv_dtq（待たない受信）へ．  */
+		er = prcv_dtq(q->dtqid, &data);
+	}
+	if (er != E_OK) {
 		return(0);
 	}
 	memcpy(item, q->pool + (size_t)(uint32_t)data * q->item_size, q->item_size);
-	SHIM_LOCK();
-	shim_que_slot_free(q, (uint32_t)data);
-	SHIM_UNLOCK();
+	shim_que_slot_free_notify(q, (uint32_t)data);
 	return(1);
 }
 
@@ -635,7 +1081,26 @@ esp_shim_queue_msg_waiting(void *que)
 	if (q == NULL || ref_dtq(q->dtqid, &rdtq) != E_OK) {
 		return(0U);
 	}
-	return((uint32_t)rdtq.sdtqcnt);
+	return((uint32_t)rdtq.sdtqcnt + q->pend_cnt);	/* flush前の保留分も計上 */
+}
+
+/*
+ *  キューを空にする（FreeRTOS xQueueReset相当．NimBLE eventq_reset用）．
+ *  保留分もDTQへ出してから，格納中の全itemをprcv_dtqで取り出し，スロット
+ *  をプールへ返却する．
+ */
+void
+esp_shim_queue_reset(void *que)
+{
+	SHIM_QUE	*q = (SHIM_QUE *)que;
+	intptr_t	data;
+
+	if (q != NULL) {
+		esp_shim_queue_flush_pending();	/* 保留分もDTQへ出してから空にする */
+		while (prcv_dtq(q->dtqid, &data) == E_OK) {
+			shim_que_slot_free_notify(q, (uint32_t)data);
+		}
+	}
 }
 
 /*
@@ -677,7 +1142,11 @@ esp_shim_task_create(void (*entry)(void *), const char *name,
 					 uint32_t freertos_prio, void **task_handle)
 {
 	static const ID tskid_tbl[ESP_SHIM_NUM_TSK] = {
-		SHIM_TSK1, SHIM_TSK2, SHIM_TSK3, SHIM_TSK4, SHIM_TSK5, SHIM_TSK6
+		SHIM_TSK1, SHIM_TSK2, SHIM_TSK3, SHIM_TSK4,
+		SHIM_TSK5, SHIM_TSK6
+#ifdef TOPPERS_ESP32C5_BT_NIMBLE
+		, SHIM_TSK7, SHIM_TSK8
+#endif
 	};
 	uint_t		i;
 	SHIM_TSK	*t = NULL;
@@ -747,12 +1216,6 @@ esp_shim_task_delete(void *task_handle)
 void
 esp_shim_task_delay(uint32_t tick)
 {
-	/*
-	 *  tick（ms）をASP3のRELTIM（us）へ変換して待つ．C6版はここで
-	 *  wifi_trace.c（C6のAGC/deaf-RX調査専用の一時計装．本ポートでは
-	 *  移植しない．docs/c5-port-design.md §8.3）へ実測値を記録して
-	 *  いたが，C5では該当フックを持ち込まずクリーンな実装とする．
-	 */
 	(void) dly_tsk((RELTIM)(tick * 1000U));
 }
 
@@ -852,25 +1315,10 @@ esp_shim_timer_setfn(void *ptimer, void (*pfunc)(void *), void *parg)
 	}
 }
 
-/*
- *  DIAGNOSTIC（実施50，一時的）：esp_shim_timer_arm_usの呼出し頻度・
- *  要求us値を軽量カウンタで観測する（syslogバースト・ロス回避のため
- *  実施20と同じ「カウントのみ・まとめてダンプ」方式）．
- */
-volatile uint32_t	esp_shim_timer_arm_count;
-volatile uint32_t	esp_shim_timer_arm_us_min = 0xffffffffU;
-volatile uint32_t	esp_shim_timer_arm_us_last;
-
 void
 esp_shim_timer_arm_us(void *ptimer, uint32_t us, bool_t repeat)
 {
 	SHIM_TIMER	*t = shim_timer_find(ptimer, true);
-
-	esp_shim_timer_arm_count++;
-	esp_shim_timer_arm_us_last = us;
-	if (us < esp_shim_timer_arm_us_min) {
-		esp_shim_timer_arm_us_min = us;
-	}
 
 	if (t != NULL) {
 		SHIM_LOCK();
@@ -915,11 +1363,6 @@ esp_shim_timer_done(void *ptimer)
 /*
  *  タイマタスク本体（esp_shim.cfgのCRE_TSKで生成・起動）
  */
-volatile uint32_t	esp_shim_timer_task_loops;
-volatile uint32_t	esp_shim_timer_task_fn_calls;
-volatile uint32_t	esp_shim_timer_task_wait_min = 0xffffffffU;
-volatile uint32_t	esp_shim_timer_task_wait_last;
-
 void
 esp_shim_timer_task(EXINF exinf)
 {
@@ -929,8 +1372,6 @@ esp_shim_timer_task(EXINF exinf)
 		int64_t		next = 0;
 		void		(*fn)(void *) = NULL;
 		void		*arg = NULL;
-
-		esp_shim_timer_task_loops++;
 
 		/*
 		 *  期限到来タイマを1つ選ぶ（コールバックはロック外で実行）
@@ -958,7 +1399,6 @@ esp_shim_timer_task(EXINF exinf)
 		SHIM_UNLOCK();
 
 		if (fn != NULL) {
-			esp_shim_timer_task_fn_calls++;
 			fn(arg);
 			continue;			/* 他の期限到来タイマを続けて処理 */
 		}
@@ -970,10 +1410,6 @@ esp_shim_timer_task(EXINF exinf)
 			int64_t wait = next - now;
 			if (wait < 1000) {
 				wait = 1000;
-			}
-			esp_shim_timer_task_wait_last = (uint32_t)wait;
-			if ((uint32_t)wait < esp_shim_timer_task_wait_min) {
-				esp_shim_timer_task_wait_min = (uint32_t)wait;
 			}
 			(void) twai_sem(SHIM_TIMER_SEM, (TMO)wait);
 		}
@@ -1012,19 +1448,61 @@ esp_shim_set_isr(int32_t cpu_intno, void *handler, void *arg)
 
 volatile uint32_t esp_shim_int_count[ESP_SHIM_MAX_WIFI_INTNO + 1];
 
+/*
+ *  （D-2b(1) ISRストーム診断）実行時フラグ．既定0=無効なので通常ビルド
+ *  （WiFi/bt_smoke_hw）は完全に非回帰．appが1を書くとBLEコントローラ
+ *  ISR（CPU線1）発火ごとにRTC STORE4-7へストーム率とlevel割込みの
+ *  clear残存を記録し，esptool read-mem（JTAG不要）で事後読みする．
+ *    STORE4 0x600080B8 = esp_shim_int_count[1]（ストーム累積回数）
+ *    STORE5 0x600080BC = INTMTX CPU_INT_EIP_STATUS(0x600C2110) 入口
+ *    STORE6 0x600080C0 = INTMTX CPU_INT_TYPE(0x600C2108, bit1=線1のedge/level)
+ *    STORE7 0x600080C4 = INTMTX CPU_INT_EIP_STATUS 出口（blob ISR実行後）
+ *  出口でbit1が残る＝ソース未clear＝再発火＝ストーム（(i)クロックゲート
+ *  or (ii)シムISR-clear欠落の判別材料）．詳細＝docs/bt-shim.md Phase D-2b．
+ */
+volatile uint32_t esp_shim_isr_storm_probe;
+
 static void
 shim_int_dispatch(int intno)
 {
-	/*
-	 *  esp_shim_int_count[]はWi-Fi割込み線（1〜ESP_SHIM_MAX_WIFI_INTNO）
-	 *  ごとの発火総数．C6版はここでMAC割込みイベントレジスタ
-	 *  （0x600a4c48等，C6固有・実機JTAG調査で発見した未公開アドレス）を
-	 *  RTC RAMへ採取するdeaf-RX調査専用の診断計装を持っていたが，C5では
-	 *  持ち込まない（docs/c5-port-design.md §8.3「C6資産の非移植方針」．
-	 *  C5固有の調査が必要になった時点でC5の実アドレスに基づき新規に
-	 *  書き起こす）．
-	 */
 	esp_shim_int_count[intno]++;
+	if (esp_shim_isr_storm_probe != 0U && intno == 2) {
+		/*  （D-2b再開ラウンド）source多重登録修正（bt_shim.c）で2個目の
+		    BTソース（予測=source5:BT_BB）を線2へ分離した．線2の発火数を
+		    STORE2(0x60008058)へミラー＝esptool read-memで事後読み．
+		    線2が実際にディスパッチされる＝INTMTXルーティング着弾の
+		    機能的証拠（INTMTXレジスタ自体はusb-resetで初期化されるため
+		    事後読み不可）．  */
+		sil_wrw_mem((uint32_t *) 0x60008058UL, esp_shim_int_count[2]);
+	}
+	if (esp_shim_isr_storm_probe != 0U && intno == 1) {
+		/*  （D-2b(1)(a) BBステータス計装）BT_BB(source5)割込みの原因を判定
+		    する blob ISR（r_bt_bb_isr_hack）が読むBB割込みステータス
+		    レジスタ 0x6001108c を，ISR実行**前**（再アサートされた生の原因）に
+		    読んでRTCへ記録．どのビットが立ち続けるか＝ストームの原因．
+		      STORE4(0xB8)=ストーム累積回数
+		      STORE6(0xC0)=BB status 0x6001108c（ISR入口の生値）
+		      STORE7(0xC4)=これまで観測した全statusのsticky OR（取りこぼし防止）
+		    ※0xBC(STORE5)はROMがusb-reset時に上書きするため使用不可．  */
+		/*  ストームは99.997%がBB status(0x6001108c)=0のspurious＝真の源は
+		    blobの0x6001108cハンドラ外の低レベルBB線．blob ISR実行**後**に
+		    INTMTX EIP_STATUS(0x600C2110)のbit1(線1)が残るか＝BT_BB線が
+		    ack不能で立ちっぱなしか(=ハード/クロック要因)を判定する．
+		      0xB8=総ディスパッチ数
+		      0xC0=blob ISR実行後EIP_STATUSのsticky OR（bit1残存＝ack不能）
+		      0xC4=入口BB status 0x6001108c のsticky OR（原因bit）  */
+		uint32_t bbst = sil_rew_mem((const uint32_t *) 0x6001108CUL);
+		sil_wrw_mem((uint32_t *) 0x600080B8UL, esp_shim_int_count[1]);
+		sil_wrw_mem((uint32_t *) 0x600080C4UL,
+					sil_rew_mem((const uint32_t *) 0x600080C4UL) | bbst);
+		if (shim_isr_tbl[intno].fn != NULL) {
+			shim_isr_tbl[intno].fn(shim_isr_tbl[intno].arg);
+		}
+		sil_wrw_mem((uint32_t *) 0x600080C0UL,
+					sil_rew_mem((const uint32_t *) 0x600080C0UL)
+					| sil_rew_mem((const uint32_t *) 0x600C2110UL));
+		return;
+	}
 	if (shim_isr_tbl[intno].fn != NULL) {
 		shim_isr_tbl[intno].fn(shim_isr_tbl[intno].arg);
 	}
@@ -1076,8 +1554,7 @@ esp_shim_initialize(void)
 		 *  Bluetooth単体ビルド（ESP32C3_WIFI=OFF）はmbedtls/PSA Cryptoを
 		 *  リンクしないため，この初期化自体が不要（WPA2固有の問題）．
 		 */
-#if defined(TOPPERS_ESP32C3_WIFI) || defined(TOPPERS_ESP32C6_WIFI) \
-	|| defined(TOPPERS_ESP32C5_WIFI)
+#ifdef TOPPERS_ESP32C5_WIFI
 		{
 			psa_status_t st = psa_crypto_init();
 			if (st != PSA_SUCCESS) {
@@ -1086,6 +1563,6 @@ esp_shim_initialize(void)
 					   (int_t)st);
 			}
 		}
-#endif /* TOPPERS_ESP32C3_WIFI || TOPPERS_ESP32C6_WIFI || TOPPERS_ESP32C5_WIFI */
+#endif /* TOPPERS_ESP32C5_WIFI */
 	}
 }
