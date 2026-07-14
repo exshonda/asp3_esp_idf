@@ -1229,11 +1229,13 @@ ELFの`objdump -s`で静的に突合せ）．
   次段（効く保証なしの前提で）へ申し送る．
 
 
-## 13. IDF v6.1 matched-set swap（2026-07-15）— ビルド/リンク達成（トグル化・非破壊）
+## 13. IDF v6.1 matched-set swap（2026-07-15）— ★C6 D-1 達成（register_chipv7_phy 収束・HCI往復成立・2/2ブート，トグル化非破壊）
 
 §12 の申し送り「フォールバック＝v6.1 matched set swap（効く保証なし）」を
-実装したラウンド．**本節はまずビルド到達度を記録する（実機
-`register_chipv7_phy` 収束判定は §13.3 に追記）**．
+実装・実機検証したラウンド．**結論＝v6.1 matched set（bt/phy/coex/libble_app.a）へ
+swap すると §10-§12 の hal 版が踏んだ `register_chipv7_phy` RFシンセ非ロックが
+解消し，`esp_bt_controller_enable` OK ＋ HCI_Reset 往復成立＝C6 D-1 に到達した
+（board C・RTSリセット・2/2ブート再現．§13.5）．留保＝真cold未検証（暫定）．**
 
 ### 13.1 決定的事実：v6.1 esp32c6 bt.c は C3型（＝C5構成を範とする）
 
@@ -1308,4 +1310,51 @@ sys/param.h・esp_bit_defs.h に上記2件を加えた計7件．）
   `esp_bt.cmake` 改変は WIFI ビルドに非波及）．
 - **hal BT 回帰**（`ESP32C6_BT`＝トグル既定OFF）：リンク成功（既存hal本体を
   `else()` 内包しただけ＝D-2b 到達ビルド温存・可逆）．
+
+### 13.5 ★実機判定：v6.1 swap で register_chipv7_phy 収束＝**C6 D-1 達成（2/2ブート）**
+
+board C（`14:C1:9F:E0:5A:9C`，全ブートRTSリセット）に `build/c6bt_idf61/asp_flash.bin`
+をフラッシュ（esptool v4.12，`--before usb_reset --after no_reset --no-stub write_flash 0x0`，
+hash verified）→ USB-JTAG コンソール（pyserial・RTSパルスreset）で2ブート採取：
+
+```
+bt_smoke_c6: esp_bt_controller_enable OK (heap free=180240)
+bt_smoke_c6: intr trace = 0xa1020704 (nalloc=2 src1=7 src2=4)
+bt_smoke_c6: intr rate/1s line1=0 line2=0 (storm threshold ~ >>1000/s)
+bt_smoke_c6: controller enabled, sending HCI Reset
+bt_smoke_c6: VHCI recv 7 bytes  [0]=0x04 [1]=0x0e [2]=0x04 [3]=0x01 [4]=0x03 [5]=0x0c [6]=0x00
+bt_smoke_c6: HCI Command Complete received -> controller alive, VHCI loopback OK
+bt_smoke_c6: Phase D-1 milestone reached
+```
+
+- **収束＝MEASURED**：`esp_bt_controller_enable(BLE)` が **OK で返り**（§10/§11/§12 の
+  hal 版はここで `register_chipv7_phy` RFシンセ非ロック無限スピン），VHCI で
+  **HCI_Reset（opcode 0x0c03）→ HCI Command Complete（event 0x0e・status 0x00）の
+  往復が成立**．HCI 往復成立＝コントローラ＋RF が完全起動した直接証明
+  （0x600a00cc bit8 の register 読みより強い機能的証拠）．**= C6 D-1 達成**．
+- **割込み健全**：intr trace `0xa1020704`（nalloc=2・src1=7(RWBLE)・src2=4(BT_BB)）＝
+  C6/C5 D-1 の既知良好シグネチャと完全一致，storm 非発生（line1=0/line2=0）．
+  bt_shim_idf61.c の INTMTX/PLIC_MX スロット配列分離が機能．
+- **2/2 ブート再現**（RTSリセット）．**留保：全ブートRTSリセット（真cold未検証）＝
+  §10-§12 と同じ．earlier C6 D-2b が warm残留依存だった前例に鑑み，本収束も
+  「v6.1 D-1 under RTS，真cold はユーザーの物理電源断で要確認」＝暫定として扱う．**
+
+### 13.6 意味づけ（§12 の悲観を実機で更新）と board C 最終状態
+
+- **§12 の「効く保証なし」を実機が肯定側に更新**：hal libphy `register_chipv7_phy` は
+  §12 で「BT/WiFi 入力同一・非収束は関数内部」と確定していたが，v6.1 の
+  `libble_app.a`（enable 前セットアップ）＋v6.1 `libphy` へ揃えて swap すると収束した．
+  ＝非収束は **C6 シリコン固有ではなく hal matched set（libble_app.a/libphy）の
+  BT enable サブパスの版問題**に局在（C5実施09の libphy 版数不適合とは別種だが，
+  «hal 版 blob を v6.1 でまとめて置換すると解ける» という結果は C5 と同方向）．
+- **board C 最終 flash＝`build/c6bt_idf61`（v6.1 D-1 成功ビルド＝既知良好状態）**．
+  §11/§12 の `build/c6bt_fix`（hal・synth-lock ハング）には戻さない——本ラウンドで
+  D-1 を達成したため，成功ビルドを載せた状態で残す（task の「成れば v6.1 D-1
+  ビルド」に従う）．hal 版へ戻す必要が生じたら `ESP32C6_BT_IDF61=OFF` で再ビルド
+  または `build/c6bt_fix/asp_flash.bin` を再フラッシュ（トグルで両立・可逆）．
+- **hal 版との二択＝ユーザー判断として申し送り**：v6.1 D-1（本ラウンド達成）と
+  hal D-2b（NimBLE ホスト到達済みだが cold で synth-lock）はトグルで両立．次段の
+  D-2a 以降を v6.1 側で積むか，hal 側の synth-lock を別途詰めるかはユーザー選択．
+  v6.1 側で D-2* へ進む場合は本 esp_bt_idf61.cmake に C5 の NimBLE ブロック
+  （§8/実施05 相当）を転写する（今回は D-1 判定に不要のため未移植）．
 
