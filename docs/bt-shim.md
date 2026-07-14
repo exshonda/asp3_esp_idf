@@ -2452,3 +2452,27 @@ blob版/IDF stock コントローラでの2個目暗号化ACL挙動の対照、(
 関連の controller 設定・ROM 依存の確認、(c)暗号を要求しない運用（平文 GATT）での確定。
 key_dist は spec 準拠（ENC|ID）へ復帰。診断計装 evt_trace.c(ESP32C3_BT_EVT_TRACE)・
 100ms flush は残置（非回帰）。
+
+#### ★★★決定的逆転：stock ESP-IDF bleprph は «同じC3ボード・同じスマホ» で BOND 成立＝真因は silicon/controller «能力» でなく我々の統合 or blob版差
+真因を controller/silicon 層と結論しかけたが，反証のため **stock ESP-IDF v6.1 の
+`examples/bluetooth/nimble/bleprph`（CONFIG_EXAMPLE_BONDING=y・SM_SC=y＝我々と同じ
+sm_bonding/sm_sc/key_dist ENC|ID）を esp32c3 でビルドし，board B（60:55:F9:57:C2:60，
+BLE=`nimble-bleprph` 60:55:F9:57:C2:62）へ焼いて実機テスト**。
+
+**結果：ユーザーが nRF から Bond → «bonded» 成立**。＝**C3 コントローラは «複数暗号化
+パケット／鍵配布／永続 bond» を完遂できる**。∴ これまでの「controller/blob が2個目の
+暗号化 ACL を配送しない＝silicon限界」は **誤り**。真因は次のどちらか：
+- (A) controller blob «バージョン差»：我々=esp-hal-3rdparty 版
+  (`hal/components/bt/controller/lib_esp32c3_family/esp32c3/libbtdm_app.a` md5
+  `dfdadb9ddc12eeeab85edfb5d26eb4bf`)／stock IDF 版(同名 md5 `d9753a31a8eeac9…`)＝**別物**。
+- (B) 我々の統合（esp_shim os_adapter／手書き esp_bt_controller_config_t／init 手順）．
+
+我々のこれまでの反証（shim pend_ring/flush・host NimBLE・key_dist・NPLタイマ・
+トリガ経路 すべて無罪）は「NimBLE host 側は正しい」ことを示しており，残る差は
+**controller blob版 or controller直下の統合(config/HCI/os_adapter)** に絞られる。
+
+**次の決定的実験**：我々の ASP3 ビルドの controller blob を «IDF版» へ差し替えて
+（esp_bt.cmake の `-L${ESP_HAL_DIR}/.../lib_esp32c3_family` を IDF パスへ）bond テスト。
+成立→(A) blob版差が真因＝IDF blobへ差替が fix／不成立→(B) 我々の config/shim を
+stock IDF と突き合わせ（特に手書き controller config vs BT_CONTROLLER_INIT_CONFIG_DEFAULT，
+HCI host flow control）。実機ヘルパ tmp/c3ble.sh・診断計装 evt_trace.c は再利用可。
