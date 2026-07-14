@@ -723,3 +723,150 @@ storm probe転用という別経路であることに注意。）
    追記する（本リポジトリの取り決め——本ラウンドでは`docs/bt-shim.md`
    は変更していない）。C6/C5側の結果は本節（`docs/ble-c5c6-plan.md`
    「8. D-2c準備の横展開」）を更新する。
+
+## 9. D-2c/D-2d本体のC6移植（2026-07-14）
+
+C3で実機到達したD-2c（GATTディスカバリ開通・ACL経路のE_CTX修正
+`f9dae7d`）／D-2d（自前GATTサービスread/write/notify `1190be9`，
+SMP/bonding `da5d02d`/`ae21e7a`）をC6へ移植した．**実機は無い環境**
+（この環境にESP32-C6ボードは接続されていない）のため，完了条件は
+「コード移植＋この環境でのビルド（リンク）成功」．実機確認は次段
+（10節）へ持ち越す．C5側は本ラウンドでは対象外（前回ラウンドの静的
+移植のみで留め置き，IDF v6.1環境が無いため引き続き未ビルド）。
+
+### E_CTX修正のC6適用判断（最重要）
+
+`f9dae7d`はACL受信配送（`esp_nimble_hci.c`のOS_ENTER_CRITICAL区間）が
+bt-stubの`portENTER_CRITICAL`＝`esp_shim_enter_critical`＝生の
+`csrrci mstatus,8`（MIEクリア）を経由し，本RISC-Vポートの
+`sense_lock()==(mstatus.MIE==0)`によりCPUロック扱いとなって
+`tsnd_dtq`がE_CTXを返す→旧`esp_shim_queue_send`がE_CTXを検出できず
+黙って送信失敗を返す→NimBLEの`npl_freertos_eventq_put`がこの契約
+違反を検出できずイベントを取りこぼす，という**shared `wifi/esp_shim.c`
+のキュー実装（プラットフォーム非依存の欠陥）**の修正である
+（アプリ層でもコントローラ層でもなく，target/wifiシム層のバグ）。
+
+C6は同じ`asp3/target/esp32c6_espidf/wifi/esp_shim.c`を持ち（C3版と別
+コピー），`esp_shim_enter_critical`/`exit_critical`によるネスト対応
+クリティカルセクション実装も同一パターンで既に持っていた（BLE実施01
+で先取り実装済み）．しかし修正確認の結果，**C6は同型の欠陥を実際に
+抱えていた**：
+
+- `asp3/target/esp32c6_espidf/wifi/esp_shim.c`の`esp_shim_exit_critical()`
+  （修正前）は最外解除でMIEを`csrsi mstatus,8`により復帰するだけで，
+  `esp_shim_queue_flush_pending()`/`esp_shim_sem_flush_pending()`の
+  ような保留flushを一切呼んでいなかった。
+- `esp_shim_queue_send()`（修正前）は`shim_que_slot_alloc()`→
+  `tsnd_dtq()`のみで，E_CTX時のフォールバック（pend_ring・保留セマフォ
+  give）を持たない旧世代の実装のままだった（C3のD-2c以前と同型）。
+- `shim_sem_id`/`shim_mtx_id`/`shim_dtq_id`/`tskid_tbl`の各静的配列も
+  `#ifdef TOPPERS_ESP32C6_BT_NIMBLE`によるBT_NIMBLE分の追加スロット
+  （SEM25-28／MTX9-12／DTQ5-8／TSK7-8）を持たず，共有
+  `esp_shim_cfg.h`（`ESP_SHIM_NUM_SEM`等をNIMBLE時28/12/8/8へ拡張済み）
+  との整合が取れていなかった（配列初期化子が短く，末尾スロットのIDが
+  常に0＝未使用のまま）。
+
+これは「未検証のまま放置されていた同型バグ」であり，**C6の対応箇所に
+同型の欠陥があった**。真因の根（`sense_lock()==(mstatus.MIE==0)`と
+`portENTER_CRITICAL`がRISC-VのMIEを直接クリアするというasp3_core
+アーキ設計）はC3/C6で完全に共通のため，発現条件（BTクリティカル
+セクション内からの`tsnd_dtq`/`sig_sem`呼出し）が揃えば同じ症状
+（GATTディスカバリ未解決・暗号後の鍵配布ACL不達）が起き得ると判断し，
+**C3の現行`wifi/esp_shim.c`（`f9dae7d`＋その後のセマフォE_CTX修正
+`1b8e028`・SVC_PERROR診断込み）をC6版へ移植した**（下記「変更した
+ファイル」参照）。
+
+C5側の適用状況：C5は`asp3/target/esp32c5_espidf/wifi_v8/esp_shim.c`
+（`e139a30`でC3の現行版から再生成済み）に**既に**pend_ring・保留
+セマフォgive・SVC_PERROR診断のフル実装が入っている（`e139a30`は
+`f9dae7d`と`1b8e028`の**両方より後**のタイムスタンプでC3版を丸ごと
+再生成したため）。今回のC6移植はこのC5の適用形（＝現行C3版をchip
+差分のみ変えて丸ごと反映する方式）に合わせた。
+
+### 変更したファイル
+
+| ファイル | 内容 |
+|---|---|
+| `asp3/target/esp32c6_espidf/wifi/esp_shim.c` | **E_CTX修正（keeper）**：C3現行版のキュー実装（空きスロットセマフォ`SHIM_QSEM1-8`＋保留リング`pend_ring`＋`sem_debt`会計）・セマフォ保留give（`shim_sem_pend`）・`SVC_PERROR`（本ビルドは常時パススルー，診断オプション無し）をC6版へ移植．`esp_shim_exit_critical()`最外解除で`esp_shim_queue_flush_pending()`/`esp_shim_sem_flush_pending()`を呼ぶよう修正．`shim_sem_id`/`shim_mtx_id`/`shim_dtq_id`/`shim_qsem_id`/`tskid_tbl`の各配列へ`#ifdef TOPPERS_ESP32C6_BT_NIMBLE`拡張スロットを追加．C6固有部分（`esp32c6_systimer_read`・`WDEV_RND_REG`＝`0x600B2808`・`wifi_trace.h`計装・`esp_shim_modem_icg_init`・`shim_int_dispatch`のMAC割込み診断）は無変更で温存 |
+| `apps/ble_host_smoke_c6/ble_host_smoke_c6.c` | D-2c本体：自前サービス0xABF0（`0xABF1` READ "BT4-OK"／`0xABF2` READ\|NOTIFY 32bit LEカウンタ／`0xABF3` WRITE）＋`notify_tick`＋GAP SUBSCRIBE/MTU処理を追加（C3 `1190be9`の逐語移植）．D-2d本体：`TOPPERS_ESP32C6_BT_SM`ガードでSM設定（`ble_store_config_init`・`sm_io_cap=NO_IO`・`sm_bonding=1`・`sm_mitm=0`・`sm_sc=1`・鍵配布ENC\|ID）・`bt6_security_tick`（接続5秒後のslave SecReq）・ENC_CHANGE/PAIRING_COMPLETE/REPEAT_PAIRING/PASSKEY_ACTIONハンドラ・暗号必須特性`0xABF4`を追加（C5 `369a86a`のパターンをC6へ適用）．`main_task`をsync待ち後の定常ループ化（1秒周期notify/security tick＋100ms周期flush_pending，C3 `1190be9`と同型）．保留リングflush用externを追加 |
+| `asp3/target/esp32c6_espidf/esp_bt.cmake` | `option(ESP32C6_BT_SM ON)`をESP32C6_BT_NIMBLEブロック内に新設（C5 `ESP32C5_BT_SM`と同型）．ON時：`TOPPERS_ESP32C6_BT_SM`定義（`MYNEWT_VAL_BLE_SM_LEGACY/SC`の`-D`上書きをしない＝`bt_nimble_config.h`の`CONFIG_BT_NIMBLE_SM_LEGACY/SC`定義の**有無**で`esp_nimble_cfg.h`の`#ifdef`ゲートが1に倒れる仕組みを利用）．OFF時：従来通り`MYNEWT_VAL_BLE_SM_LEGACY=0`/`SC=0`を`-D`で明示上書き．tinycrypt（`aes_encrypt.c`/`cmac_mode.c`/`ecc.c`/`ecc_dh.c`/`utils.c`）＋`ble_store_config.c`をSM ON時のみ追加リンク，OFF時は従来通り`ble_store_ram.c` |
+| `asp3/target/esp32c6_espidf/bt/stub/include/bt_nimble_config.h` | `CONFIG_BT_NIMBLE_HS_PVCY 1`を追加（C3 `ae21e7a`／C5 `369a86a`系列の同一修正．PVCY=0だと`ble_sm.c`のresponder Identity鍵配布が丸ごとコンパイルアウトされ鍵配布ACL不達→30秒ETIMEOUTで bond不成立になる真因への対策）．`CONFIG_BT_NIMBLE_SM_LEGACY`/`SM_SC`/`SECURITY_ENABLE`/`LL_CFG_FEAT_LE_ENCRYPTION`の値そのものは変更していない（`#ifdef`ゲートの罠のため，値ではなく定義の有無とcmake側`-D`上書きの組合せで制御される．C5の`bt_nimble_config.h`と同型） |
+
+### マーカ表の更新（LP_AON STORE，C6）
+
+C6のLP_AON STORE0-9（`hal/components/soc/esp32c6/register/soc/
+lp_aon_reg.h`で実在確認．10個のみ，STORE10以降は非実在——C5が
+`2884922`で踏んだ「STORE10/11非実在」の教訓と同一の制約がC6にも
+適用される）は，本ラウンド開始時点で**既に0-9まで全て割当て済み**
+だった（STORE0 sync／STORE1 noise回避／STORE2 adv試行／STORE3
+adv-return rc／STORE4-5 割込みレートミラー／STORE6 reset_cb／STORE7
+intr_allocトレース／STORE8-9 CONNECT・DISCONNECT）．D-2c/D-2dで新規に
+必要なマーカ（WRITE受信・ENC_CHANGE・PAIRING_COMPLETE）に空きレジスタ
+が無いため，C5の`2884922`（ENC/PAIRINGをSTORE6共用へ切替えた前例）に
+倣い，**書込み頻度が低い既存レジスタをタグ判別で共用**した：
+
+| チップ | 用途 | アドレス（共用先） | 値フォーマット | 検証状態 |
+|---|---|---|---|---|
+| C6 | WRITE(0xABF3)受信 | `0x600B100C`（STORE3，adv-return rc共用．タグ`0xAD00`と`0x7717`で判別） | `0x7717<write_count:8><先頭byte:8>` | ビルド検証済み・実機未検証 |
+| C6 | ENC_CHANGE | `0x600B1018`（STORE6，reset_cb共用．タグ`0x5E00`と`0x5DE0`で判別） | `0x5DE0<status:8>` | ビルド検証済み・実機未検証 |
+| C6 | PAIRING_COMPLETE | `0x600B101C`（STORE7，intr_allocトレース共用．タグ`0xA1`と`0x5DC0`で判別） | `0x5DC0<status:8><our_sec:4><peer_sec:4>` | ビルド検証済み・実機未検証 |
+
+（STORE3/STORE6/STORE7はいずれも「接続中・pairing中は再書込みされない
+（または稀）」という性質を根拠に選定した——C3が`intr_alloc`トレース用
+レジスタ0x54をPAIRING_COMPLETEに転用したのと同じ考え方．STORE8/9
+（CONNECT/DISCONNECT）は既存のまま変更なし。）
+
+### ビルド結果一覧
+
+全ビルドは本開発環境（`riscv64-unknown-elf-gcc 13.2.0`，
+`-DCMAKE_C_FLAGS=-Wno-error=implicit-function-declaration`要，gcc-15系
+implicit-function-declarationの既知事象は本ラウンド範囲外）で実施．
+
+| 構成 | オプション | 結果 | FLASH | RAM |
+|---|---|---|---|---|
+| C6 D-2c（GATTサービス，SM無し） | `-DASP3_TARGET=esp32c6_espidf -DESP32C6_BT=ON -DESP32C6_BT_SM=OFF -DASP3_APPLDIR=apps/ble_host_smoke_c6 -DASP3_APPLNAME=ble_host_smoke_c6` | 0エラー | 353968B (8.44%) | 303716B (71.99%) |
+| C6 D-2d（GATTサービス＋SM/tinycrypt） | 同上＋`-DESP32C6_BT_SM=ON` | 0エラー | 390704B (9.32%) | 305092B (72.32%) |
+| 回帰：C6 bt_smoke_c6（コントローラのみ） | `-DASP3_APPLDIR=apps/bt_smoke_c6 -DASP3_APPLNAME=bt_smoke_c6 -DESP32C6_BT=ON` | 0エラー | 302448B (7.21%) | 277760B (65.84%) |
+| 回帰：C6 wifi_scan（共有esp_shim.c変更の確認） | `-DASP3_APPLDIR=apps/wifi_scan -DASP3_APPLNAME=wifi_scan -DESP32C6_WIFI=ON` | 0エラー | 543696B (12.96%) | 377496B (89.48%) |
+| 回帰：C3 ble_host_smoke（無改造，wip 8476b55＋D-2c/D-2d本体） | `-DASP3_TARGET=esp32c3_espidf -DESP32C3_BT=ON -DASP3_APPLDIR=apps/ble_host_smoke -DASP3_APPLNAME=ble_host_smoke` | 0エラー | IROM 249264B(5.94%)/DROM 276976B(6.60%) | 306492B (93.53%) |
+
+D-2c→D-2dのRAM増分は約1376B（tinycrypt 5ソース＋`ble_store_config.c`＋
+SM関連コード分）．C6のRAM残量はWiFi版（89.48%）より大幅に低い
+（72%台）ため，「C6はRAM残量が厳しい」というD-2c準備時点の懸念
+（71.86%）は据え置きだが，SM追加分だけで溢れる兆候は無い（C5/C3が
+使った特別な削減策の移植は今回不要だった）。
+
+### 実機確認待ち事項（次段）
+
+1. **E_CTX修正の実機効果**：C6は元々D-2c相当までしか実機到達して
+   いない（GAP CONNECT/DISCONNECTマーカのビルド検証のみ・接続確立の
+   実機確認は本ラウンドまで未実施）ため，「修正前は本当にGATT
+   ディスカバリが詰まっていたか」はC3のような修正前後比較ができて
+   いない（C6は今回が初のGATTサービス＋E_CTX修正込みの実機投入と
+   なる）。次段で`ble_host_smoke_c6`（D-2c構成）を実機board Cへ書込み，
+   ホストPCの`bluetoothctl`で`ServicesResolved=true`＋自前サービス
+   `0xABF0`のディスカバリを確認すること。
+2. **WRITE/ENC_CHANGE/PAIRING_COMPLETEマーカの共用設計の実地検証**：
+   タグ判別（上位ニブル/バイト）による設計は机上では安全なはずだが，
+   実機での`esptool read-mem`による確認は未実施。特にSTORE3（adv-return
+   rcとWRITE共用）は，central側が意図的にdisconnect→再scan→connectを
+   繰り返すテスト手順だと再advでrcマーカに上書きされるタイミングが
+   シビアになりうる（単発dump-mem採取のタイミングに注意）。
+3. **D-2d bond実機確認**：C3の`da5d02d`/`ae21e7a`はC3/C5の共通
+   `esp_shim`起因ではなく`CONFIG_BT_NIMBLE_HS_PVCY`（NimBLEホスト設定）
+   起因と判明した真因のため，チップ非依存の設計上はC6でも同様の効果
+   （`sm_tx>0`でIdentity鍵配布が成立しbondが通る）が期待できるが，
+   **C6実機でのbond成功はまだ未実証**。C5実機ヘルパ`tmp/c5ble.sh`を
+   参考にC6用ヘルパ（`tmp/c6ble.sh`，chip=esp32c6，ASP3_APPLDIR=
+   apps/ble_host_smoke_c6，`ESP32C6_BT=ON -DESP32C6_BT_SM=ON`）を用意し，
+   C5と同じ手順（`bluetoothctl`の`agent NoInputNoOutput`→`default-agent`
+   →`connect`→（暗号必須特性`0xABF4`のreadで`pair`を誘発，または
+   `bt6_security_tick`の自発的SecReqを待つ）→`0x600B1018`
+   （ENC_CHANGE，タグ`0x5DE0`）・`0x600B101C`（PAIRING_COMPLETE，タグ
+   `0x5DC0`）を`esptool --before usb-reset --after no-reset read-mem`で
+   確認）で実機再テストすること。
+4. **read/write/notifyの実機確認**：`0xABF1`（READ "BT4-OK"）・
+   `0xABF2`（NOTIFY，subscribe後1秒周期カウンタ）・`0xABF3`（WRITE，
+   `0x600B100C`のタグ`0x7717`で確認）をC3と同じ`bluetoothctl`手順
+   （`gatt.select-attribute`／`read`／`notify on`／`write`）で確認する
+   こと。

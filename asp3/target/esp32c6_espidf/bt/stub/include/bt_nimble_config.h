@@ -105,6 +105,21 @@
 #define CONFIG_BT_NIMBLE_HS_FLOW_CTRL_THRESH 2
 #define CONFIG_BT_NIMBLE_HS_FLOW_CTRL_TX_ON_DISCONNECT 0
 #define CONFIG_BT_NIMBLE_HOST_BASED_PRIVACY 0
+/*
+ *  ★D-2d bond修正（C3 da5d02d／ae21e7aのC6移植．docs/bt-shim.md「D-2d
+ *  bond真因確定」）：MYNEWT_VAL(BLE_HS_PVCY)が0だとble_sm.c:2365-2426の
+ *  «responderのIdentity鍵配布（Identity Info/Addressのble_sm_tx）»が丸ごと
+ *  `#if MYNEWT_VAL(BLE_HS_PVCY)`でコンパイルアウトされる．SCでは
+ *  ble_sm_key_distがENCフラグをクリアするため，our_key_dist=ENC|IDでも
+ *  «送る鍵が1つも残らず»ble_sm_tx=0＝Pairing Responseで約束したIdentity鍵を
+ *  送れずpeerが待ち→30s SM timeout→ENC_CHANGE ETIMEOUTでbond不成立
+ *  （C3/C5実機RXTRACEで確定．C5は実機bond成功で本修正を実証済み）．
+ *  working S3もCONFIG_BT_NIMBLE_HS_PVCY=1を設定．HOST_BASED_PRIVACY
+ *  （RPA解決変種）はbondingには不要のため0のまま．ble_hs_pvcy.c／
+ *  ble_hs_resolv.cはesp_bt.cmakeに既にリンク済＝1でbody有効化・
+ *  undefined refなし．
+ */
+#define CONFIG_BT_NIMBLE_HS_PVCY 1
 #define CONFIG_BT_NIMBLE_SM_LVL 0
 #define CONFIG_BT_NIMBLE_SMP_ID_RESET 0
 #define CONFIG_BT_NIMBLE_SM_SC_DEBUG_KEYS 0
