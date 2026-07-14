@@ -175,6 +175,25 @@ raw_systimer_lo(void)
     有無で判別（alloc トレースは 0x5DC0xxxx を生成しない）．  */
 #define BLE_PAIR_MARK_ADDR	((void *) 0x60008054UL)
 
+/*
+ *  ★一時計装（広告非到達 判別ラウンド・既定OFF＝TOPPERS_C3_BOOT_TRACE 未定義時は
+ *  no-op で非回帰）：Direct Boot / download-latch 脱出と «main_task の停止点» を
+ *  無条件マーカで確定する．STORE2(0x60008058)へ 0xB00000NN の進捗コードを順に
+ *  上書き＝到達した最遠点が残る．cbr.sh がブート前に 0x58 を sentinel(0xCA5E0058)
+ *  でプリロードするため:
+ *    0x58=0xCA5E0058 → main_task 未到達＝latch（かつ RTC survive/read 経路健全）
+ *    0x58=0            → 測定無効（RTC 非生存 or 書込み不達．latch と誤読しない）
+ *    0x58=0xB00000NN   → 起動．NN と 0x54(alloc)/0x50(sync) で停止点を確定
+ *  NN: 1=main_task entry 2=clock_init後 3=controller_init直前 4=init OK
+ *      5=enable OK 6=nimble_init OK 7=host task起動（sync待ち）
+ *  0x54=0xA1020805(bt_shim alloc trace)は controller_init 中に立つ＝NN3〜4間の
+ *  細分点．0x50=0x5ADE51C0 は sync 到達．  */
+#ifdef TOPPERS_C3_BOOT_TRACE
+#define BOOT_TRACE(nn)	sil_wrw_mem((void *) 0x60008058UL, 0xB0000000UL | (uint32_t) (nn))
+#else
+#define BOOT_TRACE(nn)	((void) 0)
+#endif
+
 static int gap_event_cb(struct ble_gap_event *event, void *arg);
 
 /*
@@ -652,6 +671,8 @@ main_task(EXINF exinf)
 
 	(void) exinf;
 
+	BOOT_TRACE(1);		/* ★無条件起動マーカ：main_task 到達＝latch 脱出 */
+
 	esp_shim_initialize();
 	esp_shim_coex_adapter_register();
 
@@ -687,6 +708,7 @@ main_task(EXINF exinf)
 	 *  （bt_smoke と同じ．詳細はdocs/bt-shim.md）．
 	 */
 	esp_shim_bt_clock_init();
+	BOOT_TRACE(2);		/* ★clock_init 通過 */
 
 	/*
 	 *  BLEコントローラ設定（apps/bt_smoke と同一の手書き値．
@@ -747,6 +769,7 @@ main_task(EXINF exinf)
 	    probeの連続RTC書込みを止める（probe=0でも割込み配送自体は不変）．  */
 	esp_shim_isr_storm_probe = 0U;
 #endif
+	BOOT_TRACE(3);		/* ★controller_init 直前（このあと 0x54 alloc trace が立つ） */
 	syslog(LOG_NOTICE, "ble_host_smoke: esp_bt_controller_init");
 	err = esp_bt_controller_init(&cfg);
 	if (err != ESP_OK) {
@@ -754,6 +777,7 @@ main_task(EXINF exinf)
 			   (int_t) err);
 		return;
 	}
+	BOOT_TRACE(4);		/* ★controller_init OK */
 
 	syslog(LOG_NOTICE, "ble_host_smoke: esp_bt_controller_enable(BLE)");
 	err = esp_bt_controller_enable(ESP_BT_MODE_BLE);
@@ -762,6 +786,7 @@ main_task(EXINF exinf)
 			   (int_t) err);
 		return;
 	}
+	BOOT_TRACE(5);		/* ★controller_enable OK（C6 の PHY-init ハングはここで停止する） */
 
 	/*
 	 *  NimBLE ホストスタックを初期化（コントローラは既に起動済みなので
@@ -775,6 +800,7 @@ main_task(EXINF exinf)
 		syslog(LOG_ERROR, "ble_host_smoke: esp_nimble_init -> %d", (int_t) err);
 		return;
 	}
+	BOOT_TRACE(6);		/* ★esp_nimble_init OK */
 
 	/*
 	 *  D-2c：標準GAP／GATTサービスを登録する（接続後にホストから
@@ -834,6 +860,7 @@ main_task(EXINF exinf)
 
 	syslog(LOG_NOTICE, "ble_host_smoke: nimble_port_freertos_init");
 	nimble_port_freertos_init(ble_host_task);
+	BOOT_TRACE(7);		/* ★host task 起動＝sync 待ち（あとは 0x50 sync 到達を待つ） */
 
 	syslog(LOG_NOTICE, "ble_host_smoke: init done, waiting for ble_hs SYNC");
 
