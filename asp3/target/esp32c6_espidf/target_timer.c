@@ -99,9 +99,17 @@ target_hrt_handler(void)
 	}
 
 	/*
+	 *  ★「no time event」氾濫の根治（実施04）：発火後にアラームを disarm
+	 *  （WORK_EN=0）してから割込みをクリアする．oneshot は発火後も自動解除
+	 *  されず，comparator target が過去になると level 再ラッチしてスプリアス
+	 *  再発火→signal_time→time event 無し→syslog 氾濫を生む．先に disarm して
+	 *  再ラッチ源を断ってから int をクリアする（次の target_hrt_set_event が
+	 *  クリーン再arm する）．
+	 *
 	 *  SYSTIMER側とFROM_CPU_0側（強制割込み）の両方をクリアする
 	 *  （どちらも同じCPU割込み線にマップされたlevelソース）
 	 */
+	systimer_ll_enable_alarm(&SYSTIMER, 0U, false);
 	systimer_ll_clear_alarm_int(&SYSTIMER, 0U);
 	sil_wrw_mem((void *)ESP32C6_INTPRI_CPU_INTR_FROM_CPU_0, 0U);
 	signal_time();
