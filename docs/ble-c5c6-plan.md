@@ -1836,3 +1836,76 @@ ranked candidates（次ラウンド，disproof-first で）：
   `c6_ocd_powerst.log`（C6-BT synth 直前 LPCON/POWER_ST），
   `c6_wifiscan_synth.log`（wifi_scan synth 領域），`c5_boot1.log`
   （C5 コンソール＝氾濫）。
+
+## 18. §14「RSSI-82 実放射成功」の再現試験＋SM/GCC delta 二分——★SM でも GCC でもなく C6 固有と確定，regi2c トレース計装を追加（2026-07-16）
+
+### 18.0 新事実（親＋ユーザーが物証発見）＝§16 の「マーカ依存」結論を §14 では覆す
+
+`docs/ble-c5c6.md:753`（§14＝commit `7d699ac`）に，ホスト hci0 の
+bluetoothctl scan で **`[NEW] Device 14:C1:9F:E0:5A:9C ASP3-C6-BLE`
+（RSSI -82，ASP3-C3-BLE も同時陽性対照）** の «実放射受信» 記録がある
+＝マーカでなく現放射。∴C6 は synth-lock を «取れたことがある»＝現在の
+8/8 ハングは «永久不能» でなく «回帰 or 非決定»。§14 成功 config と現在の
+失敗の差は当初2点に見えた：(1) SM ON/OFF，(2) GCC 14.2.0/15.2.0。
+
+### 18.1 ★GCC は無罪（C5 で確定）
+
+**動作する C5-BT（v9・bond 成功・BlueZ 可視，§17）は現行 xpack
+`riscv-none-elf-gcc-15.2.0` でビルドされている**（`build/c5ble` 痕跡）＝
+ハング中の C6 と同一 GCC。C5 が同 GCC で `register_chipv7_phy` を収束
+＝**GCC 15 は BLE synth-lock に対し proven-good**。∴§14→現在の delta は
+GCC 版ではない（GCC-14 install は不要・格下げ）。
+
+### 18.2 ★SM も無罪：§14 exact config（NIMBLE-on / **SM-OFF**）を現行 xpack-15 で再現＝3/3 ハング
+
+§16 の 8/8 は «SM-ON 版（build/c6ble）» と «D-1-only（bt_smoke_c6・
+NimBLE 無し）» で，**§14 の «NIMBLE-on / SM-off» exact config は未 retest**
+だった（親指摘）。これを厳密再現：
+
+- ビルド：`ESP32C6_BT_IDF61=ON`＋NIMBLE auto-on（app=`ble_host_smoke_c6`）
+  ＋**`ESP32C6_BT_IDF61_SM` 非指定＝SM OFF**（`build/c6_s14`）。SM 非リンク
+  確認＝`ble_sm_pair_initiate`/`tc_aes_encrypt` シンボル 0 個。RAM 72.02%
+  （§14 D-2b の 72.35% と実質一致）。§14 の GCC14 対応フラグ
+  （`npl_os_bridge.h`・`-DTRUE=1 -DBT_HCI_LOG_INCLUDED=0` 等）は
+  `ESP32C6_BT_IDF61_NIMBLE` 下で自動適用済（既に commit 済のツリー）。
+- 実機 board C・**物理電源断 cold boot ×3**（usbhub port1 off 8s→on）：
+
+| cold boot | 結果 |
+|---|---|
+| 1 | `esp_bt_controller_enable(BLE)` 直後でハング（`controller_enable OK`/sync/adv 出力ゼロ）。JTAG halt：PC=`0x42040458`＝`ram_set_chan_freq_sw_start` 内，`0x600a00cc`=`0x25824e50`（bit8=0＝synth 未ロック） |
+| 2 | 同上（enable(BLE) 到達・progression ゼロ） |
+| 3 | 同上 |
+
+**∴§14 の exact SM-off config も現行 toolchain で 3/3 ハング＝SM は delta
+ではない。** GCC（§18.1）と併せ，**§14→現在の delta は SM でも GCC でも
+なく «C6 固有»**（§17 の RF-analog/PLL synth-lock 経路）と確定。§14 の
+RSSI-82 成功は，同一ソース・同一 config・同一 toolchain から現在は
+再現しない＝§16.7(b)「§14 成功自体が warm-residual／非決定な一回性」
+の線が最有力に。
+
+### 18.3 regi2c トレース計装を追加（§18 の C6 固有調査＝本命の基盤）
+
+C5(動作) vs C6(ハング) の regi2c-write 差分採取のため，`register_chipv7_phy`
+が RF-cal に使う ROM regi2c 関数テーブル `g_phyFuns`（C6 固定
+`0x4087f954`＝実施23，本ラウンド rev v0.2 実機で idx20/22/23/24 に
+ROM regi2c ポインタ載ることを再確認）の write/write_mask 枠を自前ラッパへ
+直パッチする計装を新設（C6 は `--wrap` 不可＝実施23）：
+
+- 新規 `asp3/target/esp32c6_espidf/bt/esp_bt_regi2c_trace.c`（passive
+  素通し＋`(op,block,reg,msb,lsb,host,data,caller-PC)` を .bss リング
+  `btr_buf[]` へ記録）。新 option `ESP32C6_BT_REGI2C_TRACE`（既定 OFF）＋
+  app 呼出し（`TOPPERS_ESP32C6_BT_REGI2C_TRACE` ガード，`controller_init`
+  直前）。
+- `build/c6bt_regi2c`（bt_smoke_c6・D-1）で実機確認：JTAG で
+  `btr_magic`=`0x42545231`（"BTR1"＝差替え成功）＝ラッパが結線され
+  regi2c write が捕捉可能な状態を確認。JTAG 読取り対象＝
+  `btr_magic`(0x40819458)/`btr_count`(0x40819454)/`btr_buf`(0x4084a0f8)。
+
+### 18.4 board C 現状・次段
+
+- board C（port1）：現在 `build/c6_s14`（§14 exact SM-off config）が
+  flash 済み（ハング状態）。regi2c トレース採取には `build/c6bt_regi2c`
+  を再 flash。
+- 次段（優先）：C5(動作) vs C6(ハング) の regi2c-write 差分を on-device
+  採取（両者 GCC15・v9＝有効比較）→ C6 固有の欠落/異値 synth 設定を特定
+  → 補完 → synth-lock bit8 の cold-boot 収束率で反証（host BT 不要）。
