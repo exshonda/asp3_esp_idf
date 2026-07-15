@@ -100,3 +100,40 @@
 - **最小策（当面現状維持）**：`.gitmodules`/README に「hal `b90b183` =
   esp-hal-3rdparty `release/master.c` = NuttX master pin(2026-07-15) = IDF 6.1.0・
   mbedtls 4.0」と記録。曖昧さの実害を消す。
+
+## 8. ブート方式（ESP32-S3/無印 は C3 と topology が変わる）
+
+M5Stack 案件（ESP32-S3/無印）で「app_main 等のブートを可能な限り IDF に寄せるか」
+への回答。「ブート」を分離して考える：
+
+- **(a) ハードウェア立ち上げ**：二段ブートローダ、クロック/PLL、フラッシュ MMU・
+  キャッシュ、**PSRAM 初期化**、brownout、efuse——スケジューラ起動前の OS 非依存部。
+- **(b) OS スケジューラ起動**：`main_task` 生成 → FreeRTOS scheduler start → `app_main`。
+
+**方針：(a) は IDF を最大限使う／(b) app_main は使わない。**
+
+- **(b) app_main / FreeRTOS＝不使用**：app_main は FreeRTOS スケジューラ起動後に走る
+  main_task であり、採用＝FreeRTOS をカーネルにすること。ASP3 がカーネルという前提と
+  矛盾（2スケジューラが CPU を同時所有不可）。**ASP3 のカーネル起動（sta_ker）が
+  app_main の位置を置き換える**。
+- **(a) HW 立ち上げ＝IDF を使う（S3 では事実上必須）**：ESP32-S3/無印は **Xtensa で
+  ROM Direct Boot を持たない**（S3 公式 startup ドキュメントに Direct Boot 記述なし＝
+  通常の二段ブートローダ経由。一次確認済み）。∴ C3 の「二段ブートローダ無しの自前
+  Direct Boot」は移植不可。フラッシュ MMU/キャッシュ・クロック・PSRAM を立ち上げる
+  二段ブートローダが必要で、M5 は PSRAM にフレームバッファを置く（M5GFX）ため S3 の
+  PSRAM/キャッシュ初期化は非自明＝成熟した **IDF ブートローダ＋スケジューラ前の
+  `esp_system` HW init を借りる**のが合理的。C3 より IDF ブート依存が増えるのは正しい。
+- **ハンドオフ線**：ROM → IDF 二段ブートローダ → `esp_system` HW init まで IDF、
+  **IDF が `esp_startup_start_scheduler`（main_task 生成＋FreeRTOS 起動＋app_main）に
+  入る直前で分岐し ASP3 カーネル起動へ渡す**。app_main の手前で止める。
+- **却下済み代替**：IDF で app_main まで起動し ASP3 を FreeRTOS タスクとして動かす
+  ホステッド方式＝二重スケジューラ・tick 競合・割込み配送衝突でハード RT が壊れる。
+  「FreeRTOS 不使用」で排除済み。
+- **混同禁止**：M5/Arduino ライブラリの FreeRTOS 呼出し（task/queue/`vTaskDelay`）は
+  **実行時**の話＝ASP3 上の FreeRTOS 互換シムで解く。app_main とは別レイヤ。
+
+∴ topology は C3 と変わる：C3＝ブートローダ無し・HW init も自前 → S3/無印＝**IDF 二段
+ブートローダで HW/PSRAM を立ち上げ、app_main 直前で ASP3 へ渡す**。「可能な限り IDF を
+使う」は **(a) HW 立ち上げは Yes、(b) app_main/スケジューラは No**。
+
+担当エージェント向けの作業ブリーフ＝`docs/esp32s3-integration-brief.md`。
