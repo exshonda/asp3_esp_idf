@@ -2752,3 +2752,19 @@ guest @0x200000，`--after no-reset` で未起動）．
      ＝handoff 機構が cold で失敗（要修正）．
    - `STORE6` も無し＝stock 早期失敗．
    反証＝各試行の直前に必ず親の真電源断で cold 保証（§19 教訓）．
+
+### §20.8 ★親による cold Arm B（LP_AON マーカ観測）：cold では «handoff 機構» も失敗（jump 到達も guest 未起動）
+サブエージェントが LP_AON マーカ計装（USB flap 回避）を staged→親が port1 真の電源断 12秒→投入
+（reflash せず＝cold Arm B 一発目）→esptool read-mem：
+- **STORE1(stage)=`0x5a6e0000`（sentinel のまま＝guest main_task «未到達»）**
+- **STORE6(stock jump)=`0x570c0002`（stock は jump 点到達）**
+- STORE0(synth)/STORE2/STORE3=0（guest 未実行＝何も書かず）・BlueZ で ASP3-C6-BLE 不在。
+∴判別基準で «jump 到達だが guest 未起動＝**cold で handoff 機構（jump→guest 起動）が失敗**»。
+warm の Arm A/B «成功» は warm 交絡（standalone も warm で動いた §19.7）で、**handoff は一度も cold で
+実証されていなかった**＝cold では jump が guest を起動できない。
+
+**C6 BT cold の壁マップ（現状）**：standalone=phy_init ハング（PLL 非ロック）／pmu_init 移植=一部
+landed だが不十分／handoff=cold で jump→guest 失敗／stock BT 単体=cold でもロック（ソフト到達可能は
+存在）。＝**この cold アナログ PLL/RF ロックは C5・C6-WiFi でも deferred-unsolved の同一 hard wall**。
+根因（Direct Boot が stock の pmu_init/完全アナログ初期化を飛ばす）と修正方向（pmu_init 完全移植）は
+確定・pmu_init 土台も実装済だが、cold 実現は多面的な hard wall。
