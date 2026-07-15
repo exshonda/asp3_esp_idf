@@ -10559,3 +10559,42 @@ configure/build：
 - 編集：`target.cmake`（v9機構の除去・v8固定化・stale参照更新）。
 - `wifi_v8/`・esp_shim(v8)・net・lwIP・submodule・C3 BLE 関連は**無変更**。
   v9 の履歴は git 及び本ドキュメント実施08〜49 に残る。
+
+## 実施53：C5「正典（canonical）」コンパイラを実測で確定——xpack `riscv-none-elf-gcc` 15.2.0 で WiFi(scan)＋BLE(adv) 両方を同一セッションで実機実証。詳細は `docs/c5-toolchain.md`
+
+### 背景
+
+C5/C6 の BLE PHY-init（`register_chipv7_phy`）でツールチェーン依存が議論に
+なったため，「C5 は WiFi/BLE とも動く実績がある」その動作コンパイラを
+実測で固定し，C6 側議論の基準にする（C6 board には不接触・別タスク）。
+
+### 実測（本日・tree HEAD＝`ae21e7a`時点，board=C5#1 `d0:cf:13:f0:a7:44`）
+
+- **BLE**：`tmp/c5ble.sh build ble_host_smoke_c5`（xpack 15.2.0）→ link 0エラー，
+  RAM 77.80%。flash→boot 後，ホスト側 BlueZ `bluetoothctl devices` に
+  **`Device D0:CF:13:F0:A7:44 ASP3-C5-BLE`** が出現（放射・adv 実証。同時に
+  43台の近隣デバイスが見えており受信側の健全性も確認）。
+- **WiFi**：`tmp/c5wifi.sh build wifi_scan`（xpack 15.2.0，`-DESP32C5_WIFI=ON`＝
+  既定 hal(v8)）→ link 0エラー，RAM 76.05%（実施48-52の~76%と整合）。flash→boot
+  後，UART0(ttyUSB3)を pyserial `dtr=False,rts=False`（`cat`/`stty`はDTR/RTS
+  assertで0バイトになる既知の罠．`c5wifi.sh console`で実装）で読み，
+  **`wifi_scan: 20 APs found (err=0)`**＋実SSID一覧（`<SSID-INST-1X>`/`<SSID-INST>`/
+  `<SSID-EDU>`等，rssi -48〜-49）を確認。WDT/panicなし＝board latch無し。
+- 両方とも**マーカ単独ではなく受信側／コンソールの実測**（advisor指摘の
+  「LP_AONマーカは過去到達の証明にしかならない」を踏まえた判定）。
+
+### 結論
+
+**C5 の正典コンパイラ＝xpack `riscv-none-elf-gcc` 15.2.0**
+（`~/opt/tools/xpack-riscv-none-elf-gcc-15.2.0-1/bin`，prefix `riscv-none-elf-`）。
+WiFi(scan)・BLE(adv) の双方を同一ツリー・同一セッションで実機動作実証済み。
+xpack15 で両方成功したため，Espressif `riscv32-esp-elf` 14.2.0/15.2.0 は
+本ラウンドでは試していない（計画の条件分岐＝失敗時のみ追加検証。詳細と
+可否表は `docs/c5-toolchain.md`）。
+
+### 変更ファイル（実施53）
+
+- 新規 `tmp/c5wifi.sh`（`c5ble.sh` の WiFi 版。build/flash/boot/console
+  ヘルパ。console サブコマンドは pyserial dtr/rts=False 読み取りを実装）。
+- 新規 `docs/c5-toolchain.md`（正典コンパイラ・動作表の正本）。
+- ソース非変更（`asp3/`・`hal/` 不接触）。認証情報は不要（wifi_scan はopen scanのみ）。

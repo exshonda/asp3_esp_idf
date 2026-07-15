@@ -26,6 +26,11 @@ BOARD_MAC="${BOARD_MAC:-D0:CF:13:F0:A7:44}"		# C5#1
 PORT="/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_${BOARD_MAC}-if00"
 
 REPO="/home/honda/TOPPERS/asp3_esp_idf"
+#  ★C5の正典（canonical）コンパイラ＝xpack riscv-none-elf-gcc 15.2.0（固定）。
+#  実施53(docs/c5-bringup.md)・docs/c5-toolchain.mdで実測確定：同一ツリー・
+#  同一セッションでWiFi(wifi_scan,tmp/c5wifi.sh)とBLE(本script)の両方が
+#  実機動作（BlueZ可視・AP検出）を実証．esp-14.2/esp-15.2は未検証(xpack15で
+#  両方PASSのため計画上不要)．変更する場合はdocs/c5-toolchain.mdの動作表を要更新。
 GCC_BIN="/home/honda/opt/tools/xpack-riscv-none-elf-gcc-15.2.0-1/bin"
 ESPTOOL="/home/honda/tools/espressif/python_env/idf6.1_py3.12_env/bin/esptool"
 BUILD="${C5BLE_BUILD:-$REPO/build/c5ble}"
