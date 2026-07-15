@@ -254,6 +254,21 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     ${ESP_HAL_DIR}/components/hal/${BT_CHIP_SERIES}/efuse_hal.c
 )
 
+#
+#  §18：RF-cal regi2c トレース計装（既定 OFF・非回帰）．g_phyFuns テーブル
+#  （0x4087f954）の write/write_mask 枠を差し替え，synth 位相の regi2c write
+#  列を .bss リングバッファへ記録する．synth-lock ハング（§16/§17）の
+#  C5-vs-C6 diff 用．app が esp_bt_regi2c_trace_install() を controller_init
+#  より前に呼ぶ（TOPPERS_ESP32C6_BT_REGI2C_TRACE で app 側呼出しをガード）．
+#
+option(ESP32C6_BT_REGI2C_TRACE "Trace RF-cal regi2c writes via g_phyFuns table patch (§18 synth-lock diag)" OFF)
+if(ESP32C6_BT_REGI2C_TRACE)
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_BT_REGI2C_TRACE)
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${BT_TARGETDIR}/esp_bt_regi2c_trace.c
+    )
+endif()
+
 if(NOT ESP32C6_BT_IDF61_NIMBLE)
     #  ★D-1＝controller-only スモークテスト（NimBLE ホスト無し）限定．
     #  CONFIG_BT_CONTROLLER_ONLY と CONFIG_BT_NIMBLE_ENABLED は実ESP-IDF の

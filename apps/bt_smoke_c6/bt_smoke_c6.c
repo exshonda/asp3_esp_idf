@@ -153,6 +153,18 @@ main_task(EXINF exinf)
 	 */
 	esp_shim_bt_clock_init();
 
+#ifdef TOPPERS_ESP32C6_BT_REGI2C_TRACE
+	/*
+	 *  §18：RF-cal regi2c トレースを controller_init より前に仕込む
+	 *  （register_chipv7_phy の synth 位相 write 列を捕捉．
+	 *   ESP32C6_BT_REGI2C_TRACE=ON でのみ有効・既定 OFF＝非回帰）．
+	 */
+	{
+		extern void esp_bt_regi2c_trace_install(void);
+		esp_bt_regi2c_trace_install();
+	}
+#endif
+
 	syslog(LOG_NOTICE, "bt_smoke_c6: esp_bt_controller_init");
 
 	err = esp_bt_controller_init(&cfg);
