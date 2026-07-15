@@ -211,6 +211,24 @@ static void armBJumpTask(void *pvParameters)
 
 void app_main(void)
 {
+	/*
+	 *  ★§20.7（advisor 指摘の false-positive 穴埋め）：per-boot «鮮度»
+	 *  保証．stock（本アプリ）が «この cold ブートで» 実行された時点で，
+	 *  guest 用の LP_AON 診断 STORE を «センチネル» で上書きする．真電源断で
+	 *  LP_AON が完全クリアされない/off 時間が短い場合でも，前回 warm 成功の
+	 *  残値（STORE1=stage5 等）を «この boot の値» と誤読しないため．
+	 *  guest が到達すれば STORE1 を 01→05 で上書きし，未到達なら
+	 *  STORE1=0x5A6E0000（pre-guest センチネル）のまま＝«guest 未実行» を一意に
+	 *  示す（2cf9022 の «マーカは reset を生き残るので現在ブート到達を証明
+	 *  しない» への対処＝stock が毎ブック再スタンプすることで STORE1 を
+	 *  «this boot» 化する）．
+	 */
+	*(volatile uint32_t *) 0x600B1004UL = 0x5A6E0000UL;	/* STORE1 pre-guest */
+	*(volatile uint32_t *) 0x600B1000UL = 0U;			/* STORE0 clear */
+	*(volatile uint32_t *) 0x600B1008UL = 0U;			/* STORE2 clear */
+	*(volatile uint32_t *) 0x600B100CUL = 0U;			/* STORE3 clear */
+	*(volatile uint32_t *) 0x600B1018UL = 0U;			/* STORE6 clear (stock marker) */
+
 	esp_err_t ret = nvs_flash_init();
 	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
 		ESP_ERROR_CHECK(nvs_flash_erase());

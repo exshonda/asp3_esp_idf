@@ -2714,7 +2714,11 @@ standalone レジスタ bisect に round-trip を無限投下しない．
   - （console print も残置＝USB-JTAG が安定なら併読可．uart0(CP2102 ttyUSB)へ
     console を回す手も有効だが，本計装のマーカが一次手段．）
 - **stock armB（`tmp/c6bt_armB`）**：`LP_AON_STORE6`（`0x600B1018`）へ
-  `0x570C0001`=armBJumpTask 到達／`0x570C0002`=jump 直前．guest の STORE1 が
+  `0x570C0001`=armBJumpTask 到達／`0x570C0002`=jump 直前．また **app_main 入口で per-boot センチネル**を打つ（advisor 指摘の
+  false-positive 穴埋め）：`STORE1=0x5A6E0000`（pre-guest）＋STORE0/2/3/6 を
+  クリア．真電源断で LP_AON が完全クリアされない/off 短時でも，前回 warm 成功の
+  残値（STORE1=stage5）を «この boot» と誤読しない（stock が毎ブック再スタンプ
+  ＝STORE1 を this-boot 化．2cf9022 «マーカは現在ブート到達を証明しない» への対処）．guest の STORE1 が
   出ず STORE6 だけ出れば «stock は jump 到達も guest 未到達»，どちらも出なければ
   «stock 早期失敗» を切り分ける．
 
