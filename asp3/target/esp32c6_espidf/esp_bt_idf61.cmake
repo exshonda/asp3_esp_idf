@@ -169,6 +169,9 @@ list(APPEND ASP3_INCLUDE_DIRS
     ${IDF}/components/bt/host/nimble/nimble/porting/nimble/include
     ${ESP_HAL_DIR}/components/esp_hw_support/include
     ${ESP_HAL_DIR}/components/esp_hw_support/include/soc
+    #  §20：pmu_init.c/ocode_init.c の `#include "regi2c_ctrl.h"`（プレーン名）
+    #  を解決する（esp_hw_support の private include．NON_OS_BUILD で ROM 直呼び）．
+    ${ESP_HAL_DIR}/components/esp_hw_support/include/esp_private
     ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/include
     ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/private_include
     ${ESP_HAL_DIR}/components/esp_hw_support/port/include
@@ -252,6 +255,37 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_clk.c
     ${ESP_HAL_DIR}/components/hal/efuse_hal.c
     ${ESP_HAL_DIR}/components/hal/${BT_CHIP_SERIES}/efuse_hal.c
+    #
+    #  ★§20：cold RF-synth-PLL ロック用の pmu_init 移植．stock IDF の
+    #  起動シーケンスが呼ぶ PMU HP_ACTIVE 電源/アナログ初期化を ASP3 の
+    #  Direct Boot が飛ばしているのが C6 BT phy_init cold ハングの真因
+    #  （docs/ble-c5c6-plan.md §19.8＋§20）．pmu_init.c/pmu_param.c/
+    #  ocode_init.c は hal submodule（IDF v6.1 とバイト一致）を «そのまま»
+    #  リンクし，薄いシム bt_pmu_init_c6.c 経由で hardware_init_hook から
+    #  早期に呼ぶ（hal は編集しない＝禁则遵守）．regi2c は ROM 直呼び
+    #  （NON_OS_BUILD）でロック不要にし regi2c_ctrl.c 依存を避ける．
+    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_init.c
+    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_param.c
+    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/ocode_init.c
+    ${BT_TARGETDIR}/bt_pmu_init_c6.c
+    #  esp_rom_regi2c_read/write_mask（ROM regi2c ラッパ）を提供する ROM
+    #  パッチ．pmu_init/ocode/rtc_clk が NON_OS_BUILD で ROM 直呼びに落ちる
+    #  ときの最下層プロバイダ．
+    ${ESP_HAL_DIR}/components/esp_rom/patches/esp_rom_hp_regi2c_${BT_CHIP_SERIES}.c
+)
+
+#  pmu_init.c/ocode_init.c/rtc_clk.c 内の REGI2C_WRITE_MASK/READ_MASK・
+#  regi2c_ctrl_write_reg* を «ROM 直呼び»（esp_rom_regi2c_*，ロック無し）へ
+#  解決させる（NON_OS_BUILD）．hardware_init_hook の早期（単一スレッド・
+#  割込み前）で呼ぶため regi2c_ctrl.c のクリティカルセクション（esp_os_*/
+#  saradc/tsens 依存）は不要＝リンク肥大を避ける．rtc_clk.c は ocode の
+#  calibrate 経路（本 board=efuse blk>=1 では非実行）から参照されるため
+#  同様に NON_OS へ寄せて regi2c_ctrl_write_reg 未解決を回避．
+set_source_files_properties(
+    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_init.c
+    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/ocode_init.c
+    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_clk.c
+    PROPERTIES COMPILE_DEFINITIONS "NON_OS_BUILD=1"
 )
 
 #

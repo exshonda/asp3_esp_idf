@@ -276,6 +276,22 @@ hardware_init_hook(void)
 	 *  前＝hardware_init_hook末尾で呼ぶ（C5恒久版と同位置）。
 	 */
 	esp32c6_r87_apm_unblock();
+
+#ifdef TOPPERS_ESP32C6_BT
+	/*
+	 *  ★§20：C6 BT «cold RF-synth-PLL ロック» 修正．stock IDF が起動
+	 *  シーケンスで呼ぶ pmu_init()（PMU HP_ACTIVE 電源/クロック/アナログ
+	 *  記述子＋DIG/RTC LDO＋bandgap o-code）を，Direct Boot が飛ばして
+	 *  いるため C6 BT の phy_init が cold で RF synth PLL をロックできず
+	 *  ハングする（真因＝docs/ble-c5c6-plan.md §19.8．親の真電源断 control
+	 *  で cold=bit8=0 ハング／warm=成功／stock cold=ロックと確定）。
+	 *  カーネル/タイマ起動前（stock の pmu_init 呼出しと同じ «早期» 位相）
+	 *  で呼ぶことで，HP_ACTIVE 電源記述子の適用が稼働中カーネルを撹乱
+	 *  しない。実体は bt/bt_pmu_init_c6.c（hal 非編集＝リンクのみ）。
+	 */
+	extern void esp_shim_bt_pmu_init(void);
+	esp_shim_bt_pmu_init();
+#endif /* TOPPERS_ESP32C6_BT */
 }
 
 void
