@@ -1084,7 +1084,7 @@ extern void *coex_schm_get_phase_by_idx(int idx);
  *  CONFIG_SOC_WIFI_HE_SUPPORTはsdkconfig_stub/sdkconfig.hで既に1に
  *  定義済み（実施11．§1参照）。
  */
-#if CONFIG_SOC_WIFI_HE_SUPPORT
+#if CONFIG_SOC_WIFI_HE_SUPPORT && ASP3_WIFI_BLOB_V554
 static bool
 wifi_disable_ac_ax_wrapper(void)
 {
@@ -1217,7 +1217,7 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 	._coex_schm_flexible_period_set = coex_schm_flexible_period_set,
 	._coex_schm_flexible_period_get = coex_schm_flexible_period_get,
 	._coex_schm_get_phase_by_idx = coex_schm_get_phase_by_idx,
-#if CONFIG_SOC_WIFI_HE_SUPPORT
+#if CONFIG_SOC_WIFI_HE_SUPPORT && ASP3_WIFI_BLOB_V554
 	._wifi_disable_ac_ax = wifi_disable_ac_ax_wrapper,
 #endif
 	._magic = ESP_WIFI_OS_ADAPTER_MAGIC,
