@@ -56,7 +56,7 @@ get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf 
 #  LEGACY/SC未定義（本ビルドでは常に0）によりコンパイル対象外の
 #  死コード（mbedtls/tinycrypt鍵合意）——実働に影響しない．
 #
-option(ASP3_BT_IDF_V554 "Use ESP-IDF v5.5.4 BT controller/phy/coexist tree instead of v6.1 (feasibility check)" OFF)
+option(ASP3_BT_IDF_V554 "Use ESP-IDF v5.5.4 BT controller/phy/coexist tree instead of v6.1 (default ON=blob統一. v5.5.4 blob=v6.1バイト同一・C5でcold full-BLE adv実証. OFFでv6.1へ可逆)" ON)
 if(ASP3_BT_IDF_V554)
     set(IDF /home/honda/tools/esp-idf)
 else()

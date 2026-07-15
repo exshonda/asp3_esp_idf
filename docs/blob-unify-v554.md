@@ -415,3 +415,20 @@ blob 非依存の C6 silicon/analog 固有）も裏付け。
 **残＝`ASP3_BT_IDF_V554` の既定を «ON（v5.5.4）» にして BT 統一を完了するか（WiFi は既に
 v5.5.4 既定）はユーザー判断**（blob バイト同一＝低リスク・可逆）。C6 は cold-PLL 別壁につき
 cold 判定は保留（warm では bt_smoke_c6 2/2 動作）。
+
+## §11 ★full BLE cold 実証→`ASP3_BT_IDF_V554` 既定を ON（v5.5.4）へ＝BT 統一完了
+§10 の D-1 に続き、**full BLE（NimBLE host＋v5.5.4 controller/phy/coexist）が cold から
+adv 放射**を実証：`build/c5ble_v554`（ble_host_smoke_c5・`ASP3_BT_IDF_V554=ON`）を C5#2 へ
+flash→真の電源断（off 10s→on）→BlueZ scan で **`ASP3-C5-BLE`（D0:CF:13:F0:C8:94）が cold
+から NEW**。subagent の「latch で inconclusive」は board artifact（電源再投入で解消）と確定。
+∴ v5.5.4 の libcoexist（v6.1 と «唯一相違» する blob）込みでも full BLE が cold 動作。
+
+**→ 既定を flip**：`esp32c5_espidf/esp_bt.cmake` と `esp32c6_espidf/esp_bt_idf61.cmake` の
+`option(ASP3_BT_IDF_V554 ... OFF)` を **`ON` へ**。WiFi（`ASP3_WIFI_BLOB_HAL` 既定 OFF＝
+v5.5.4）と揃い、**WiFi・BT 双方が既定 v5.5.4＝blob 統一完了**。
+- 検証：C5 BLE clean build＝rc=0・RAM 77.80%・**tools/esp-idf(v5.5.4) 参照 334 / esp-idf-v6.1
+  参照 0**（bt/controller/esp32c5・esp_phy/esp32c5・esp_coex/lib/esp32c5・esp32c5-bt-lib）。
+- 同 C6 BLE clean build＝rc=0・RAM 72.36%・v5.5.4 参照 334 / v6.1 参照 0。
+- 可逆：`-DASP3_BT_IDF_V554=OFF` で v6.1 tree に戻る。
+- C6 は cold-PLL 別壁（blob 非依存の C6 silicon 固有）につき cold BLE は未収束のまま（warm
+  bt_smoke_c6 2/2 は不変）。統一は «同一 blob へ揃える» 目的を達成、C6 cold は独立課題。

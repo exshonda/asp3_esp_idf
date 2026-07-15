@@ -45,7 +45,7 @@ get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf 
 #  v5.5.4のesp_bt_controller_enable完走を実機実証済み（本トグルは
 #  同じ切替をC6へも適用するもの．C6固有のcold PLL問題は本トグルとは
 #  独立の既知課題＝docs/blob-unify-v554.md参照）。
-option(ASP3_BT_IDF_V554 "Use ESP-IDF v5.5.4 BT controller/phy/coexist tree instead of v6.1 (feasibility check)" OFF)
+option(ASP3_BT_IDF_V554 "Use ESP-IDF v5.5.4 BT controller/phy/coexist tree instead of v6.1 (default ON=blob統一. v5.5.4 blob=v6.1バイト同一. C6はcold-PLL別壁でwarm bt_smoke 2/2動作. OFFでv6.1へ可逆)" ON)
 if(ASP3_BT_IDF_V554)
     set(IDF /home/honda/tools/esp-idf)
 else()
