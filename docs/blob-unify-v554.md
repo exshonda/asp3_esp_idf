@@ -233,3 +233,146 @@ C3/C5と同じ`ASP3_WIFI_BLOB_HAL`へ一本化した）。
 - `memory/c5-wifi-osi-abi-he-field.md`——C5でのCONFIG_SOC_WIFI_HE_SUPPORT
   ／`_wifi_disable_ac_ax`問題の初出（v9混在時．本タスクで同一パターン
   がv5.5.4でも再発することを確認）。
+
+## 8. BTの v5.5.4 実現性判定（2026-07-15，tree `39357dd`〜）
+
+C5/C6のBTは現状ESP-IDF v6.1（`libble_app.a`新世代）を使う——理由は
+「hal(v8)のlibphyがBTで`register_chipv7_phy`を収束させずハングした」
+（C5実施09・C6 §11-13）。v5.5.4も同じos_adapter ABIマクロ`v8`を
+名乗るため「v5.5.4も同様にハングする公算が高い」という懸念が本タスクの
+出発点だった。**実測でこの懸念は否定された**——以下，判定手順と結論。
+
+### 8.1 事前md5実測：BT関連blobはv5.5.4/v6.1間でバイト完全一致
+
+「v5.5.4はv8＝hal同様ハングするかもしれない」という懸念は，WiFiの
+os_adapter ABIマクロ（`ESP_WIFI_OS_ADAPTER_VERSION`＝0x08/0x09）を
+BTの物理libphy blobの代理指標にした早合点だった。実測（`md5sum`）：
+
+| チップ | blob | v5.5.4（`~/tools/esp-idf`） | v6.1（`~/tools/esp-idf-v6.1`） | 判定 |
+|---|---|---|---|---|
+| C5 | libble_app.a | `c2785c98f3231f74c825da6162be60bc` | `c2785c98f3231f74c825da6162be60bc` | **バイト完全一致** |
+| C5 | libphy.a | `4ccdbdbe1faf04a84b4059c882febe0f` | `4ccdbdbe1faf04a84b4059c882febe0f` | **バイト完全一致**（`register_chipv7_phy`含む） |
+| C5 | libbtbb.a | `f553ddd33805f6380fe103f37fe185c1` | `f553ddd33805f6380fe103f37fe185c1` | **バイト完全一致** |
+| C5 | libcoexist.a | `8400ad430c6719fc9ddf67310c4eb59a` | `53b3f95021fe43caaff9dd0bf72203ca` | 別物（唯一の不一致） |
+| C6 | libble_app.a | `c28653df7553ac7b9932a84b235b166b` | `c28653df7553ac7b9932a84b235b166b` | **バイト完全一致** |
+| C6 | libphy.a | `3fea07086717f1c7c18f58e2d3815721` | `3fea07086717f1c7c18f58e2d3815721` | **バイト完全一致** |
+| C6 | libbtbb.a | `d31c8865a4c1230bd65711847638f244` | `d31c8865a4c1230bd65711847638f244` | **バイト完全一致** |
+| C6 | libcoexist.a | `10f5cb6c42fe65771d57535d9aa12094` | `68ebb703fd26b29c1a53094a3157c3cb` | 別物（唯一の不一致） |
+
+つまりC5/C6とも，**controller・PHY・btbb（BTが実際にPHY較正／HCIで
+使うblob）はv5.5.4とv6.1で1バイトも違わない同一ファイル**——「別blob
+だから収束するかも」という期待も「v8系列だから必ずハングする」という
+懸念も，どちらも実測前の憶測に過ぎず，物理的には**同じバイナリを
+リンクし直すだけ**という結論になった。不一致は`libcoexist.a`のみ
+（WiFi/BT間の無線調停ロジック．BT単体ビルドでは非活性経路が濃厚）。
+
+bt.c/ble.c（controller層ソース，blobではない）はv5.5.4/v6.1間で
+差分283行（C5）——差分の大半はコントローラ組込みSM（legacy pairing，
+`CONFIG_BT_LE_SM_LEGACY`/`CONFIG_BT_LE_SM_SC`）のmbedTLS/tinycrypt
+実装差で，両マクロとも本ビルドでは未定義（0）＝**両バージョンとも
+コンパイル対象外の死コード**——実働に影響しない（NimBLEホストのSMP
+はホスト側`ble_sm*.c`が別途担当，本差分とは無関係）。
+
+### 8.2 cmake変更（reversible）
+
+C5（`esp_bt.cmake`）・C6（`esp_bt_idf61.cmake`）に共通で
+`ASP3_BT_IDF_V554`オプション（既定OFF＝v6.1のまま）を追加。ONで
+`IDF`変数を`~/tools/esp-idf`（v5.5.4，WiFi統一と同じツリー）へ切替える
+——WiFiの`ASP3_WIFI_BLOB_HAL`と対称的な設計（BTは既定=v6.1のまま，
+v5.5.4はopt-inの実現性確認用）。
+
+```cmake
+option(ASP3_BT_IDF_V554 "Use ESP-IDF v5.5.4 BT ... instead of v6.1" OFF)
+if(ASP3_BT_IDF_V554)
+    set(IDF /home/honda/tools/esp-idf)
+else()
+    set(IDF /home/honda/tools/esp-idf-v6.1)
+endif()
+```
+
+**build壁が1つ**（C5・C6共通）：`phy_init.c`が`esp_private/wifi.h`→
+`esp_wifi_types.h`→`esp_wifi_types_generic.h`と辿る際，v5.5.4の当該
+ヘッダは`"esp_interface.h"`を直接includeする（v6.1のヘッダはこの
+includeが無い＝この一点だけ書き方が変わっていた）。実体は
+`${IDF}/components/esp_hw_support/include/esp_interface.h`——`ASP3_
+BT_IDF_V554=ON`時のみこのディレクトリを`ASP3_INCLUDE_DIRS`へ追加して
+解決（hal側に同名ファイルが無いため衝突なし）。この1点を除き，
+build壁ゼロ。
+
+### 8.3 実機検証（warm．cold未実施＝§8.4参照）
+
+**C5（`bt_smoke_c5`，D-1コントローラのみ．board C5#2 `D0:CF:13:F0:C8:94`）**：
+build成功（RAM 70.83%）。RTSリセットによるwarm boot **3回連続で完全
+成功**（`esp_bt_controller_init OK`→`esp_bt_controller_enable(BLE)`→
+`phy: libbtbb version...`出力→`esp_bt_controller_enable OK`→HCI Reset
+送出→Command Complete受信→`Phase D-1 milestone reached`→`done`）。
+`register_chipv7_phy`によるPHY較正がwarmでは**確実に収束**することを
+実証。
+
+**C5（`ble_host_smoke_c5`，NimBLEホスト＋SM．同board）**：build成功
+（RAM 77.80%）。フラッシュ後の初回bootでTG0 WDTリブートループ
+（`Core0 Saved PC:0x40038598`）が発生——**ただし直後に直前まで動作して
+いた`bt_smoke_c5`の同一バイナリ（フラッシュ済みasp_flash.bin）を
+再書込みして再テストしたところ同一のWDTループが再現**——これは
+`memory/c5-latched-board-state.md`が既述する「C5はCPU_LOCKUP/WDT
+ループを繰り返すとsoft/hard resetを生き延びるラッチ状態に陥る」既知の
+ボード現象と一致するシグネチャ（`0x40038598`は「赤herring」ROM PCと
+memoryに明記済み）。**差分再テストにより「同一の既知良品バイナリが
+直前と後で結果が変わった」ことを実証**——ble_host_smoke_c5固有の
+v5.5.4リグレッションではなく，ボードのラッチが原因である公算が高い
+（が，ラッチ解除＝物理電源再投入until確定できない．次段の課題＝
+§8.4）。
+
+**C6（`bt_smoke_c6`，`ESP32C6_BT_IDF61=ON`のD-1．board C6 port1
+`14:C1:9F:E0:5A:9C`）**：build成功（RAM 65.86%）。RTSリセットによる
+warm boot **2/2回連続で完全成功**（C5と同一の判定基準：
+`esp_bt_controller_enable OK`→HCI Reset→Command Complete→
+`Phase D-1 milestone reached`→`done`）。★C6はcoldでは別問題（アナログ
+PLLがwarm handoff依存．`docs/ble-c5c6.md`実施91等）が既知のため，本
+warm結果はv5.5.4のcold収束を意味しない——C6のcold判定は本ラウンドでは
+未実施（deferred，既存のcold-PLL課題と交絡するため）。
+
+### 8.4 結論と残課題
+
+- **C5**：controller-only（D-1）はwarmで3回連続完全成功——v5.5.4への
+  BT統一は「PHYハング」という当初の主要リスクに関しては**実現可能**と
+  判定できる強い実測的根拠が揃った（md5一致＋warm実機収束）。ただし
+  タスク原本が要求する「真の cold 電源投入での判定」は，C5#2ボードが
+  検証中盤でラッチ状態に入ったため**未達**——ボードの物理電源断
+  （port3 off→on，30秒以上）を経ないと再開できない。**要人手**：
+  ユーザーに「C5#2（port3）を物理的にoff→onしてほしい」と依頼する
+  必要がある（usbhub経由のon/off操作はエージェントから権限拒否済み）。
+  電源再投入後にやるべきこと：(a) `bt_smoke_c5` v5.5.4を再フラッシュし
+  cold 1発目で`esp_bt_controller_enable`が収束するか確認，(b)
+  `ble_host_smoke_c5`（NimBLE，adv到達）をcoldで再検証——これが
+  ラッチのせいだったのか真のリグレッションだったのかを確定する。
+- **C6**：D-1はwarmで2回連続完全成功——v5.5.4のBT controller/phy/btbb
+  がwarmでは収束することを実証。ただしC6は元々cold PLLの別課題が
+  あるため，本タスクの「PHYハング再発」懸念とは別に，cold判定は
+  そもそも意味を持ちにくい（v6.1版も同じcold課題を抱える）。C6の
+  cold判定はdeferred＝既存のcold-PLL調査（`docs/ble-c5c6.md`実施系列）
+  待ち。
+- **C3**：タスク原本は「v5.5.4にC3のBT libが無い（submodule pathspec
+  無し）」という前提で対象外としていたが，これは実測で**誤り**だった
+  ——`~/tools/esp-idf/components/bt/controller/lib_esp32c3_family/
+  esp32c3/libbtdm_app.a`・`controller/esp32c3/bt.c`とも実在する
+  （訂正として記録）。ただしmd5実測では，v5.5.4のC3 libbtdm_app.a
+  （`d9753a31a8eeac9da8f3718cdfdb4938`）はv6.1と同一だが，**現在C3が
+  実際に使っているのはhal版**（`dfdadb9ddc12eeeab85edfb5d26eb4bf`＝
+  別物）——つまりC3をv5.5.4へ切替えるのはC5/C6と違い「既に実績のある
+  バイナリへの回帰」ではなく「未検証の別blobへの新規切替」で，リスク
+  性質が異なる。本ラウンドではC5（クリーンな判定台）とC6を優先し，
+  C3は**このバイト差分の存在を記録するに留め，実装・実機検証は次ラウンド
+  以降に持ち越す**（hal版で現状動作中＝D-2d bond達成済みのため急ぐ理由が
+  薄い）。
+- **暫定的な設計判断**：cold判定が未完了のため，`ASP3_BT_IDF_V554`は
+  **既定OFF（v6.1のまま）を維持**——本ラウンドはreversibleな
+  opt-inオプションの追加とwarm実機実証までに留め，デフォルト切替は
+  cold判定完了後の判断とする。
+
+## 9. 関連ドキュメント（BT実現性判定，追補）
+
+- `memory/c5-latched-board-state.md`——C5のWDTループ・ラッチ現象の
+  既存記録（本ラウンドのble_host_smoke_c5 WDTループが同一シグネチャ
+  であることの一次資料）。
+- `docs/ble-c5c6.md`——C6のcold PLL課題（実施89〜91系列）の一次資料。

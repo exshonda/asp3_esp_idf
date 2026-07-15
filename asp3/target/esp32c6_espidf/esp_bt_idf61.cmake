@@ -37,7 +37,20 @@ set(BT_TARGETDIR ${TARGETDIR}/bt)
 get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf ABSOLUTE)
 
 #  esp_wifi.cmake と同一の IDF v6.1 パス（eco/matched set）．
-set(IDF /home/honda/tools/esp-idf-v6.1)
+#
+#  ★BT v5.5.4統一「実現性」判定（docs/blob-unify-v554.md）：C5と同じ
+#  ASP3_BT_IDF_V554トグル（既定OFF＝v6.1のまま）．事前md5実測：
+#  libble_app.a・libphy.a・libbtbb.aはv5.5.4/v6.1間でC6もバイト完全
+#  一致（register_chipv7_phy含む）——差はlibcoexist.aのみ。C5 D-1で
+#  v5.5.4のesp_bt_controller_enable完走を実機実証済み（本トグルは
+#  同じ切替をC6へも適用するもの．C6固有のcold PLL問題は本トグルとは
+#  独立の既知課題＝docs/blob-unify-v554.md参照）。
+option(ASP3_BT_IDF_V554 "Use ESP-IDF v5.5.4 BT controller/phy/coexist tree instead of v6.1 (feasibility check)" OFF)
+if(ASP3_BT_IDF_V554)
+    set(IDF /home/honda/tools/esp-idf)
+else()
+    set(IDF /home/honda/tools/esp-idf-v6.1)
+endif()
 set(BT_CHIP_SERIES esp32c6)
 
 #
@@ -210,6 +223,15 @@ list(APPEND ASP3_INCLUDE_DIRS
     #  解決．esp_wifi.cmake §1b／C5 esp_bt.cmake と同じ理由．hal soc より後）
     ${IDF}/components/esp_phy/${BT_CHIP_SERIES}/include
 )
+
+if(ASP3_BT_IDF_V554)
+    #  C5 esp_bt.cmakeと同じ理由：v5.5.4のesp_wifi_types_generic.hが
+    #  "esp_interface.h"を直接includeする（v6.1は不要）。実体は
+    #  ${IDF}/components/esp_hw_support/includeにある。
+    list(APPEND ASP3_INCLUDE_DIRS
+        ${IDF}/components/esp_hw_support/include
+    )
+endif()
 
 #
 #  ------------------------------------------------------------------
