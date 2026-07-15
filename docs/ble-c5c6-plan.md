@@ -2057,3 +2057,52 @@ cold で欠ける。ranked 次段（C6 単独で可・host BT 不要・synth-loc
 - **(c) C5-BT(v9) regi2c 値比較**（C5 計装移植後）：§18.7 で coverage は
   同一と判明済みゆえ «値の異常» 確認が主眼だが，別チップ交絡＋計装移植
   コストで優先度は (a)(b) の後。
+
+### 18.10 ★同一シリコン MMIO diff（capstone）：synth 制御ブロック 0x600a0000-0x600a0100 が wifi_scan(lock) と C6-BT(hang) で «バイト完全一致»＝残壁はデジタル不可視のアナログ PLL lock
+
+アドバイザ手法で `freq_chan_en_sw`（synth トリガ・bit8 が反映する関数）を
+逆アセンブルし（ROM `0x4000364e`，`__call` トランポリンは `0x4000114c`）
+synth 制御レジスタを特定：
+
+- `0x600a00c0`：channel を書込み後 **bit14(0x4000) を set→delay→clear**＝
+  synth «start» トリガ。
+- caller（`ram_set_chan_freq_sw_start`）が直後に `0x600a00cc` **bit8(0x100)**
+  を lock として polling（§17.3 の loop）。
+
+board C 同一シリコンで wifi_scan（v8・PLL lock 成功・scan 中に halt）と
+C6-BT（v9・synth hang・poll loop で halt，PC=`0x420335dc`）の FE/synth
+ブロック `0x600a0000`–`0x600a0100`（64語）を JTAG mdw 比較：
+
+| addr | wifi_scan(lock) | C6-BT(hang) |
+|---|---|---|
+| 0x600a0000 | 0x00000007 | 0x00000007 |
+| 0x600a0010 | 0x00010032 | 0x00010032 |
+| 0x600a0014 | 0x00c00000 | 0x00c00000 |
+| 0x600a001c | 0x78f578f0 | 0x78f578f0 |
+| **0x600a00c0**（synth 制御） | **0x52840600** | **0x52840600** |
+| 0x600a00c8 | 0x19800249 | 0x19800249 |
+| **0x600a00cc**（lock 状態） | **0x25824e50** | **0x25824e50** |
+| 0x600a00d0 | 0x07f40367 | 0x07f40367 |
+| 0x600a00d4-dc | 00052300/04941cc1/00000003 | 同一 |
+
+**★64語すべてバイト一致**（synth 制御 `0x600a00c0`・freq・trigger 状態
+含む）。§18.5（regi2c config 完走）・§18.7（regi2c coverage 完全一致）に
+続き，**«synth の制御・設定に関して デジタルで観測可能な状態は，PLL を
+lock する wifi_scan と lock しない C6-BT で完全に同一»** と三重に確定。
+
+**∴C6-BT synth-lock 失敗の残壁は «デジタルレジスタに現れないアナログ
+PLL の物理 lock»**（VCO/リファレンス/LDO のアナログ状態）に局在。同一
+config・同一 MMIO でも lock する（wifi_scan）／しない（C6-BT）差は，
+regi2c で書く «値»（v8/v9 差＝要 C5-BT v9 対照）か，アナログ warmup/
+timing/電源シーケンスにあり，本ラウンドで到達可能なデジタル観測の
+範囲では «クリーンな enable ビット差» は存在しない（アドバイザの (b)
+capstone 実験の結論）。
+
+**bound（アドバイザ指針）**：(b) の synth-MMIO diff は «クリーンな
+enable-bit 差なし» で決着＝これ以上の同一チップ diff 戦線は開かない。
+残る一次候補は «アナログ PLL の値/電源»＝(i) C5-BT(v9) regi2c 値対照
+（C5 計装移植後・§18.8 でテーブル構造差により保留）と，(ii) warm-residual
+機序（wifi_scan で lock 済のアナログ状態が後続 BT を助けるか）の反証。
+FIX は «cold で欠けるアナログ PLL 前提を1つ立てて bit8 cold 収束率»
+で判定するが，その «立てるべき1つ» の特定には (i)(ii) いずれかの
+決定的 delta が要る＝現時点は «ranked candidate 提示» の段階。
