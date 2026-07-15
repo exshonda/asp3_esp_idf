@@ -13,9 +13,19 @@ v5.5.4（`~/tools/esp-idf`，`ESP_IDF_VERSION`=5.5.4，os_adapter v8）へ
 
 | チップ | build | ABI対処 | 実機検証 | 判定 |
 |---|---|---|---|---|
-| C3 | 0エラー | 不要（後述§2） | wifi_scan起動せず（既存hal blobでも同一クラッシュ＝board固有・非回帰） | ブロブ統一は完了。実機scanは別問題で保留 |
+| C3 | 0エラー | 不要（後述§2） | ★**scan完走**（19 APs found, err=0，実SSID確認，再scan安定，複数回43 APsまで観測） | **完全達成** |
 | C5 | 0エラー | wifi_os_adapter.h override必要 | ★**scan完走**（20 APs found, err=0，実SSID確認，再scan安定） | **完全達成** |
 | C6 | 0エラー | wifi_os_adapter.h override必要 | esp_wifi_init->0到達後，esp_shim_c6の既存Illegal instructionクラッシュ（toolchain非依存の既知事象と同一シグネチャ） | 合格（既知の別問題） |
+
+**C3の途中経過について**：本ラウンド前半で「board固有の早期クラッシュ」と
+誤判定した記録が残っていたが，これは**調査ミス**——手動cmake configureで
+`-DESP32C3_QEMU=OFF`を渡し忘れていたことが原因（既定`ON`＝
+`TOPPERS_USE_QEMU`定義→`chip_initialize()`が実機に存在しない`mie` CSRへ
+`csrw`命令を出し，実機で即Illegal instruction。`tmp/c3ble.sh`が明記して
+いる既知の罠）。クラッシュPC（`addr2line`で`_kernel_chip_initialize`
+→`csrw mie,a5`と確認）を突き止めて修正后，同じhal blob・v5.5.4 blob
+双方で**scan完走**を確認した（§4参照）。「board固有の問題」という
+結論は誤りで撤回する——教訓として本節に残す。
 
 ## 1. 前提：os_adapter versionは同じv8だが構造体は完全一致ではない
 
@@ -126,17 +136,36 @@ C3/C5と同じ`ASP3_WIFI_BLOB_HAL`へ一本化した）。
 ### C3（`60:55:F9:57:BA:BC`，usbjtag console）
 
 - build：0エラー，RAM 88.74%（hal版88.76%と同水準・非回帰）。
-- 実機：`wifi_scan`（hal blob・v5.5.4 blob**双方**）で，flash書込み・
-  ハッシュ検証後の起動が早期ROM段階（`Saved PC≈0x42000d8c`台，
-  ESP-ROM文字列出力直後）で`Illegal instruction`→`Breakpoint`ループに
-  入り，アプリのバナーにすら到達しない。**同一board・同一手順で
-  `ble_host_smoke`は正常起動**（バナー・BLE広告まで到達）——WiFi
-  ビルド固有の事象。
-- **判定**：hal blob（変更前の既存ベースライン）でも**バイト単位で
-  同一のクラッシュ**を確認したため，本v5.5.4統一が原因ではない。
-  board固有（or 既存の別問題）と判断し，非回帰は成立。この特定board
-  （BA:BC）でのwifi_scan実機scan成功は別タスクとして持ち越し
-  （電源再投入等の要人手対応が必要な可能性——最終報告に明記）。
+- **判明した調査ミスと修正**：手動cmake configureで
+  `-DESP32C3_QEMU=OFF`を渡し忘れていたため（既定`ON`），`wifi_scan`
+  （hal blob・v5.5.4 blob双方）が実機で早期に`Illegal instruction`
+  →`Breakpoint`ループに陥った。`riscv-none-elf-addr2line`でクラッシュ
+  PC（`0x42025e6c`）を特定したところ`_kernel_chip_initialize`
+  （`arch/riscv_gcc/esp32c3/chip_kernel_impl.c:129`）内の
+  `csrw mie,a5`——これは`#ifdef TOPPERS_USE_QEMU`ガード下のQEMU専用
+  命令で，実機ESP32-C3は`mie` CSR自体を実装しないため書込みで
+  Illegal instructionになる（`tmp/c3ble.sh`が明記する既知の罠と
+  同一）。`-DESP32C3_QEMU=OFF`を付けて再ビルドし
+  （`objdump -d | grep -c "csrw.*mie"` = 0を確認），再実機検証した
+  ところ両blobともscan完走した。
+- 実機（修正後）：★**scan完走**
+  ```
+  wifi_scan: esp_wifi_init -> 0
+  wifi_scan: esp_wifi_start -> 0
+  wifi_scan: esp_wifi_scan_start -> 0
+  wifi_scan: 19 APs found (err=0)
+    [0] <SSID-INST-1X> (rssi=-38 ch=1)
+    [1] <SSID-INST-G> (rssi=-38 ch=1)
+    [2] <SSID-INST> (rssi=-39 ch=1)
+    ...
+  wifi_scan: RESCAN 16/43/43/34/35 APs (err=0)
+  ```
+  実SSID確認・再scanループ継続（複数回43 APsまで観測）・WDT/panic
+  なし。**hal blob（`-DASP3_WIFI_BLOB_HAL=ON`）でも同一手順で
+  scan完走**（19→19→19→17 APs，err=0）——非回帰も正しく実証。
+- **判定**：v5.5.4 blobでC3もWiFi完全動作を実証。「board固有の問題」
+  という前半の判定は誤り（§0参照）——実際はテストハーネス側の
+  フラグ漏れで，blob統一そのものとは無関係だった。
 
 ### C5（`D0:CF:13:F0:C8:94`，UART0 console＝`/dev/ttyUSB4`）
 
@@ -187,11 +216,10 @@ C3/C5と同じ`ASP3_WIFI_BLOB_HAL`へ一本化した）。
 
 ## 6. 未検証・今後の課題
 
-- C3実機（BA:BC）でのwifi_scan完走——board固有の早期クラッシュの
-  原因調査（電源再投入含む要人手対応の可能性）。
-- C5#1（`A7:44`．latch中）・C3の別board（`60:55:F9:57:C2:60`，
-  `docs/wifi-scan-c3-crash.md`でwifi_scan実機成功実績あり）での
-  再検証は本ラウンド未実施（範囲外・board競合）。
+- C6の既存Illegal instructionクラッシュ自体の根本原因調査（本タスクの
+  スコープ外．`docs/wifi-shim-c6.md`の実施系列で継続）。
+- C5#1（`A7:44`．latch中）での再検証は本ラウンド未実施（latch中の
+  ため不接触）。
 - BT/BLEのblob統一は本タスクの対象外（`docs/wifi-blob-generation-todo.md`
   の結論「単独WiFiは現状維持」はWiFi単体の話であり，本タスクは
   そのWiFi blobをv5.5.4へ進めた形——BT統一は別タスク）。
