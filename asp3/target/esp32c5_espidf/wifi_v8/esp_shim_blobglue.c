@@ -30,6 +30,7 @@
 #include <t_syslog.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <sil.h>
 #include "esp_shim.h"
 #include "esp_err.h"
@@ -520,3 +521,41 @@ phy_get_max_pwr(void)
 {
 	return(20);	/* 20dBm相当のプレースホルダ．要再検討 */
 }
+
+/*
+ *  ------------------------------------------------------------------
+ *  v5.5.4統一（docs/blob-unify-v554.md）：wpa_supplicant/esp_supplicant
+ *  が「blobが実装する想定」で宣言している関数（esp_wifi_driver.h）の
+ *  うち，hal（esp-hal-3rdparty submodule）のnet80211.a/pp.aには実装
+ *  されているが，ESP-IDF v5.5.4（`~/tools/esp-idf`）の同blobには
+ *  存在しない3関数（C3のesp_shim_blobglue.c §11と同一の事象．nm実測で
+ *  確認）。WPA3互換モード・RSNXE override・PMKキャッシュskip制御という
+ *  比較的新しいwpa_supplicant機能で，v5.5.4のblob世代には存在しない。
+ *  wifi_scanは素のopen scanのみ（WPA関連分岐は実行時に到達しない）
+ *  ため，リンク解決のためのno-op／機能無効化スタブで足りる。
+ *  ASP3_WIFI_BLOB_V554（esp_wifi_v8.cmake．v5.5.4 blob選択時のみ定義）
+ *  でガード＝hal blob使用時（ASP3_WIFI_BLOB_HAL=ON）はhal blob自身が
+ *  この3関数を提供するため二重定義しない。
+ *  ------------------------------------------------------------------
+ */
+#if ASP3_WIFI_BLOB_V554
+bool
+esp_wifi_skip_supp_pmkcaching(void)
+{
+	return false;
+}
+
+uint8_t *
+esp_wifi_sta_get_ie(uint8_t *bssid, uint8_t elem_id)
+{
+	(void) bssid; (void) elem_id;
+	return NULL;
+}
+
+bool
+esp_wifi_is_wpa3_compatible_mode_enabled(uint8_t if_index)
+{
+	(void) if_index;
+	return false;
+}
+#endif /* ASP3_WIFI_BLOB_V554 */

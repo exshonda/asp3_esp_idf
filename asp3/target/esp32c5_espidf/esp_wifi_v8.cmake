@@ -275,16 +275,45 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
 #
 #  C6版はここに「RX-enable --wrapトレース」（libpp.a／libnet80211.a内部
 #  シンボルをラップしwifi_trace.cのリングバッファへ記録する）診断専用の
-#  -Wl,--wrap=...一式，および blob 版差の因果検証用の
-#  ASP3_WIFI_BLOB_IDF切替ブロック（native(IDF v6.1)との受信可否比較用）を
-#  持っていたが，いずれもC6のdeaf-RX調査専用の一時計装のため，C5では
-#  移植しない（docs/c5-port-design.md §6.1・§8.3「C6資産の非移植方針」）。
-#  常にesp-hal-3rdparty（asp3/hal submodule）のprebuilt blobをリンクする。
+#  -Wl,--wrap=...一式を持っていたが，C6のdeaf-RX調査専用の一時計装の
+#  ため，C5では移植しない（docs/c5-port-design.md §6.1・§8.3
+#  「C6資産の非移植方針」）。
 #
+#  ★v5.5.4統一（docs/blob-unify-v554.md）：WiFi/PHY/coexist blobを
+#  hal（esp-hal-3rdparty submodule，NuttX同期のv8）から実ESP-IDF
+#  v5.5.4（`~/tools/esp-idf`，同じos_adapter v8）へ切替える。
+#  C5はsoc_caps.hでSOC_WIFI_HE_SUPPORT=1のため，wifi_os_adapter.hの
+#  wifi_osi_funcs_t構造体がhal/v5.5.4でバイト非同一（v5.5.4のみ
+#  `_wifi_disable_ac_ax`フィールドを持つ）＝idf_v554_override/の
+#  ヘッダ（v5.5.4からのverbatimコピー）をhalのesp_wifi/includeより
+#  前に置いて当該ヘッダだけをシャドウする（他のヘッダ名は当該
+#  ディレクトリに存在しないためhal側にフォールバックする）。
+#  reversible: ASP3_WIFI_BLOB_HAL=ON でhalへ戻せる（この場合overrideは
+#  無害＝hal自身のwifi_os_adapter.hが先に見つかるようASP3_INCLUDE_DIRSの
+#  並びをスキップする条件分岐にしている）。
+#
+option(ASP3_WIFI_BLOB_HAL "Use hal(v8) WiFi/PHY/coexist blob instead of ESP-IDF v5.5.4(v8) unification (reversible fallback)" OFF)
+if(NOT DEFINED IDF_V554)
+    set(IDF_V554 /home/honda/tools/esp-idf)
+endif()
+if(ASP3_WIFI_BLOB_HAL)
+    set(ASP3_WIFI_BLOB_SRC ${ESP_HAL_DIR})
+else()
+    set(ASP3_WIFI_BLOB_SRC ${IDF_V554})
+    list(APPEND ASP3_COMPILE_DEFS ASP3_WIFI_BLOB_V554=1)
+    #  wifi_os_adapter.hだけのサロゲート差し替え（他のヘッダはhalの
+    #  ままフォールバック）。PREPENDでhalの${ESP_HAL_DIR}/components/
+    #  esp_wifi/include（§1で既にASP3_INCLUDE_DIRSへ入っている）より
+    #  前に来るようにする。
+    list(PREPEND ASP3_INCLUDE_DIRS
+        ${CMAKE_CURRENT_LIST_DIR}/wifi_v8/idf_v554_override
+    )
+endif()
+
 list(APPEND ASP3_LINK_OPTIONS
-    -L${ESP_HAL_DIR}/components/esp_wifi/lib/${WIFI_CHIP_SERIES}
-    -L${ESP_HAL_DIR}/components/esp_phy/lib/${WIFI_CHIP_SERIES}
-    -L${ESP_HAL_DIR}/components/esp_coex/lib/${WIFI_CHIP_SERIES}
+    -L${ASP3_WIFI_BLOB_SRC}/components/esp_wifi/lib/${WIFI_CHIP_SERIES}
+    -L${ASP3_WIFI_BLOB_SRC}/components/esp_phy/lib/${WIFI_CHIP_SERIES}
+    -L${ASP3_WIFI_BLOB_SRC}/components/esp_coex/lib/${WIFI_CHIP_SERIES}
 )
 
 list(APPEND ASP3_LINK_LIBS
