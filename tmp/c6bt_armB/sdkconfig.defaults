@@ -1,0 +1,15 @@
+# c6bt_stock（BT版クロスカーネル・ハンドオフ Milestone 0／stock側）
+#
+# WiFi版(c6_handoff_source)と同じ理由でFLASHSIZE=4MB・INT_WDT=nが必要。
+# MEMPROT=n は C6実施21/22のPMPロック回避（docs/c5c6-lessons-for-s31.md §3.3）。
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_ESP_INT_WDT=n
+CONFIG_ESP_SYSTEM_MEMPROT=n
+
+#
+# BT config（controller-only, VHCI raw HCI. NimBLE/Bluedroidホストは不要）
+#
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CONTROLLER_ONLY=y
+CONFIG_BT_BLUEDROID_ENABLED=n

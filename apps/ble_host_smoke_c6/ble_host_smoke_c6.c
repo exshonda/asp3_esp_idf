@@ -667,6 +667,16 @@ main_task(EXINF exinf)
 
 	(void) exinf;
 
+	/*
+	 *  ★クロスカーネル・ハンドオフ判定用（docs/ble-c5c6-plan.md §19）：
+	 *  main_task最初の実行文としてsynth-lock status(0x600a00cc)を読む．
+	 *  Direct Bootでは常に0x25824e50(bit8=0)．stockからのジャンプ直後に
+	 *  ここで既にbit8=1が見えれば「物理PLLロックはジャンプを跨いで
+	 *  生存する」ことの直接証拠になる（ASP3が何か書く前の値）．
+	 */
+	syslog(LOG_NOTICE, "ble_host_smoke_c6: HANDOFF entry synth(0x600a00cc)=0x%08x",
+		   (uint_t) *(volatile uint32_t *) 0x600a00ccU);
+
 	esp_shim_initialize();
 
 	/*

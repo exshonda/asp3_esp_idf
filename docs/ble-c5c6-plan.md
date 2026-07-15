@@ -2163,3 +2163,177 @@ cold 収束率で判定）**：
 （SM）/`build/c6_s14`（§14 config）/`build/c6bt_regi2c`（regi2c トレース）を
 再 flash。C5 #2（port3・C8:94）＝`build/c5ble` 動作・非接触維持。
 計装 `esp_bt_regi2c_trace.c`（既定 OFF）は commit 済で再利用可。
+
+## 19. ★C6 BT «クロスカーネル・ハンドオフ» 実装＝★★★成功——PLL ロックは
+«ソフト到達可能»と確定，真因は BT 固有ではなく «Direct Boot が本物の
+bootloader 初期化を丸ごと飛ばしていること»（2026-07-15）
+
+### 19.0 狙い
+
+§17/§18 で「synth PLL ロック（`0x600a00cc` bit8）が C6-BT の standalone
+Direct Boot では恒常的に non-assert（デジタルレジスタは wifi_scan と
+バイト完全一致なのに）」まで詰めた。WiFi 側 C5/C6 調査（実施33系列）で
+最強のツールだった「stock ESP-IDF の完全ブート → リセット無しジャンプ
+→ ASP3」を BT 版に移植し，「PLL ロックはソフト到達可能か」を一撃で
+判定する。
+
+### 19.1 実装（`docs/c5c6-lessons-for-s31.md` §3.3 のジャンプ機構を流用）
+
+ジャンプ本体（IRAM 常駐の `asp3_jump_now()`：割込みマスク→
+`mmu_hal_unmap_all()`→`mmu_hal_map_region(vaddr=0x42000000,
+paddr=0x00200000, len=1MB)`→`cache_hal_invalidate_addr()`→
+`0x42000008`へ関数ポインタジャンプ。LP Super WDT の事前 disable も
+含む）は，既存の WiFi 版ジャンプ雛形 `tmp/c6_handoff_source/main/
+asp3_jump.c`（実施33の移植版）を**無改造でそのまま流用**（新規発明
+不要）。stock 側だけ BT 用に新規作成：
+
+- `tmp/c6bt_stock/`：ESP-IDF v6.1 `examples/bluetooth/hci/
+  controller_vhci_ble_adv`（controller-only, raw VHCI HCI, Unlicense/
+  CC0）をベースにした Milestone 0 用アプリ。`esp_bt_controller_init/
+  enable(BLE)` → HCI Reset/Set Adv Param/Set Adv Data(`STOCK-C6-BT`)/
+  Adv Enable を送出し，`0x600a00cc` bit8 を 1 秒毎にログ。ジャンプしない。
+  `sdkconfig.defaults` に `CONFIG_ESP_SYSTEM_MEMPROT=n`
+  （実施21/22 の PMP ロック回避。既定 y のままだと同じ壁を踏むため
+  明示的に無効化）・`CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y`・
+  `CONFIG_ESP_INT_WDT=n` を設定。
+- `tmp/c6bt_armA/`・`tmp/c6bt_armB/`：`c6bt_stock` のコピーに
+  `ARM_A_JUMP`／`ARM_B_NOBT_JUMP` の compile definition のみを追加した
+  2 バリアント（アドバイザ提案の減算法ラダー）。
+  - **Arm A**：`esp_bt_controller_init/enable(BLE)`→adv 開始→bit8=1
+    かつ adv 継続を 3 秒間安定確認→1 秒待ってから `asp3_jump_now()`。
+  - **Arm B（control）**：BT を一切初期化せず，起動 2 秒後に
+    `asp3_jump_now()`。ブートローダの pmu_init/クロック初期化単体の
+    寄与だけを見る対照実験。
+- ASP3 側（`apps/ble_host_smoke_c6/ble_host_smoke_c6.c`
+  `main_task()` 冒頭）に1行だけ追加：
+  `syslog(LOG_NOTICE, "... HANDOFF entry synth(0x600a00cc)=0x%08x", ...)`
+  ——ASP3 が何も書く前，ジャンプ直後最初の実行文としてレジスタを読む。
+  ジャンプを跨いで物理ロックが生存するかを ASP3 自身の初期化前に
+  切り分けるための計装（ASP3 側の他コードは無改造＝通常の
+  `esp_bt_controller_init/enable`→NimBLE host という既存フローを
+  そのまま実行させる）。
+
+フラッシュレイアウトは WiFi 版と同じ二重配置：stock（bootloader
+0x0・partition-table 0x8000・app 0x10000）＋ ASP3 guest
+（`build/c6ble/asp_flash_trunc1M.bin`，`asp_flash.bin` を先頭1MBへ
+truncate したもの）を 0x200000 へ。**電源制御（Acroname hub）は不要
+だった**——通常の `esptool write-flash`／RTS 経由 hard-reset のみで
+安定して連続実行できた（stock 側が正常に起動している限り download
+mode 同期に電源レースは要らない。「flashfull の電源レース同期」は
+今回不要）。
+
+### 19.2 Milestone 0：stock standalone で PLL ロック＋実放射を確認
+
+`tmp/c6bt_stock`（ジャンプ無し）を board C（port1，14:C1:9F:E0:5A:9C，
+`/dev/ttyACM2`）に単体で焼いて確認：
+
+```
+W (296) c6bt_stock: pre-init synth=0x25824f50        ← esp_bt_controller_init より前
+I (306) BLE_INIT: ble controller commit:[4adb29e,7f63735]
+I (316) BLE_INIT: Bluetooth MAC: 14:c1:9f:e0:5a:9e
+W (376) c6bt_stock: controller_enable OK, post-enable synth=0x25824f50
+W (576) c6bt_stock: STATUS ... synth=0x25824f50 bit8(lock)=1
+```
+
+`0x25824f50` の bit8(`0x100`)=1＝**ロック済み**（C6-BT ハング事例の
+恒常値 `0x25824e50`＝bit8=0 と比較。下位ニブル `e`(1110) vs `f`(1111)
+の1ビット差）。**注目すべき点＝bit8=1 は `esp_bt_controller_init` 呼出し
+より前，`app_main` 最初の読み取り時点で既に立っている**——stock の
+BT コントローラ初期化自体がロックを作っているのではなく，**それより
+前（2nd stage bootloader のクロック/RTC 初期化）で既に確立済み**で
+あることが，この時点で強く示唆された（§19.4 で確定）。
+
+BlueZ で確認：`bluetoothctl scan on` で `STOCK-C6-BT`（14:C1:9F:E0:5A:9E）
+を検出——stock 側の実放射も実証（Milestone 0 の前提条件クリア）。
+
+### 19.3 Arm B（control）：★BT 未初期化のままジャンプでも ASP3 BT が完走・実放射
+
+`c6bt_armB`（bootloader+partition+app）を 0x0/0x8000/0x10000 へ，
+`build/c6ble/asp_flash_trunc1M.bin`（`ble_host_smoke_c6`，D-2c/D-2d
+ビルド，実施15と同一構成）を 0x200000 へ書込み，RTS hard-reset で
+2 ブート連続実行。結果（2/2 とも同一）：
+
+```
+W (238) c6bt_stock: pre-init synth=0x25824f50
+W (248) c6bt_stock: ARM_B_NOBT_JUMP: no BT init, jumping to ASP3 in 2s
+W (2248) c6bt_stock: ARM_B_NOBT_JUMP: asp3_jump_now()
+TOPPERS/ASP3 Kernel Release 3.7.2 for ESP32-C6 ...
+ble_host_smoke_c6: HANDOFF entry synth(0x600a00cc)=0x25824f50    ← ジャンプ直後，ASP3が何もする前
+ble_host_smoke_c6: esp_bt_controller_init
+ble_host_smoke_c6: esp_bt_controller_init OK (heap free=168928)
+ble_host_smoke_c6: esp_bt_controller_enable(BLE)
+ble_host_smoke_c6: esp_bt_controller_enable OK (heap free=168928)   ← standalone なら永久ハング
+ble_host_smoke_c6: ble_hs SYNC, host up
+ble_host_smoke_c6: advertising started as 'ASP3-C6-BLE' (own_addr_type=0)
+ble_host_smoke_c6: g_adv_rc=0 g_adv_active=1
+```
+
+BlueZ で確認：`bluetoothctl scan on` で **`ASP3-C6-BLE`（14:C1:9F:E0:5A:9C）
+を実機で初検出**——これまでの C6-BT 全ラウンド（実施87〜§18）で
+一度も到達しなかった「ASP3 自身の BT が実放射する」状態に，ハンドオフ
+経由で初めて到達した。
+
+**Arm B は stock 側で BT を一切触っていない**（`esp_bt_controller_init/
+enable` は一度も呼ばれていない）にもかかわらずこの結果——つまり
+**「stock が BT PLL ロックを確立してそれを ASP3 が継承する」という
+当初の作業仮説（本タスクの前提）は誤りで，真因はもっと単純**：
+**stock の 2nd stage bootloader が実行する何か（BT とは無関係の
+汎用クロック/RTC/PMU 初期化）だけで足りる**。
+
+### 19.4 Arm A：BT フル初期化＋ロック＋adv 確認後のジャンプも同一結果（非退行）
+
+`c6bt_armA`（controller_enable→adv→bit8=1 かつ adv 継続 3 秒安定確認
+→ジャンプ）でも同一の ASP3 側ログ（`esp_bt_controller_enable OK`→
+`g_adv_rc=0`）・BlueZ で `ASP3-C6-BLE` 実放射を確認。**Arm A と Arm B が
+同一結果**＝アドバイザ提示の判別式（「B が通れば bootloader の
+pmu_init 不足，B が失敗し A のみ通れば PLL ロック継承固有」）に
+照らすと，**「B が通った」を明確に満たす**——原因は BT コントローラの
+状態継承ではなく，**bootloader レベルの汎用初期化の有無**。
+
+### 19.5 結論：判定確定＝«ソフト到達可能»。真因はより一般的（Direct Boot 全体の初期化不足）
+
+- **判定＝★成功**：クロスカーネル・ハンドオフ後，ASP3 は自前の
+  `esp_bt_controller_init/enable(BLE)` を完走し（standalone なら
+  `ram_set_chan_freq_sw_start` で永久ハングする箇所），NimBLE host も
+  sync・adv rc=0 に到達し，**BlueZ で `ASP3-C6-BLE` の実放射を確認**
+  （2 系統×計3回のブートで再現）。「C6 BT の PLL ロックはソフト到達
+  可能（＝直せる）」が実機で確定した。
+- **真因の再定位**：Arm A/B が同一結果になったことで，§17/§18 まで
+  「BT 固有（synth SW-start 経路・regi2c キャリブレーション等）」に
+  絞り込んでいた仮説は，**より上流（bootloader レベルの汎用初期化）
+  へ差し戻す**必要がある。WiFi 側 C5 調査（`c5-wifi-modem-domain-
+  unpowered` メモリ参照）で確認済みの「Direct Boot は `pmu_init`
+  を飛ばす（`SOC_PM_MODEM_PD_BY_SW` 未定義で power_domain_on が
+  no-op）」という構造が，BT 側でも同型の根因である可能性が高い
+  （直接の同定は次段）。
+- **次段（S31/BT 本震向けの ToDo）**：Arm B の stock 側処理を
+  bisect して「どの bootloader 処理が寄与しているか」を切り分ける
+  （WiFi 側実施34-35 の減算法と同じ手法：`bootloader_hardware_init()`
+  ／`bootloader_clock_configure()`／`rtc_clk_init()` 等を段階的に
+  スキップして bit8 の生死を見る）。ASP3 の `hardware_init_hook()`/
+  起動シーケンスへ，この bisect で特定した処理を移植すれば，
+  **standalone Direct Boot のままで BT PLL ロックを解決できる**
+  可能性が高い——ハンドオフは診断ツールであり，最終形は「ASP3 単体で
+  bootloader 相当の初期化を行う」ことになる。
+- **電源制御は不要だった**（esptool RTS reset のみで全実験完結。
+  親への port1 電源 off/on 依頼は不要）。
+- **未確認事項（正直な残課題）**：(1) Arm B が示す「どの bootloader
+  処理か」は本ラウンドでは未特定（bisect 未実施）。(2) 2 系統×3回の
+  再現のみ——統計的な収束率までは見ていない（§16 の「past success は
+  再現しない」という教訓があるため，今後さらに複数回の独立再起動での
+  再現性確認が望ましい）。(3) BlueZ 側は名前ベースの識別のみ（MAC も
+  一致確認済みだが，GATT 接続までは未確認＝adv 放射の確認に限定）。
+
+### 19.6 変更ファイル
+
+- `apps/ble_host_smoke_c6/ble_host_smoke_c6.c`：`main_task()` 冒頭に
+  synth-lock 診断ログ1行を追加（既存ロジック無改造）。
+- `tmp/c6bt_stock/`・`tmp/c6bt_armA/`・`tmp/c6bt_armB/`：新規（stock
+  側ハンドオフアプリ3バリアント，ESP-IDF v6.1 プロジェクト。`build/`
+  は`.gitignore`で除外）。
+- `build/c6ble/asp_flash_trunc1M.bin`：ASP3 guest（`ble_host_smoke_c6`）
+  を再ビルドし先頭1MB truncate で再生成（`build/`配下のため未コミット，
+  再現手順は本節と`docs/c5c6-lessons-for-s31.md`§3.3を参照すれば
+  再生成可能）。
+- board C（port1）は本ラウンド終了時点で Arm A のイメージ（stock+ASP3
+  guest 二重配置）が flash されたまま。
