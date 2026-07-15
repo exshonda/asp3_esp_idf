@@ -106,6 +106,7 @@ extern volatile uint32_t esp_shim_int_count[];
  *  （+0x04）はノイズと記録済みのためどちらも避ける．
  */
 #define LP_AON_STORE0		0x600B1000UL	/* sync マーカ */
+#define LP_AON_STORE1		0x600B1004UL	/* §20.7 handoff 到達 stage（正規未使用） */
 #define LP_AON_STORE2		0x600B1008UL	/* adv開始マーカ */
 #define LP_AON_STORE3		0x600B100CUL	/* adv-return (rc) マーカ */
 #define LP_AON_STORE4		0x600B1010UL	/* 割込みレート：CPU線1累積ミラー */
@@ -634,6 +635,7 @@ on_sync(void)
 {
 	g_ble_sync_done = 1U;
 	sil_wrw_mem((void *) LP_AON_STORE0, BLE_SYNC_MARK_VAL);
+	sil_wrw_mem((void *) LP_AON_STORE1, 0x5A6E0005UL);	/* §20.7 stage 5＝SYNC */
 	syslog(LOG_NOTICE, "ble_host_smoke_c6: ble_hs SYNC, host up");
 
 	start_advertising();
@@ -719,6 +721,32 @@ main_task(EXINF exinf)
 		}
 	}
 
+	/*
+	 *  ★§20.7：reboot ループに強い «LP_AON STORE マーカ»（usb-reset/flap を
+	 *  跨いで保持．親が esptool read-mem で読める）．cold Arm B が
+	 *  «USB-JTAG flapping で console 読めず inconclusive» だったため，console
+	 *  print でなくこのマーカで «guest 到達段階＋cold synth＋真の RF電源» を
+	 *  記録する．cold Arm B の hang 点はここ〜esp_bt_controller_enable 内
+	 *  （phy_init）で，STORE0/2/3 の «正規用途»（sync/adv/adv-rc）はいずれも
+	 *  phy_init 通過 «後» のため，hang 時点では本診断値がそのまま残る．
+	 *    STORE1(0x600B1004)＝到達 stage（0x5A6E00NN．STORE1 は正規未使用）：
+	 *      01=guest main_task 到達（jump 成功）／02=controller_init 直前／
+	 *      03=controller_enable 直前（＝ここで止まれば phy_init hang）／
+	 *      04=controller_enable OK（★phy_init 通過＝cold ロック成功）／
+	 *      05=ble_hs SYNC．
+	 *    STORE0(0x600B1000)＝entry synth 0x600a00cc（cold なら 0x25824e50）．
+	 *    STORE2(0x600B1008)＝PMU 0x600b0000（DIG_POWER＝wifi_pd_en 等）．
+	 *    STORE3(0x600B100C)＝PMU 0x600b0014（HP_CK_POWER＝xpd_bbpll 等 «真の
+	 *      RF電源»．pmu_init が cold で立てられているかの直接確認）．
+	 */
+	sil_wrw_mem((void *) LP_AON_STORE1, 0x5A6E0001UL);
+	sil_wrw_mem((void *) LP_AON_STORE0,
+				*(volatile uint32_t *) 0x600a00ccU);
+	sil_wrw_mem((void *) LP_AON_STORE2,
+				*(volatile uint32_t *) 0x600b0000U);
+	sil_wrw_mem((void *) LP_AON_STORE3,
+				*(volatile uint32_t *) 0x600b0014U);
+
 	esp_shim_initialize();
 
 	/*
@@ -735,6 +763,7 @@ main_task(EXINF exinf)
 	 */
 	esp_shim_bt_clock_init();
 
+	sil_wrw_mem((void *) LP_AON_STORE1, 0x5A6E0002UL);	/* §20.7 stage 2 */
 	syslog(LOG_NOTICE, "ble_host_smoke_c6: esp_bt_controller_init");
 	err = esp_bt_controller_init(&cfg);
 	if (err != ESP_OK) {
@@ -745,8 +774,17 @@ main_task(EXINF exinf)
 	syslog(LOG_NOTICE, "ble_host_smoke_c6: esp_bt_controller_init OK (heap free=%u)",
 		   (uint_t) esp_shim_heap_free_size());
 
+	/*  §20.7 stage 3＝controller_enable 直前．cold Arm B でここに留まって
+	 *  いれば esp_bt_controller_enable 内 phy_init（bit8 アナログ PLL ロック）
+	 *  で hang したことを一意に示す． */
+	sil_wrw_mem((void *) LP_AON_STORE1, 0x5A6E0003UL);
 	syslog(LOG_NOTICE, "ble_host_smoke_c6: esp_bt_controller_enable(BLE)");
 	err = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+	/*  §20.7 stage 4＝controller_enable 通過（★phy_init 突破＝cold ロック
+	 *  成功の一次証拠）＋通過後の synth を STORE0 に上書き（bit8 立ったか）． */
+	sil_wrw_mem((void *) LP_AON_STORE1, 0x5A6E0004UL);
+	sil_wrw_mem((void *) LP_AON_STORE0,
+				*(volatile uint32_t *) 0x600a00ccU);
 	if (err != ESP_OK) {
 		syslog(LOG_ERROR, "ble_host_smoke_c6: esp_bt_controller_enable -> %d",
 			   (int_t) err);

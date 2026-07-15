@@ -193,7 +193,16 @@ static void jumpWatchTask(void *pvParameters)
 static void armBJumpTask(void *pvParameters)
 {
 	ESP_LOGW(TAG, "ARM_B_NOBT_JUMP: no BT init, jumping to ASP3 in 2s");
+	/*
+	 *  §20.7：reboot ループに強い «stock 到達» マーカ．cold Arm B が
+	 *  console 読めず inconclusive だったため，stock がここ（jump 直前）まで
+	 *  到達したことを LP_AON STORE6(0x600B1018) に残す（guest の stage
+	 *  マーカ STORE1 が出なければ «stock/jump 失敗»，STORE6 だけ出れば
+	 *  «stock は jump 到達も guest 未到達» を親が read-mem で切り分ける）．
+	 */
+	*(volatile uint32_t *) 0x600B1018UL = 0x570C0001UL;
 	vTaskDelay(2000 / portTICK_PERIOD_MS);
+	*(volatile uint32_t *) 0x600B1018UL = 0x570C0002UL;	/* jump 直前 */
 	ESP_LOGW(TAG, "ARM_B_NOBT_JUMP: asp3_jump_now()");
 	asp3_jump_now();
 	/* 到達しない */
