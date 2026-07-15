@@ -674,8 +674,24 @@ main_task(EXINF exinf)
 	 *  ここで既にbit8=1が見えれば「物理PLLロックはジャンプを跨いで
 	 *  生存する」ことの直接証拠になる（ASP3が何か書く前の値）．
 	 */
-	syslog(LOG_NOTICE, "ble_host_smoke_c6: HANDOFF entry synth(0x600a00cc)=0x%08x",
-		   (uint_t) *(volatile uint32_t *) 0x600a00ccU);
+	/*
+	 *  §20：cold 判定用の entry スナップショット．
+	 *  - synth(0x600a00cc)：cold なら bit8=0(0x...e50)＝«genuinely cold» の証拠．
+	 *    （RF-synth-PLL ロックは後段 esp_bt_controller_enable の
+	 *    register_chipv7_phy で立つ．ここは main_task 入口＝BT init 前なので
+	 *    修正が効いても cold では bit8=0．bit8=1 なら warm residual＝test 無効）．
+	 *  - PMU HP_ACTIVE 0x600b000c/0x600b0010/0x600b0100：pmu_init が
+	 *    hardware_init_hook で PMU を POR から書換えたかの readback．cold で
+	 *    ハングした場合«pmu_init が着弾したが不十分»と«pmu_init 未着弾»を
+	 *    分離する（C5 兄弟の «無給電ドメインへの書込みは stick しない» を検出）．
+	 */
+	syslog(LOG_NOTICE,
+		   "ble_host_smoke_c6: HANDOFF entry synth(0x600a00cc)=0x%08x "
+		   "PMU[0x600b000c]=0x%08x [0x600b0010]=0x%08x [0x600b0100]=0x%08x",
+		   (uint_t) *(volatile uint32_t *) 0x600a00ccU,
+		   (uint_t) *(volatile uint32_t *) 0x600b000cU,
+		   (uint_t) *(volatile uint32_t *) 0x600b0010U,
+		   (uint_t) *(volatile uint32_t *) 0x600b0100U);
 
 	esp_shim_initialize();
 
