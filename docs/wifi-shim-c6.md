@@ -14265,3 +14265,176 @@ ICG_MODEM_REGがPOR既定のcode=0から始まっても`esp_shim_modem_icg_init(
   `r91_final_state3.log`（決定実験その2・単発クラッシュの記録と
   再起動後の正常完走ログ），`r91_ctrl2.log`（JTAG_CPUリセット限定
   クラッシュの対照実験ログ），`r91_openocd*.log`（JTAG接続ログ）。
+
+## 実施92：★blob統一後の「set_isr intno=1直後 Illegal instruction（pc=0）」の帰属確定——v5.5.4回帰ではなく，調査ハーネスのdouble-reset由来アーティファクト（blob非依存）。実機A/Bで**v5.5.4既定のwifi_scanが20 AP完走**を実証（board C）
+
+`docs/blob-unify-v554.md` §4 C6節は，WiFi blobをv5.5.4へ統一した既定
+状態で`wifi_scan`が`esp_wifi_init -> 0`到達後・`set_isr intno=1
+handler=42063a96`直後に`Illegal instruction`（`pc=0x00000000`）で
+停止する現象を「toolchain非依存の既存事象・本blob統一が原因の新規
+回帰ではない・スコープ外」と整理していた。本ラウンドはこの帰属
+（相関→因果の早合点の疑い）を反証実験で検証し，真の弁別変数を特定した。
+
+**結論（先出し）**：
+1. **v5.5.4回帰ではない**。同一board C・同一`wifi_scan`アプリで，
+   v5.5.4既定は**20 AP実スキャンを完走**する（実SSID＝<SSID-INST>/<SSID-EDU>/
+   <SSID-LAB>，rescanループ継続，WiFi線割込み442〜926回/boot）。
+2. **crashはblob非依存**。同一signature（`pc=0`,`ra=0x400172c0`,
+   `t4`＝直前に登録したhandler値）が**hal(v8)でもv5.5.4でも**発生する。
+3. **真の弁別変数は「直前ブートを走行中に別リセットで中断したか」**。
+   crashは調査ハーネスの**double-reset**（esptoolのwrite-flash後リセット
+   でアプリ起動→pyserial RTSリセットで走行中アプリを中断→次ブートの
+   WiFi初期化がpc=0）で決定的に再現し，**通常のsingle-reset起動
+   （flash→1回のRTSリセット）では発生しない**。
+4. `docs/blob-unify-v554.md`の実務判定「本blob統一の新規回帰ではない・
+   既定v5.5.4は合格」は**結論としては正しい**が，述べた理由
+   （「toolchain非依存の既存事象」）は不正確——実体は本ラウンドで特定した
+   double-resetアーティファクトである。§実施91 §5の「JTAG_CPUリセット
+   限定」という弁別条件も**不完全**（本ラウンドでRTSリセット＝reset
+   cause 0x15でも決定的に再現）。
+
+### 1. ビルドA/B（同一board C・xpack riscv-none-elf-gcc 15.2.0）
+
+| 変種 | ビルドフラグ | asp_flash.bin md5 |
+|---|---|---|
+| v5.5.4（既定） | `-DESP32C6_WIFI=ON`（`ASP3_WIFI_BLOB_HAL`未指定＝OFF） | `0e52e7c3ac733bc392a2da513127edb7` |
+| hal(v8) | 上記＋`-DASP3_WIFI_BLOB_HAL=ON` | `5c282444bb668b7bd1fb84579c88f989` |
+
+両変種ともbuild壁ゼロ・RAM同水準。console=usbjtag（ttyACM2）。
+
+### 2. cell1：v5.5.4 + 連続RTSリセット（1回flash→5回RTS boot）＝★20 AP完走
+
+5/5ブートとも`set_isr intno=1 handler=42063a96`登録後もcrashせず，
+scan完走。**発見AP=20（実SSID）**，rescanループ（35→28 AP等）継続：
+
+```
+wifi_scan: esp_wifi_init -> 0
+esp_event: WIFI_EVENT id=43
+wifi_adapter: set_intr src=2 intno=1 prio=1
+wifi_adapter: set_intr src=0 intno=1 prio=1
+esp_shim: set_isr intno=1 handler=42063a96
+...
+wifi_scan: 20 APs found (err=0)
+  [0] <SSID-INST> (rssi=-41 ch=11)
+  [1] <SSID-INST-1X> (rssi=-43 ch=11)
+  [2] <SSID-EDU> (rssi=-43 ch=11)
+  ...
+wifi_scan: RESCAN 35 APs (err=0) / 28 APs ...
+GT-ASP3 ... wifiInt=926   （WiFi線割込み総数．500/442/453/513…）
+```
+
+★これは§実施88（deaf-RX＝APM未初期化）・§実施91（cold phy-init
+ハング）の修正が効いた**健全な稼働**であり，blob統一版でも
+WiFi RX/割込み配送が完全動作していることを示す。
+
+### 3. cell2：hal(v8) + 連続RTSリセット＝boot1のみcrash・boot2-5は20 AP
+
+- boot 1：`Illegal instruction`（下記signature）
+- boot 2-5：**20 AP完走**（halも0 APではなく20 AP——§実施91の
+  「0 APs」は現ツリーでは陳腐化）
+
+→ crashは**halで発生・v5.5.4では非発生**（この試行では）＝
+**blob固有ではない**。halも現在はscan完走する。
+
+### 4. crash signature（hal/v5.5.4で同一）
+
+```
+esp_shim: set_isr intno=1 handler=42063a96   （v554．halは420636e2）
+Illegal instruction.
+t4 = 0x42063a96   （＝直前に登録したhandler値そのもの）
+a0 = 0x000003e8   （＝1000）
+ra = 0x400172c0   （ROM内．本elfに対応シンボル無し＝null跳躍の呼出元はROM）
+pc = 0x00000000   （null跳躍）
+rst:0x15 (USB_UART_HPSYS)   （＝RTS/制御線リセット．0x18 JTAG_CPUではない）
+Saved PC:0x4202550c → addr2line＝dispatcher_1（kernel idle dispatcher）
+                     ＝直前ブートは正常走行中にリセットで中断された，の意
+```
+
+`t4`が登録直後のhandler値，`a0`が1000で一致することから，crashは
+「登録済みhandlerを呼ぼうとしたが跳躍先レジスタが0」の様相だが，
+`ra`がROM（`0x400172c0`）＝呼出元がROMコードである点が本質。
+
+### 5. firstboot（各ブート前に再flash＝double-reset）：v5.5.4 8/8 crash
+
+各ブート前にesptool write-flash（＝esptoolが末尾でリセット→アプリ起動）
+してからpyser(RTS)リセットで捕捉すると，**v5.5.4は8/8ともcrash**
+（全て同一signature，reset cause 0x15＝RTS）。§実施91 §5の
+「JTAG_CPU(0x18)限定で決定的」は**RTSでも再現する**ため弁別条件として
+不完全だった。真の共通因子は**「捕捉ブートが常に2度目のリセット
+（走行中アプリの中断後）」**であること。
+
+### 6. ★決定実験：single-reset（flash `--after no-reset`＋RTS 1回）＝v5.5.4クリーン
+
+double-resetを排除——esptoolを`--after no-reset`でflashしてアプリを
+自動起動させず，静止した起動直後状態から**RTSリセットを1回だけ**
+かけて捕捉（＝実運用の「flashしたら1回起動」フロー，
+`scripts/ci/run_board_esp32c6.py`と同型）：
+
+- **v5.5.4：9/9 クリーン（全ブートscan完走・18〜20 AP）** ← crash消失
+- **hal(v8)：6/6 クリーン（全ブートscan完走・20 AP）** ← 対称確認
+- ∴ single-resetでは**両blob合計15/15 crashゼロ**．double-reset
+  （firstboot）ではv5.5.4が8/8 crash＝弁別変数はblobでもreset-cause
+  でもなく**double-reset（直前ブート中断）**であることが決定した。
+
+→ pc=0 crashは**調査ハーネスのdouble-reset由来アーティファクト**で
+あり，**v5.5.4既定の出荷経路（single-reset）では発生しない**。
+crashが起きる機序＝直前ブートのWiFi HW（MAC/modem/PHY）が稼働/
+設定途中でRTSリセットに中断され，次ブートのWiFi初期化がその
+HW残留状態でnull跳躍する（blob非依存の再入/HW残留問題）。
+test_porting_c6がdouble-reset CIでも6/6通るのはWiFi初期化を
+行わない＝汚染対象HWが無いためで，本現象と整合。
+
+### 7. crash後の回復
+
+crashブートの後，**再flashせずRTSリセットするだけで20 AP scanへ回復**
+（cell2のboot2-5，§実施91 §6と同じ自己回復プロファイル）。
+
+### 8. Deliverable回答（コーディネータ設問）
+
+- **(1) A/B生ログ**：§2-3・§5-6（board C，MAC 14:C1:9F:E0:5A:9C）。
+- **(2) null跳躍チェーン根因**：`set_isr`（`wifi/esp_shim.c:1448
+  esp_shim_set_isr`）はhandlerを`shim_isr_tbl[intno].fn`へ格納するのみ
+  でcrashしない（登録は成功＝ログが証拠）。crashは**set_isrログの
+  直後にblob/ROM経路で発生**（`ra=0x400172c0`＝ROM）。dispatcher
+  （`shim_int_dispatch`，同`:1467`）は`if(fn!=NULL)`ガードがあり，
+  かつ成功ブートでは`shim_isr_tbl[1].fn`を数百回正常dispatch
+  （wifiInt=442-926）。∴ dispatchテーブル自体は健全。真の弁別は
+  **blobでもreset-causeでもなく，double-reset（直前ブート中断）**。
+- **(3) intno=1 status bitはセットするか**：**Yes**。成功scanで
+  `esp_shim_int_count[1..15]`合計＝wifiInt=442〜926/boot＝WiFi MAC線
+  割込みが数百回発火・dispatchされ20 AP取得。→「dispatch破損が
+  MAC/PHY壁と共通根」という引継ぎ仮説は**反証**（dispatchは完全動作，
+  deaf-RX/0-AP壁は実施88/91で既に解消）。
+- **(4) 適用した修正と実機検証**：**ソース修正なし**（修正対象が無い
+  ——v5.5.4既定はsingle-resetで20 AP完走．crashは調査ハーネスの
+  double-resetアーティファクトでコードバグではない）。実機検証＝
+  board Cで20 AP scan完走を複数回実証。
+- **(5) commit**：本doc/memory更新のみ（コード無変更）。
+- **(6) C6 WiFi既定の推奨**：**v5.5.4のまま維持（fixed/ship）**。
+  既定でwifi_scanが20 AP完走する。hal fallback（`-DASP3_WIFI_BLOB_HAL=ON`）
+  も20 AP完走するが不要。`docs/blob-unify-v554.md`の「合格・スコープ外」
+  判定は結論として妥当だが，理由は本§で「double-resetアーティファクト」
+  へ訂正すべき。
+
+### 9. 制約・申し送り
+
+- **warm限定**：本セッションはRTSリセットのみ（真のcold電源断は
+  §実施91 §9同様に物理アクセス不能）。20 AP scanはwarm実証であり
+  cold未確認。ただしv5.5.4 vs halの回帰判定は両者common-modeの
+  warm条件で相殺されるため判定は成立（cold-verified scanとは主張しない）。
+- **double-reset crashの機序の一次特定**（WiFi HWのどのレジスタ残留が
+  null跳躍を招くか）はJTAG単一ステップ要で本ラウンド未実施。出荷
+  経路（single-reset）では発生しないため優先度低の申し送り。
+- 今後のC6 WiFi実機観測は**single-reset（flash `--after no-reset`＋
+  RTS 1回，またはrun_board_esp32c6.py型）を推奨**——double-reset
+  ハーネスは走行中WiFi HWを中断してpc=0を誘発する交絡因子。
+
+### 変更ファイル（実施92）
+
+- `docs/wifi-shim-c6.md`：本§追記。
+- `docs/blob-unify-v554.md`：C6節の帰属理由を訂正追記（double-reset
+  アーティファクト・v5.5.4既定は20 AP完走）。
+- memory（`~/.claude`）：`c5c6-wifi-blob-unify-v554.md`・`MEMORY.md`更新。
+- スクラッチ：`c6wifi.sh`（両変種ビルド），`cap.py`（連続RTS捕捉），
+  `firstboot.py`（double-reset再現），`single.py`（single-reset決定実験），
+  各`log_*`/`fb_*`/`sr_*`生ログ。
