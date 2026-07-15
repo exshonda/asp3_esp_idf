@@ -999,6 +999,23 @@ extern uint8_t coex_schm_flexible_period_get(void);
 extern void *coex_schm_get_phase_by_idx(int idx);
 
 /*
+ *  v5.5.4統一（docs/blob-unify-v554.md）：C5版（wifi_v8/esp_wifi_adapter.c）
+ *  と同一の事象・同一の対処。wifi_os_adapter.h（v5.5.4版．
+ *  idf_v554_override/経由で有効）はC6（soc_caps.hでSOC_WIFI_HE_SUPPORT=1）
+ *  向けに`_wifi_disable_ac_ax`フィールドを持つ。実ESP-IDF
+ *  （esp_wifi/esp32c6/esp_adapter.c）の実装に倣い「11ac/11axの無効化は
+ *  未サポート」＝falseを返す。CONFIG_SOC_WIFI_HE_SUPPORTはhal/nuttx/
+ *  esp32c6/include/sdkconfig.hで既に1に定義済み。
+ */
+#if CONFIG_SOC_WIFI_HE_SUPPORT
+static bool
+wifi_disable_ac_ax_wrapper(void)
+{
+	return false;
+}
+#endif
+
+/*
  *		osiテーブル本体
  */
 wifi_osi_funcs_t g_wifi_osi_funcs = {
@@ -1123,5 +1140,8 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 	._coex_schm_flexible_period_set = coex_schm_flexible_period_set,
 	._coex_schm_flexible_period_get = coex_schm_flexible_period_get,
 	._coex_schm_get_phase_by_idx = coex_schm_get_phase_by_idx,
+#if CONFIG_SOC_WIFI_HE_SUPPORT
+	._wifi_disable_ac_ax = wifi_disable_ac_ax_wrapper,
+#endif
 	._magic = ESP_WIFI_OS_ADAPTER_MAGIC,
 };

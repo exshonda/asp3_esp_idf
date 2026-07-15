@@ -298,25 +298,40 @@ list(APPEND ASP3_LINK_OPTIONS
 )
 
 #
-#  DIAGNOSTIC（追記19・一時）：blob版差の因果検証．native(IDF v6.1)は
-#  受信できるがASP3(esp-hal-3rdparty)は0 AP．全blob(.a)がバージョン違い
-#  （md5相違）のため，IDF v6.1のblobへリンクを差し替えて受信するか確認．
-#  osiアダプタ版不一致ならesp_wifi_initが即エラー＝それ自体が判定材料．
-#  ASP3_WIFI_BLOB_DIR未定義なら従来どおりesp-hal-3rdpartyのblobを使う．
+#  ★v5.5.4統一（docs/blob-unify-v554.md）：WiFi/PHY/coexist blobを
+#  hal（esp-hal-3rdparty submodule，NuttX同期のv8）から実ESP-IDF
+#  v5.5.4（`~/tools/esp-idf`，同じos_adapter v8）へ切替える。
+#  旧`ASP3_WIFI_BLOB_IDF`診断枝（追記19．native(IDF v6.1)との受信可否
+#  比較用の一時計装で，未検証のまま=undefined運用だった．
+#  docs/blob-inventory.md §7参照）はこの統一施策に伴い廃止し，
+#  C3/C5と同じ`ASP3_WIFI_BLOB_HAL`トグル（既定OFF=v5.5.4，ON=hal）へ
+#  一本化する。
 #
-if(DEFINED ASP3_WIFI_BLOB_IDF)
-    list(APPEND ASP3_LINK_OPTIONS
-        -L${ASP3_WIFI_BLOB_IDF}/components/esp_wifi/lib/${WIFI_CHIP_SERIES}
-        -L${ASP3_WIFI_BLOB_IDF}/components/esp_phy/lib/${WIFI_CHIP_SERIES}
-        -L${ASP3_WIFI_BLOB_IDF}/components/esp_coex/lib/${WIFI_CHIP_SERIES}
-    )
+#  C6はsoc_caps.hでSOC_WIFI_HE_SUPPORT=1のため，wifi_os_adapter.hの
+#  wifi_osi_funcs_t構造体がhal/v5.5.4でバイト非同一（v5.5.4のみ
+#  `_wifi_disable_ac_ax`フィールドを持つ．C5と同じ事象）＝
+#  idf_v554_override/のヘッダ（v5.5.4からのverbatimコピー）をhalの
+#  esp_wifi/includeより前に置いて当該ヘッダだけをシャドウする。
+#
+option(ASP3_WIFI_BLOB_HAL "Use hal(v8) WiFi/PHY/coexist blob instead of ESP-IDF v5.5.4(v8) unification (reversible fallback)" OFF)
+if(NOT DEFINED IDF_V554)
+    set(IDF_V554 /home/honda/tools/esp-idf)
+endif()
+if(ASP3_WIFI_BLOB_HAL)
+    set(ASP3_WIFI_BLOB_SRC ${ESP_HAL_DIR})
 else()
-    list(APPEND ASP3_LINK_OPTIONS
-        -L${ESP_HAL_DIR}/components/esp_wifi/lib/${WIFI_CHIP_SERIES}
-        -L${ESP_HAL_DIR}/components/esp_phy/lib/${WIFI_CHIP_SERIES}
-        -L${ESP_HAL_DIR}/components/esp_coex/lib/${WIFI_CHIP_SERIES}
+    set(ASP3_WIFI_BLOB_SRC ${IDF_V554})
+    list(APPEND ASP3_COMPILE_DEFS ASP3_WIFI_BLOB_V554=1)
+    list(PREPEND ASP3_INCLUDE_DIRS
+        ${CMAKE_CURRENT_LIST_DIR}/wifi/idf_v554_override
     )
 endif()
+
+list(APPEND ASP3_LINK_OPTIONS
+    -L${ASP3_WIFI_BLOB_SRC}/components/esp_wifi/lib/${WIFI_CHIP_SERIES}
+    -L${ASP3_WIFI_BLOB_SRC}/components/esp_phy/lib/${WIFI_CHIP_SERIES}
+    -L${ASP3_WIFI_BLOB_SRC}/components/esp_coex/lib/${WIFI_CHIP_SERIES}
+)
 
 list(APPEND ASP3_LINK_LIBS
     phy
