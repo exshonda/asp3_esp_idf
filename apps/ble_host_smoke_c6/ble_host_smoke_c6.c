@@ -675,23 +675,49 @@ main_task(EXINF exinf)
 	 *  生存する」ことの直接証拠になる（ASP3が何か書く前の値）．
 	 */
 	/*
-	 *  §20：cold 判定用の entry スナップショット．
+	 *  §20.6：cold 判定＋Arm-B-vs-standalone diff 用の entry スナップショット．
 	 *  - synth(0x600a00cc)：cold なら bit8=0(0x...e50)＝«genuinely cold» の証拠．
-	 *    （RF-synth-PLL ロックは後段 esp_bt_controller_enable の
-	 *    register_chipv7_phy で立つ．ここは main_task 入口＝BT init 前なので
-	 *    修正が効いても cold では bit8=0．bit8=1 なら warm residual＝test 無効）．
-	 *  - PMU HP_ACTIVE 0x600b000c/0x600b0010/0x600b0100：pmu_init が
-	 *    hardware_init_hook で PMU を POR から書換えたかの readback．cold で
-	 *    ハングした場合«pmu_init が着弾したが不十分»と«pmu_init 未着弾»を
-	 *    分離する（C5 兄弟の «無給電ドメインへの書込みは stick しない» を検出）．
+	 *    RF-synth-PLL ロックは後段 esp_bt_controller_enable の
+	 *    register_chipv7_phy で «初めて» 立つ．ここは main_task 入口＝BT init
+	 *    «前» なので修正が効いても cold では bit8=0（bit8=1 なら warm＝test 無効）．
+	 *  - MODEM_PWR0(0x600ad000)：WiFi の cold ハング点（wait_i2c_sdm_stable）の
+	 *    フリーランカウンタ．BT では ICG code=2 で既にゲートが開いている想定
+	 *    （§18＝regi2c 212 write 完走・bit8 poll へ到達）．非0/変動＝BT の壁は
+	 *    «WiFi の 0x600ad000 ゲートではなく» 下流の bit8 アナログ PLL ロックだと
+	 *    再確認（advisor の «cheap confirm»）．
+	 *  - PMU HP 0x600b0000〜0x600b0034＋0x600b0100〜0x600b0134：HP_ACTIVE 電源/
+	 *    クロック/アナログ設定バンク＋電源ドメイン regs．**Arm B（stock 完全
+	 *    cold 起動→ジャンプ）と standalone の entry で «この dump を diff» すれば，
+	 *    stock が pmu_init を超えて何を設定しているか（bit8 ロックの欠落材料）が
+	 *    レジスタとして見える**（digital-invisible なら null-diff＝それ自体が
+	 *    «残壁はアナログ» の確証＝§18 と整合）．
 	 */
 	syslog(LOG_NOTICE,
 		   "ble_host_smoke_c6: HANDOFF entry synth(0x600a00cc)=0x%08x "
-		   "PMU[0x600b000c]=0x%08x [0x600b0010]=0x%08x [0x600b0100]=0x%08x",
+		   "MODEM_PWR0(0x600ad000)=0x%08x",
 		   (uint_t) *(volatile uint32_t *) 0x600a00ccU,
-		   (uint_t) *(volatile uint32_t *) 0x600b000cU,
-		   (uint_t) *(volatile uint32_t *) 0x600b0010U,
-		   (uint_t) *(volatile uint32_t *) 0x600b0100U);
+		   (uint_t) *(volatile uint32_t *) 0x600ad000U);
+	{
+		uint32_t a;
+		for (a = 0x600b0000U; a <= 0x600b0034U; a += 0x10U) {
+			syslog(LOG_NOTICE,
+				   "ble_host_smoke_c6: PMU[0x%08x]=%08x %08x %08x %08x",
+				   (uint_t) a,
+				   (uint_t) *(volatile uint32_t *) (uintptr_t) a,
+				   (uint_t) *(volatile uint32_t *) (uintptr_t) (a + 4U),
+				   (uint_t) *(volatile uint32_t *) (uintptr_t) (a + 8U),
+				   (uint_t) *(volatile uint32_t *) (uintptr_t) (a + 12U));
+		}
+		for (a = 0x600b0100U; a <= 0x600b0134U; a += 0x10U) {
+			syslog(LOG_NOTICE,
+				   "ble_host_smoke_c6: PMU[0x%08x]=%08x %08x %08x %08x",
+				   (uint_t) a,
+				   (uint_t) *(volatile uint32_t *) (uintptr_t) a,
+				   (uint_t) *(volatile uint32_t *) (uintptr_t) (a + 4U),
+				   (uint_t) *(volatile uint32_t *) (uintptr_t) (a + 8U),
+				   (uint_t) *(volatile uint32_t *) (uintptr_t) (a + 12U));
+		}
+	}
 
 	esp_shim_initialize();
 
