@@ -2106,3 +2106,60 @@ enable-bit 差なし» で決着＝これ以上の同一チップ diff 戦線は
 FIX は «cold で欠けるアナログ PLL 前提を1つ立てて bit8 cold 収束率»
 で判定するが，その «立てるべき1つ» の特定には (i)(ii) いずれかの
 決定的 delta が要る＝現時点は «ranked candidate 提示» の段階。
+
+### 18.11 ★capstone 拡張：FE/synth/AGC 全域（0x600a0400・0x600a7000 含む）も «バイト完全一致»＋新仮説「bit8 poll は SW-start freq 経路固有（v9-BT）」
+
+§18.10 の範囲を拡張し，wifi_scan(lock) と C6-BT(hang) で `0x600a0400`
+（16語・FE-TX 系）と `0x600a7000`（24語・**AGC/RX 系**＝WiFi deaf-RX
+調査 実施59-75 の中心領域）も比較：
+
+- `0x600a0400`：`0000007f 0 0 0 60000000 000c8003 00444f3c c0000000 / 0 0
+  00000001 0 01ff1001 0 00f3b333 00f3b333`＝**両者 全16語一致**。
+- `0x600a7000`：`00008806 38010000 889db4b8 36762e1f …`（24語）＝
+  **両者 全24語一致**（v8/v9 で異なると予想した AGC 較正値も同一）。
+
+**∴FE/synth/AGC のデジタルレジスタ空間は «PLL lock する wifi_scan» と
+«hang する C6-BT» で 全域バイト一致**（§18.10 synth 制御 + 本 §18.11
+FE-TX/AGC-RX）。§18.5(regi2c config)・§18.7(regi2c coverage) と合わせ，
+**デジタルで観測可能な PHY 状態は lock/非lock で完全に区別できない**。
+
+**★新仮説（要検証）＝bit8 poll は «SW-start freq 経路» 固有**：ROM の
+`__call_*` トランポリン一覧に，channel-freq 設定の **2 経路**が存在：
+- `freq_chan_en_sw`/`ram_set_chan_freq_sw_start`（**SW-start**．
+  `0x600a00c0` bit14 トリガ→`0x600a00cc` bit8 lock を **polling**＝
+  C6-BT(v9) がハングする経路）
+- `__call_phy_en_hw_set_freq`（`0x40003ca6`＝**HW-set**．bit8 polling
+  を伴わない可能性）
+
+wifi_scan(v8) が **HW-set 経路**を使い bit8 を polling しない一方，
+v9-BT が **SW-start 経路**で bit8 を待つなら，«bit8 が（この board で）
+SW-start 経路では立たない» ことがハングの直接原因で，wifi_scan は
+（同じ analog 状態でも）bit8 に依存しないため素通りする——という
+筋が立つ。この場合の焦点は «SW-start 経路の bit8 lock latch が立つ
+analog/SW 前提» の特定（HW-set 経路との差）。**未検証**（v8 libphy の
+freq 経路特定＋SW-start での bit8 挙動の実機確認が要る）。
+
+### 18.12 §18 総括（本ラウンド到達点）と board 状態
+
+**反証で排除した delta（§14 成功→現在ハング）**：GCC版(§18.1)・SM(§18.2)・
+regi2c coverage gap(§18.7)・regi2c config 未完(§18.5)・FE/synth/AGC の
+デジタル MMIO 差(§18.10-11＝全域一致)。**∴残壁は «デジタル不可視の
+アナログ PLL lock»**（§17 の RF-analog/PLL 予測を regi2c+MMIO 実測で
+三重に裏付け）。
+
+**ranked 候補（次段・すべて C6 単独可・host BT 不要・synth-lock bit8
+cold 収束率で判定）**：
+1. **SW-start vs HW-set freq 経路仮説の検証**（§18.11）：v8-wifi_scan と
+   v9-BT が bit8 を待つ経路が違うか実機確認。もし v9-BT 固有の bit8 待ちが
+   原因なら，HW-set 経路差＝analog でなく «SW-start lock latch の前提» に
+   焦点が移る（最有力・新規）。
+2. **warm-residual 反証**：wifi_scan で PLL を回した状態が後続 BT boot の
+   bit8 を助けるか（§14 warm 成功の機序）。
+3. **C5-BT(v9) regi2c 値対照**（C5 計装移植後・§18.8 保留）：v9 同世代で
+   «C6 が synth/SDM に異値を書く» 可能性の最終確認。
+
+**board 状態**：board C（port1）＝現在 `build/c6wifiscan_ctrl`（wifi_scan・
+対照）flash 済。BT へ戻すには `build/c6bt_idf61_d1`（D-1）/`build/c6ble`
+（SM）/`build/c6_s14`（§14 config）/`build/c6bt_regi2c`（regi2c トレース）を
+再 flash。C5 #2（port3・C8:94）＝`build/c5ble` 動作・非接触維持。
+計装 `esp_bt_regi2c_trace.c`（既定 OFF）は commit 済で再利用可。
