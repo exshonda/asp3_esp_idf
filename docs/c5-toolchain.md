@@ -307,6 +307,12 @@ C5#1(port2・latch中)／C5#2(port3)／C3(port4)には不接触。
   スコープ外）。カーネル・アプリの起動自体（banner〜esp_wifi_init完走〜
   イベント配送）は両toolchainで同一に到達しており，本ラウンドの合否
   基準（ビルド壁ゼロ＋kernel/アプリ起動到達）は満たしている。
+  ★念のため「A（build hygiene修正）が原因ではないか」も実測で切り分け
+  済み：C6 target.cmake をA適用前（commit`f39a3cf`）の内容へ**同一絶対
+  パス上で**一時的に差し戻し，xpackで`wifi_scan`を再ビルドしたところ
+  FLASH使用量がバイト単位で一致（538288B）し，`objdump -d`の逆アセンブル
+  差分は埋め込みビルド時刻文字列以外ゼロ＝コード生成に差分なし。よって
+  このクラッシュはA-2のtarget.cmake変更が原因でもない（既存事象）。
 - **結論**：C6 も esp-15.2（crosstool-NG，ESP公式配布）で WiFi・BLE
   いずれもビルド壁ゼロ・xpack15と同一のRAM使用率・同一の起動到達点
   （BLEはadvまで完走・WiFiはesp_wifi_init完走後の既存クラッシュ点まで
