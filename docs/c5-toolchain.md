@@ -176,10 +176,23 @@ C5#2（`C8:94`）には不接触。
 - **BLE 実機動作**：flash→RTS boot 後，RTC マーカ
   （`0x50 SYNC`=host sync／`0x5C ADV`=advertising開始／`0xC4 adv-rc`=0）
   で到達を確認。ただしマーカ単独では判定しない
-  （`memory/feedback_hardware_investigation_rigor.md`）ため，
-  `bluetoothctl remove 60:55:F9:57:BA:BC` で既知エントリを消してから
-  再scanし，`ASP3-C3-BLE` が**再出現**することで実放射を確認
-  （キャッシュの偽陽性を排除）。
+  （`memory/feedback_hardware_investigation_rigor.md`）ため，以下2点で
+  裏取り：
+  1. **clean console 実測**（`tmp/clean_boot_capture.py`，RTSパルスで
+     単発クリーンリセット→開いたfdでそのまま12秒受信）：バナー
+     `TOPPERS/ASP3 Kernel Release 3.7.2 for ESP32-C3 (Jul 15 2026,
+     13:38:34)` を確認。このタイムスタンプ文字列は
+     `build/c3ble_esp15/asp.elf` に埋め込まれた文字列と完全一致（`strings`
+     で確認）＝**esp-15.2ビルドそのものが今まさに起動している**ことの
+     直接証拠（xpackビルド由来の残存マーカではない）。続けて
+     `ble_host_smoke: advertising started as 'ASP3-C3-BLE'`・
+     `Phase D-2 milestone reached` まで到達を確認。
+  2. **BlueZ 実放射（reproducibility 2回）**：
+     `bluetoothctl remove 60:55:F9:57:BA:BC` で既知エントリを消してから
+     再scanし，`ASP3-C3-BLE` が**再出現**することを2回連続で確認
+     （初回は1回目のscan(15s)では未検出，2回目のより長いscan(20s)で
+     検出＝BLE advの間欠性，デバイス側の問題ではない。C5実測と同じく
+     remove→再scanのサイクルを2回実施して再現性を確保）。
 - **kernel QEMU 非回帰**：`test/porting`（`ASP3_APPLDIR=test/porting`）を
   esp-15.2 で configure/build。**注意**：C3 の `target_kernel_impl.c` は
   `esp_rom_set_cpu_ticks_per_us()`（ROM関数．esp32c3.rom.ld由来の絶対
