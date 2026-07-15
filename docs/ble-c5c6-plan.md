@@ -1977,3 +1977,36 @@ lock する**——これが §16.7(b)「§14 成功＝warm-residual」の具体
   - **(c) C5-BT regi2c value 比較**（C5 解放後）：同世代 value 差分で
     «C6 が SDM/PLL に異値を書く» 可能性を最終確認（優先度は (a)(b) の
     後）。
+
+### 18.7 ★同一シリコン coverage 比較：wifi_scan(v8・PLL lock 成功) と C6-BT(v9・hang) は «regi2c 書込みレジスタが完全一致»＝coverage gap ではない
+
+C5 待ちの間に，同一 board C（同 chip・同 g_phyFuns テーブル 0x4087f954）の
+`wifi_scan`（`build/c6wifiscan_ctrl`＝**v8 libphy・PLL を lock して scan
+成功**）の regi2c write を採取（`wifi_regi2c_patch_install`，boot 2秒後 halt
+＝pos=245・ラップ無し）し，C6-BT(v9・hang，212 write) と **(block,reg)
+coverage** を比較（値は v8/v9・WiFi/BT freq で異なるため coverage のみ＝
+アドバイザ手法）：
+
+| block | wifi_scan(lock) write数 | C6-BT(hang) write数 |
+|---|---|---|
+| 0x61 | 4 | 4 |
+| 0x62（freq/power） | 169 | 136 |
+| 0x63（**SDM**） | **24** | **24** |
+| 0x66 | 2 | 2 |
+| 0x67（BB trim） | 19 | 19 |
+| 0x6a（**bias**） | **6** | **6** |
+| 0x6b（**RF synth**） | **21** | **21** |
+
+- **wifi_scan が書いて C6-BT が «書かない» (block,reg)＝0 個**
+- **C6-BT が書いて wifi_scan が書かない (block,reg)＝0 個**（早期窓）
+- SDM(0x63)・bias(0x6a)・RF synth(0x6b) の write 数は **バイト一致**。
+  差は block 0x62（freq/power）の 169 vs 136 のみ＝wifi_scan が多チャネル・
+  多パワーレベルを掃くため（同一レジスタ群への回数差）。
+
+**★結論**：同一シリコン上で «PLL を lock する stack（wifi_scan）» と
+«hang する stack（C6-BT）» が **完全に同一の regi2c レジスタ集合**を書く。
+∴C6-BT の synth-lock 失敗は «regi2c coverage gap»（BT が書き漏らす
+レジスタ）では決定的に **ない**。§18.5（config 完走）と併せ二重に確定：
+**残る差は «書込み値»（v8/v9・要 C5-BT v9 対照）か «regi2c 外のアナログ
+PLL 物理前提»（電源/リファレンス/lock-enable）のいずれか**——後者が
+§17/§18.5 の一次線。
