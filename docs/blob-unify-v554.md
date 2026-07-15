@@ -399,3 +399,19 @@ warm結果はv5.5.4のcold収束を意味しない——C6のcold判定は本ラ
   既存記録（本ラウンドのble_host_smoke_c5 WDTループが同一シグネチャ
   であることの一次資料）。
 - `docs/ble-c5c6.md`——C6のcold PLL課題（実施89〜91系列）の一次資料。
+
+## §10 ★親による cold 確認：v5.5.4 BT が C5 で cold 収束（D-1）＝BT-v5.5.4 統一の «安全性» 確定
+BT feasibility subagent の要請どおり、親が C5#2(port3) を電源再投入して latch 解除→
+`build/c5bt_v554`（bt_smoke_c5・`ASP3_BT_IDF_V554=ON`＝v5.5.4 blob）を flash→**真の電源断
+（off 10s→on）で cold 一発目**を rts_boot_capture（氾濫根治済＝clean）で採取：
+- `esp_bt_controller_init OK` → `I (881) phy: libbtbb version: 92325d6`（PHY 較正 run）→
+  **`esp_bt_controller_enable OK`（register_chipv7_phy 収束・cold）** → HCI Reset →
+  `VHCI recv 7 bytes` → **`HCI Command Complete`（controller alive・VHCI loopback OK）**。
+∴**v5.5.4 BT は C5 で «cold から» D-1 収束**。§9 の md5 実測（v5.5.4 の libble_app/libphy/
+libbtbb は v6.1 と «バイト同一»、libcoexist のみ相違）と合わせ、**BT-v5.5.4 統一は «回帰なし・
+cold 動作» で安全性確定**。§17.1 の「v6.1 自体も cold 未検証」は «同一 blob が cold 収束» で
+実質解消。**cold-PLL ハングは «C6 固有»**（C5 BT は cold 収束＝C6 の cold-PLL hard wall は
+blob 非依存の C6 silicon/analog 固有）も裏付け。
+**残＝`ASP3_BT_IDF_V554` の既定を «ON（v5.5.4）» にして BT 統一を完了するか（WiFi は既に
+v5.5.4 既定）はユーザー判断**（blob バイト同一＝低リスク・可逆）。C6 は cold-PLL 別壁につき
+cold 判定は保留（warm では bt_smoke_c6 2/2 動作）。
