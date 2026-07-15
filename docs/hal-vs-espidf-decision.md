@@ -97,6 +97,20 @@
 - **段階移行**：①C6 BT の `${IDF}` を submodule へ向ける最小 pilot（可逆）→
   ②WiFi support 層（mbedtls/wpa_supplicant/phy/hw_support）を IDF へ→③soc/hal/ld を
   IDF へ寄せ hal 撤去。
+- **C 系も同じ IDF ベースへ寄せる（開発効率）**：到達点は「全チップを単一 esp-idf
+  submodule（v5.5.4）に統一」。**駆動理由は M5 ではなく S3 開発との単一コードベース化**
+  （M5 は displayless の C3/C6 基盤を強制しない＝§5 の別軸）。統一の利得は主に
+  ①統合パターン・シム規約・sdkconfig/cmake 規約の一本化、②WiFi/BT シム
+  （`esp_shim.c`・npl・`esp_intr_alloc` 等）が同一 IDF レイアウトを相手に再利用可、
+  ③単一 submodule が RISC-V(C系)/Xtensa(S3系) 両アーキを賄う（アーキ差は asp3_core と
+  linker/startup 側で、IDF コンポーネント・ソースは共通）。ただし条件：
+  - **順序＝S3 先行でパターン確立 → C 系が後追い移行**（submodule レイアウト・シム規約・
+    sdkconfig 扱い・ブートハンドオフを S3 で実証してから C 系を同じ土台へ）。
+  - **可逆・漸進**＝C 系は現に動作中（C5 connect/DHCP/5GHz・bt_smoke 実績）。統一のため
+    だけに一気に剥がさず hal 経路を fallback に残し、コンポーネント単位で移して回帰させ
+    ない。BT の `${IDF}` 直コンパイル実証済みパターンの横展開。
+  - 移行は新機能を足さない refactor＝S3 と共有する範囲の分だけ元が取れる。段階移行①の
+    pilot を **S3/C 系の共通土台の最初の一歩**として S3 担当と共有設計する。
 - **最小策（当面現状維持）**：`.gitmodules`/README に「hal `b90b183` =
   esp-hal-3rdparty `release/master.c` = NuttX master pin(2026-07-15) = IDF 6.1.0・
   mbedtls 4.0」と記録。曖昧さの実害を消す。
