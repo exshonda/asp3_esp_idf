@@ -103,9 +103,17 @@ target_hrt_set_event(HRTCNT hrtcnt)
 
 	/*
 	 *  target0コンパレータへ比較値を設定する
+	 *
+	 *  ★「no time event」氾濫の根治（C6実施04の統一移植）：oneshotアラームは
+	 *  発火後もWORK_ENが残り，comparator targetが過去になるとlevel再ラッチ
+	 *  してスプリアス再発火を繰り返す（handler→signal_time→time event無し→
+	 *  syslog氾濫）．再arm毎にdisable→set→apply→enableの«クリーン再arm»で
+	 *  古いlevel-latchをクリアしてから未来targetを武装する．
 	 */
+	systimer_ll_enable_alarm(&SYSTIMER, 0U, false);
 	systimer_ll_set_alarm_target(&SYSTIMER, 0U, target);
 	systimer_ll_apply_alarm_value(&SYSTIMER, 0U);
+	systimer_ll_enable_alarm(&SYSTIMER, 0U, true);
 
 	/*
 	 *  設定完了時点で比較値を過ぎていたら割込みを強制する

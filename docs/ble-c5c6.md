@@ -1184,3 +1184,121 @@ C5もadv到達まで達成。次段でセントラルから接続を試みる場
 の最小構成のため、GATT探索でNULL関数ポインタに当たる可能性（C3のD-2cで既知）に
 注意。氾濫の恒久修正（実施04申し送り＝`target_hrt_set_event`のクリーン再arm）は
 本ラウンドでも未実施（D-2a/D-2bはstore主体の判定で完遂できたため）。
+
+## BLE実施06：「no time event」氾濫根治のC3/C5統一移植——★C6実施04（commit 44868d0）のSYSTIMERアラームdisarm/クリーン再arm修正をC3・C5のtarget_timer.{c,h}へ同型移植、実機で両チップとも氾濫消滅＋カーネル/アプリ非回帰を確認。QEMU test_portingが「氾濫あり→6/6 pass」から「氾濫なし→6/6 pass」への変化を機械的に再現
+
+**日付**：2026-07-15　**対象**：C3（`60:55:F9:57:BA:BC`，ttyACM3）・C5#1
+（`D0:CF:13:F0:A7:44`，ttyACM1）　**出発点**：C6実施04（本ドキュメント外・
+commit 44868d0）で確立した「no time event」氾濫の根治（target層SYSTIMER
+oneshotアラームのlevel再ラッチ対策）を，同型未修正のまま残っていたC3/C5
+（本ドキュメント実施04・05が既に確認していた現象。C3は本ラウンドまで
+未計測）へ統一移植する。
+
+### 修正内容（C3/C5とも同型・chip依存部分は既存記述に追随）
+
+`asp3/target/esp32c3_espidf/target_timer.{c,h}`・
+`asp3/target/esp32c5_espidf/target_timer.{c,h}`の2箇所に，C6と全く同じ
+`systimer_ll_enable_alarm(&SYSTIMER, 0U, false/true)`呼び出しを追加：
+
+1. `target_hrt_set_event()`（`.h`）：`set_alarm_target`→`apply_alarm_value`の
+   前後を`enable_alarm(false)`→…→`enable_alarm(true)`で挟む（disable→set→
+   apply→enableのクリーン再arm）。
+2. `target_hrt_handler()`（`.c`）：`clear_alarm_int`の直前に
+   `enable_alarm(false)`を追加（発火後disarmしてから割込みクリア）。
+
+追加行はチップ非依存（`SYSTIMER`・`systimer_ll_*`はC3/C5/C6共通のLL API）。
+各ファイル既存の`sil_wrw_mem(...FROM_CPU_0...)`（C3=`ESP32C3_SYSTEM_*`，
+C5=`ESP32C5_INTPRI_*`）はチップ別の既存記述のまま変更なし。差分は
+C6コミット（44868d0）と行数まで完全一致（各ファイル+8行）。
+
+### 実機ベースライン（修正前）——★C3も氾濫することを本ラウンドで新規確認
+
+修正前バイナリ（`git stash`で一時的に戻して計測）を`clean_boot_capture.py`
+（RTSパルスで単発クリーンリセットし，同一fdのままパッシブ受信＝再オープンの
+取りこぼし窓を回避する新規計測スクリプト。`tmp/clean_boot_capture.py`）で
+単発リセットから採取：
+
+- **C3（`bt_smoke`，`-DESP32C3_BT=ON -DESP32C3_BT_SM=ON`）**：D-1到達
+  （`HCI Command Complete`受信・`Phase D-1 milestone reached`・`main_task`
+  `done`）後，LOGTASKのみが残る定常状態で**「no time event」氾濫を実測
+  （2ブート独立：518行/15秒・557行/20秒）**。★C3でこの氾濫が実機計測された
+  のは本ラウンドが初（従来docsにC3の言及なし）。実施01系のINTMTX多重割込み
+  ストーム（~33万/秒，既に別修正済み）とは無関係の別現象であることを桁数
+  （数十/秒 vs 33万/秒）で確認。
+- **C5（`ble_host_smoke_c5`）**：実施04・05が確立した通り軽微だが実在
+  （2ブート独立：38行/20秒・単発リセット採取で再現）。D-2a sync／adv
+  rc=0到達の前後で発生し，本ラウンドの計測も実施05の性格
+  （「adv活動でアプリ出力が常時流れるため軽微」）と整合。
+  ※`bt_smoke_c5`（D-1限定・NimBLEホスト無し，実施04本来の重い氾濫を
+  再現するアプリ）は本ツリーで`esp_shim_modem_icg_init`未定義参照の
+  リンクエラーがあり**現在ビルド不可**（`esp_bt.cmake`が`wifi_v8/esp_shim.c`
+  をBT単体ビルドのソースリストへ含めていない，本タイマ修正と無関係の
+  既存不具合。修正は本ラウンドの範囲外＝target層cmakeの別途対応が必要）。
+  そのため`ble_host_smoke_c5`（NimBLEホスト込み，ビルド可能）で代替計測。
+
+### 実機ベースライン（修正後）——★両チップとも氾濫消滅・非回帰
+
+同一アプリ・同一`clean_boot_capture.py`手順で2ブート独立に再計測：
+
+| チップ／アプリ | 修正前flood数 | 修正後flood数 | 到達マイルストーン（修正後） |
+|---|---|---|---|
+| C3 `bt_smoke`（boot1） | 518/15s | **0/15s** | banner→HCI Reset→Command Complete→D-1 milestone→done |
+| C3 `bt_smoke`（boot2） | 557/20s | **0/20s** | 同上 |
+| C5 `ble_host_smoke_c5`（boot1） | 38/20s | **0/20s** | banner→controller enable→nimble init→SYNC→adv started→g_adv_rc=0→done |
+| C5 `ble_host_smoke_c5`（boot2） | （同左） | **0/20s** | 同上 |
+
+RAM使用率は修正前後で完全一致（C3=84.98%・C5=77.80%）＝バイナリサイズ
+非回帰。C5は追加で**ホストhci0`bluetoothctl scan le`で`ASP3-C5-BLE`
+（`D0:CF:13:F0:A7:44`）をOTA検出**＝BLE機能自体も非回帰を確認。
+
+### QEMU test_porting（C3のみ．C5/C6はQEMUにマシン定義なし）
+
+本リポジトリのQEMU（Espressif fork）は`esp32c3`マシンのみサポート
+（`qemu-system-riscv32 -M help`でesp32c6/esp32c5は不在）。`test/porting`
+（asp3_core本体，`-DASP3_APPLDIR=test/porting -DASP3_APPLNAME=test_porting`
+＋`-DASP3_EXTRA_APP_C_FILES=test/porting/tap.c`）をQEMU実行し，修正前後を
+直接比較：
+
+- **修正前**：`# 6/6 passed`だが，test 5→6の間に**「no time event is
+  processed in hrt interrupt.」が1回出現**（QEMU実行という短時間・単発の
+  枠でも氾濫の再現を確認——実機の連続的な氾濫とは頻度が異なるが，同一
+  メカニズムがQEMUでも机上でなく実際に発火することの独立傍証）。
+- **修正後**：`# 6/6 passed`・氾濫行**0回**。TAPの6項目
+  （syslog_output/tick_timer_basic/task_create_activate/
+  semaphore_signal_wait/eventflag_set_wait/alarm_handler）すべて`ok`＝
+  カーネルタイマ機構（HRT/tick/alarm）の機械判定による非回帰確認。
+
+※test_portingを素のconfig（BT/WiFiともOFF）でリンクしようとすると
+**`esp_rom_set_cpu_ticks_per_us`が未定義参照でリンク不可**（`sample1`単体
+でも同じエラーが再現＝本タイマ修正と無関係の**既存の別問題**。
+`target_kernel_impl.c`の`hardware_init_hook`がこのROM関数を無条件で呼ぶ
+のに対し，そのROMアドレスを供給する`<chip>.rom.ld`は`esp_wifi.cmake`／
+`esp_bt.cmake`経由でWiFi/BT有効時にしか`INCLUDE`されないため）。本ラウンド
+では`-DESP32C3_WIFI=ON`を追加してROM ld由来のシンボルだけを取り込み
+（実行時にWi-Fi機能自体は使わない），test_portingのリンク・実行を可能に
+した。この既存問題自体の修正は本ラウンドの範囲外（禁則対象外の
+target層cmakeで対応可能だが，タイマ修正とは別スコープのため放置）。
+
+### 変更ファイル
+
+| ファイル | 内容 |
+|---|---|
+| `asp3/target/esp32c3_espidf/target_timer.c` | `target_hrt_handler`にdisarm追加（+2行実質，コメント込み+8行） |
+| `asp3/target/esp32c3_espidf/target_timer.h` | `target_hrt_set_event`をクリーン再arm化（+2行実質，コメント込み+8行） |
+| `asp3/target/esp32c5_espidf/target_timer.c` | 同上（C5版） |
+| `asp3/target/esp32c5_espidf/target_timer.h` | 同上（C5版） |
+| `tmp/clean_boot_capture.py`（新規） | 単発RTSパルス（`HardReset(uses_usb=True)`相当）を同一fd上で実行してから受信するパッシブ採取スクリプト。既存`rts_boot_capture.py`（2重リセットになりがちな二重RTSパルス方式）・`quiet_capture.py`/`wait_and_capture.py`（再オープンの取りこぼし窓が大きく実測0バイトになりがちだったため中間生成物として残置のみ）より安定して起動直後を捕捉できる |
+
+submodule（`asp3/asp3_core`・`hal/`）は無変更。
+
+### 申し送り
+
+- `bt_smoke_c5`（D-1限定アプリ）のリンクエラー（`esp_shim_modem_icg_init`
+  未定義参照）と，素のtest_porting/sample1がWiFi/BT無効時にROM関数未定義で
+  リンクできない件は，いずれも本ラウンドで新規発見した**タイマ修正と無関係の
+  既存不具合**。別ラウンドでの対応を推奨（前者は`esp_bt.cmake`のBT単体ビルド
+  ソースリストに`wifi_v8/esp_shim.c`相当を追加，後者は`hardware_init_hook`の
+  `esp_rom_set_cpu_ticks_per_us`呼び出しをWiFi/BT非依存でも解決できるよう
+  ROM ld includeの条件を見直す）。
+- C6は既にcommit 44868d0で同一修正済み・C3/C5は本ラウンドで統一済み＝
+  3チップとも同型のtarget_timer実装に揃った。
