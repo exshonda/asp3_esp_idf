@@ -41,15 +41,21 @@
 								   Bluetooth単体ビルドではmbedtlsを
 								   リンクしないため未定義時は除外する） */
 #endif /* TOPPERS_ESP32C5_WIFI */
-#ifdef TOPPERS_ESP32C5_BT_NIMBLE
+#ifdef TOPPERS_ESP32C5_BT
 /*  ★C5 BT用：esp_shim_modem_icg_init（modem ICG覚醒）に必要な hal LL ヘッダ．
     BT単体ビルドでは esp_wifi_adapter.c（この関数のもう1つの static 定義を持つ）が
     コンパイルされないため，ここに非static版を用意する（BLE実施05／c5-port-design.md §8.3．
-    v9削除の回帰修正でC3版esp_shim.c再生成に伴い C5固有の本関数を再追加）．  */
+    v9削除の回帰修正でC3版esp_shim.c再生成に伴い C5固有の本関数を再追加）．
+    ★build hygiene（bt_smoke_c5リンク不可の修正）：bt_shim.cのesp_shim_bt_clock_init()は
+    NimBLEの有無に関わらずesp_shim_modem_icg_init()を呼ぶため，ガードは
+    TOPPERS_ESP32C5_BT_NIMBLE（NimBLEホストON時のみ）ではなくTOPPERS_ESP32C5_BT
+    （BTコントローラ自体ON＝bt_smoke_c5のD-1も含む）でなければならない．
+    NIMBLE限定ガードのままだとbt_smoke_c5（BT ON・NIMBLE OFF）でesp_shim_bt_clock_init
+    がesp_shim_modem_icg_init未定義参照でリンク不可になる．  */
 #include "hal/pmu_ll.h"
 #include "hal/modem_syscon_ll.h"
 #include "hal/modem_lpcon_ll.h"
-#endif /* TOPPERS_ESP32C5_BT_NIMBLE */
+#endif /* TOPPERS_ESP32C5_BT */
 
 /*
  *  サービスコールのエラーのログ出力（sample1 の SVC_PERROR 相当）．
@@ -198,7 +204,7 @@ esp_shim_random(void)
 	return(sil_rew_mem((void *)0x600B2828U));	/* LPPERI_RNG_DATA_SYNC_REG (WDEV_RND_REG) */
 }
 
-#ifdef TOPPERS_ESP32C5_BT_NIMBLE
+#ifdef TOPPERS_ESP32C5_BT
 /*
  *  C5 modem ICG（Internal Clock Gating）初期化＝MODEMデジタルドメインを
  *  覚醒させる（docs/c5-bringup.md C5実施13・esp_wifi_adapter.c の static 版と
@@ -206,6 +212,9 @@ esp_shim_random(void)
  *  ★C5レジスタ：pmu=0x600B0000・modem_lpcon=0x600AF000・modem_syscon=
  *  0x600A9C00（C6の0x600A9800から+0x400移動．c5-port-design.md §9）．
  *  v9削除の回帰修正でC3版esp_shim.c再生成に伴い C5固有の本関数を再追加．
+ *  ★build hygiene修正：ガードをTOPPERS_ESP32C5_BT_NIMBLEから
+ *  TOPPERS_ESP32C5_BTへ変更（bt_shim.cはNimBLEの有無に関わらず本関数を
+ *  呼ぶため．上記インクルードガードと同じ理由）．
  */
 void
 esp_shim_modem_icg_init(void)
@@ -222,7 +231,7 @@ esp_shim_modem_icg_init(void)
 	pmu_ll_imm_update_dig_icg_modem_code(pmu, true);
 	pmu_ll_imm_update_dig_icg_switch(pmu, true);
 }
-#endif /* TOPPERS_ESP32C5_BT_NIMBLE */
+#endif /* TOPPERS_ESP32C5_BT */
 
 /*
  *  ログ（blobの_log_write系・lwIPのLWIP_PLATFORM_DIAG/ASSERT等，

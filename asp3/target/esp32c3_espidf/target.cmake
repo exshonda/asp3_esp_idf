@@ -265,6 +265,26 @@ if(ESP32C3_LWIP)
 endif()
 
 #
+#  esp_rom_set_cpu_ticks_per_us フォールバック（WiFi/BT両OFF時のリンク不可修正）
+#
+#  target_kernel_impl.c の hardware_init_hook が無条件で呼ぶROM関数
+#  esp_rom_set_cpu_ticks_per_us()（実体はROM関数ets_update_cpu_frequency
+#  へのPROVIDEエイリアス．esp32c3.rom.ld＋esp32c3.rom.api.ldが供給）は，
+#  従来 ESP32C3_WIFI/ESP32C3_BT ON時のみesp_wifi.cmake/esp_bt.cmake経由で
+#  -Wl,-T注入されていたため，素の sample1／test_porting（WiFi/BT両OFF）が
+#  未定義参照でリンク不可だった．WiFi/BT両OFF時に限り同じ2ファイルを
+#  直接注入する（ON時は既にesp_wifi.cmake/esp_bt.cmakeが積むため二重
+#  処理を避ける．esp_wifi.cmake/esp_bt.cmakeが積むROM ld一式のうち，
+#  本シンボルの供給に必要な最小の2ファイルのみを選ぶ）．
+#
+if(NOT (ESP32C3_WIFI OR ESP32C3_BT))
+    list(APPEND ASP3_LINK_OPTIONS
+        -Wl,-T,${ESP_HAL_DIR}/components/esp_rom/esp32c3/ld/esp32c3.rom.ld
+        -Wl,-T,${ESP_HAL_DIR}/components/esp_rom/esp32c3/ld/esp32c3.rom.api.ld
+    )
+endif()
+
+#
 #  フラッシュイメージ生成等（aspターゲット定義後に取込み）
 #
 set(ASP3_TARGET_RUN_CMAKE ${TARGETDIR}/run.cmake)

@@ -46,6 +46,15 @@ list(APPEND ASP3_INCLUDE_DIRS
     ${ESP_HAL_DIR}/components/soc/include
     ${ESP_HAL_DIR}/components/esp_common/include
     ${ESP_HAL_DIR}/nuttx/esp32c6/include
+    #  esp_rom_sys.h（esp_rom_set_cpu_ticks_per_us宣言．target_kernel_impl.c
+    #  が無条件で使用）。従来はWi-Fi/BT限定（esp_wifi.cmake/esp_bt.cmake内）
+    #  でしか積んでおらず，WiFi/BT両OFFの素のビルド（sample1/test_porting）
+    #  だと本ヘッダがfatal errorで欠落するbuild hygiene上の不具合だった
+    #  （C5のtarget.cmakeで先に気付き修正済み——同じギャップがC6にも
+    #  共通してあったため合わせて修正．esp_rom_set_cpu_ticks_per_us自体の
+    #  リンク側フォールバックは本ファイル末尾を参照）。
+    ${ESP_HAL_DIR}/components/esp_rom/include
+    ${ESP_HAL_DIR}/components/esp_rom/esp32c6/include
 )
 
 #
@@ -247,6 +256,25 @@ if(ESP32C6_LWIP)
         ${LWIP_DIR}/contrib/apps/tcpecho_raw/tcpecho_raw.c
         ${C3_TARGETDIR}/net/port/sys_arch.c
         ${C3_TARGETDIR}/net/netif_esp32c3.c
+    )
+endif()
+
+#
+#  esp_rom_set_cpu_ticks_per_us フォールバック（WiFi/BT両OFF時のリンク不可修正）
+#
+#  target_kernel_impl.c の hardware_init_hook が無条件で呼ぶROM関数
+#  esp_rom_set_cpu_ticks_per_us()（実体はROM関数ets_update_cpu_frequency
+#  へのPROVIDEエイリアス．esp32c6.rom.ld＋esp32c6.rom.api.ldが供給）は，
+#  従来 ESP32C6_WIFI/ESP32C6_BT ON時のみesp_wifi.cmake/esp_bt.cmake経由で
+#  -Wl,-T注入されていたため，素の sample1／test_porting（WiFi/BT両OFF）が
+#  未定義参照でリンク不可だった（C3/C5と共通の既存不具合）．WiFi/BT両OFF
+#  時に限り同じ2ファイルを直接注入する（ON時は既にesp_wifi.cmake/
+#  esp_bt.cmake（またはesp_bt_idf61.cmake）が積むため二重処理を避ける）。
+#
+if(NOT (ESP32C6_WIFI OR ESP32C6_BT))
+    list(APPEND ASP3_LINK_OPTIONS
+        -Wl,-T,${ESP_HAL_DIR}/components/esp_rom/esp32c6/ld/esp32c6.rom.ld
+        -Wl,-T,${ESP_HAL_DIR}/components/esp_rom/esp32c6/ld/esp32c6.rom.api.ld
     )
 endif()
 
