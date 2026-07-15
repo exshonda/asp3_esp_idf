@@ -21,6 +21,40 @@ if(ESP32C3_BT)
 set(BT_CHIP_SERIES esp32c3)
 set(BT_TARGETDIR ${TARGETDIR}/bt)
 
+#
+#  ★C3 BT blob統一（docs/blob-unify-v554.md「C3のv5.5.4切替」節）：
+#  WiFi（全チップ）とBT（C5/C6）は既にESP-IDF v5.5.4へ統一済み．C3のBTだけ
+#  hal submodule（esp-hal-3rdparty）のblobを使い続けていた最後の1個．
+#  ASP3_BT_IDF_V554=ONで **controller（bt.c）＋PHYソース＋4つのblob
+#  （libbtdm_app/libphy/libbtbb/libcoexist）＋それらが要するesp-component
+#  include/libパス** だけをv5.5.4（~/tools/esp-idf＝WiFi/C5/C6統一と同じツリー）
+#  へ切替える．**NimBLEホスト＋bt/stub＋wifi/esp_shim.c はhalのまま**——
+#  ホストとコントローラのABI境界はHCI（VHCI）であり，C3のbond修正
+#  （INTMTX split-intr-lines・esp_shim queue port・CONFIG_BT_NIMBLE_HS_PVCY=1）は
+#  全てホスト/シム側でblob非依存のため（memory c3-ble-d2d-gatt-notify-sm）．
+#
+#  決定的事実（md5実測）：C3 controller blob libbtdm_app.a は
+#  hal=dfdadb9d… / v5.5.4=v6.1=d9753a31…（v5.5.4≡v6.1バイト同一・halと相違）．
+#  libphy.a・libbtbb.aも同様（hal相違・v5.5.4≡v6.1）＝実体のあるblob変更．
+#  v5.5.4のbt.cはhalと91行差＝OSI_VERSION 0x0001000A→0x0001000B ＋ osiテーブルに
+#  新フィールド _malloc_retention 追加．よってblobに合わせ **bt.cもv5.5.4へ
+#  切替が必須**（halのbt.cのままではosiテーブルABIが不一致）．v5.5.4 bt.cの
+#  新依存＝RTC_CNTL_ATOMIC()/PERIPH_RCC_ATOMIC()（hal/v5.5.4双方のesp_hw_support
+#  にあり，esp_hw_supportはhalのまま流用）／MALLOC_CAP_RETENTION（下の-Dで供給）／
+#  ble_min_conn_interval_enable（v5.5.4 blobにT定義・hal blobには無い．
+#  esp_bt.hがCONFIG_BT_CTRL_CHECK_CONFIG_EFF未定義時に
+#  CONFIG_BT_CTRL_BLE_MIN_CONN_INTERVAL_ENABLE=1を定義→call有効化→v5.5.4 blobで解決）．
+#
+#  ★既定OFF（hal）を維持——実機bondがv5.5.4で通るまでデフォルトは切替えない．
+#  可逆：-DASP3_BT_IDF_V554=OFF でhalへ完全復帰．
+#
+option(ASP3_BT_IDF_V554 "ESP32-C3: use ESP-IDF v5.5.4 BT controller(bt.c)/phy/blobs instead of hal (default OFF=hal. NimBLE host stays on hal; VHCI is the ABI boundary. Reversible)" OFF)
+if(ASP3_BT_IDF_V554)
+    set(BT_IDF /home/honda/tools/esp-idf)
+else()
+    set(BT_IDF ${ESP_HAL_DIR})
+endif()
+
 list(APPEND ASP3_COMPILE_DEFS
     TOPPERS_ESP32C3_BT
     CONFIG_BT_ENABLED
@@ -37,6 +71,12 @@ list(APPEND ASP3_COMPILE_DEFS
     #  capsを無視するため持たない．シンボル解決のみ）
     MALLOC_CAP_DMA=8
     MALLOC_CAP_INTERNAL=2048
+    #  MALLOC_CAP_RETENTION：v5.5.4のbt.c（malloc_retention_wrapper）が
+    #  heap_caps_malloc(size, MALLOC_CAP_RETENTION)を呼ぶ．bt.cはesp_heap_caps.hを
+    #  #includeせず直値のビットマスクを期待する（上のMALLOC_CAP_*と同じ事情）ため
+    #  -Dで供給する．値=(1<<14)＝hal/v5.5.4のesp_heap_caps.h定義と一致．
+    #  hal版bt.cはこのwrapperを持たないため既存ビルドには無害．
+    MALLOC_CAP_RETENTION=16384
 )
 
 #
@@ -62,10 +102,19 @@ list(APPEND ASP3_COMPILE_OPTIONS
 #  1. インクルードパス
 #  ------------------------------------------------------------------
 #
+#  ★ASP3_BT_IDF_V554：bt/include（esp_bt.h＝controller API．bt.cとconfig既定を
+#  供給）・esp_phy/*（phy_init.c/bt.cが要するesp_phy_init.h・esp_private/phy.h）・
+#  esp_wifi/include（phy_init.cのesp_private/wifi.h）・esp_coex/include
+#  （bt.cのprivate/esp_coexist_internal.h＋共有esp_coex_adapter.cのadapter struct）
+#  を ${BT_IDF} 経由でblobと同じ世代へ揃える．v5.5.4のesp_bt.hはesp_err/sdkconfig/
+#  esp_task/esp_assertしか#includeせず，bt/common・bt/portingへは波及しない
+#  （＝ホストが使うhal版bt/common・bt/portingヘッダと衝突しない．実測確認済）．
+#  それ以外（esp_hw_support/esp_system/esp_rom/heap/log/riscv/gpio/clock/efuse/
+#  esp_event）はチップHAL＝blob世代非依存のためhalのまま．
 list(APPEND ASP3_INCLUDE_DIRS
     ${BT_TARGETDIR}/stub/include
     ${TARGETDIR}/wifi
-    ${ESP_HAL_DIR}/components/bt/include/${BT_CHIP_SERIES}/include
+    ${BT_IDF}/components/bt/include/${BT_CHIP_SERIES}/include
     ${ESP_HAL_DIR}/components/bt/common/include
     ${ESP_HAL_DIR}/components/bt/common/ble_log/include
     ${ESP_HAL_DIR}/components/bt/porting/include
@@ -76,12 +125,12 @@ list(APPEND ASP3_INCLUDE_DIRS
     ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c3/private_include
     ${ESP_HAL_DIR}/components/esp_hw_support/port/include
     ${ESP_HAL_DIR}/components/esp_system/include
-    ${ESP_HAL_DIR}/components/esp_wifi/include
-    ${ESP_HAL_DIR}/components/esp_phy/include
-    ${ESP_HAL_DIR}/components/esp_phy/${BT_CHIP_SERIES}/include
+    ${BT_IDF}/components/esp_wifi/include
+    ${BT_IDF}/components/esp_phy/include
+    ${BT_IDF}/components/esp_phy/${BT_CHIP_SERIES}/include
     ${ESP_HAL_DIR}/components/esp_pm/include
     ${ESP_HAL_DIR}/components/esp_timer/include
-    ${ESP_HAL_DIR}/components/esp_coex/include
+    ${BT_IDF}/components/esp_coex/include
     ${ESP_HAL_DIR}/components/esp_rom/include
     ${ESP_HAL_DIR}/components/esp_rom/${BT_CHIP_SERIES}/include
     ${ESP_HAL_DIR}/components/esp_rom/${BT_CHIP_SERIES}/include/${BT_CHIP_SERIES}
@@ -97,6 +146,18 @@ list(APPEND ASP3_INCLUDE_DIRS
     ${ESP_HAL_DIR}/components/esp_event/include
 )
 
+if(ASP3_BT_IDF_V554)
+    #  v5.5.4のesp_wifi_types_generic.hはv6.1/halと異なり"esp_interface.h"を
+    #  直接includeする（phy_init.cがesp_private/wifi.h→esp_wifi_types_generic.h
+    #  経由でこのヘッダ連鎖を辿る）．v5.5.4のesp_interface.h実体は
+    #  esp_hw_support/includeにある（halには存在しないファイル＝hal側の
+    #  esp_hw_support/includeが先にあっても衝突せず素通り）．C5/C6の
+    #  ASP3_BT_IDF_V554と同一の壁・同一の解決（memory c5c6-bt-blob-v554-feasibility）．
+    list(APPEND ASP3_INCLUDE_DIRS
+        ${BT_IDF}/components/esp_hw_support/include
+    )
+endif()
+
 #
 #  ------------------------------------------------------------------
 #  2. ソースファイル
@@ -105,14 +166,19 @@ list(APPEND ASP3_INCLUDE_DIRS
 list(APPEND ASP3_CFG_FILES ${BT_TARGETDIR}/bt.cfg)
 
 list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-    ${ESP_HAL_DIR}/components/bt/controller/${BT_CHIP_SERIES}/bt.c
+    #  ★ASP3_BT_IDF_V554：controller本体bt.c＝blob（libbtdm_app）と同世代．
+    #  v5.5.4 bt.cはosiテーブルに_malloc_retention追加（OSI_VERSION …0B）＝
+    #  v5.5.4 blobのABIに一致させる（halのbt.cのままは不可）．
+    ${BT_IDF}/components/bt/controller/${BT_CHIP_SERIES}/bt.c
     ${BT_TARGETDIR}/bt_shim.c
     #  esp_wifi.cmakeと同じ理由でPHY/クロック/ペリフェラルの実ソースを
     #  採用する（BTもWi-Fiと同じ無線ハードウェアを使うため必要）．
-    ${ESP_HAL_DIR}/components/esp_phy/src/phy_init.c
-    ${ESP_HAL_DIR}/components/esp_phy/src/phy_common.c
-    ${ESP_HAL_DIR}/components/esp_phy/${BT_CHIP_SERIES}/phy_init_data.c
-    ${ESP_HAL_DIR}/components/esp_phy/src/lib_printf.c
+    #  ★ASP3_BT_IDF_V554：phyソースは ${BT_IDF}＝libphy.a（v5.5.4）と同世代
+    #  （matched set）．periph_ctrl等の下位はチップHAL＝halのまま．
+    ${BT_IDF}/components/esp_phy/src/phy_init.c
+    ${BT_IDF}/components/esp_phy/src/phy_common.c
+    ${BT_IDF}/components/esp_phy/${BT_CHIP_SERIES}/phy_init_data.c
+    ${BT_IDF}/components/esp_phy/src/lib_printf.c
     ${ESP_HAL_DIR}/components/esp_hw_support/periph_ctrl.c
     ${ESP_HAL_DIR}/components/esp_hw_support/esp_clk.c
     ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_clk.c
@@ -138,10 +204,14 @@ endif()
 #  3. リンクライブラリパス・ライブラリ
 #  ------------------------------------------------------------------
 #
+#  ★ASP3_BT_IDF_V554：4つのblob（libbtdm_app/libphy/libbtbb/libcoexist）を
+#  ${BT_IDF}から採る．hal/v5.5.4でサブパス構造は同一
+#  （bt/controller/lib_esp32c3_family/esp32c3・esp_phy/lib/esp32c3・
+#  esp_coex/lib/esp32c3）＝${BT_IDF}差替えのみで両対応．
 list(APPEND ASP3_LINK_OPTIONS
-    -L${ESP_HAL_DIR}/components/bt/controller/lib_esp32c3_family/${BT_CHIP_SERIES}
-    -L${ESP_HAL_DIR}/components/esp_phy/lib/${BT_CHIP_SERIES}
-    -L${ESP_HAL_DIR}/components/esp_coex/lib/${BT_CHIP_SERIES}
+    -L${BT_IDF}/components/bt/controller/lib_esp32c3_family/${BT_CHIP_SERIES}
+    -L${BT_IDF}/components/esp_phy/lib/${BT_CHIP_SERIES}
+    -L${BT_IDF}/components/esp_coex/lib/${BT_CHIP_SERIES}
 )
 list(APPEND ASP3_LINK_LIBS
     btdm_app

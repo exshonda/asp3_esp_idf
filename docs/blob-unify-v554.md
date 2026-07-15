@@ -15,7 +15,7 @@ v5.5.4（`~/tools/esp-idf`，`ESP_IDF_VERSION`=5.5.4，os_adapter v8）へ
 |---|---|---|---|---|
 | C3 | 0エラー | 不要（後述§2） | ★**scan完走**（19 APs found, err=0，実SSID確認，再scan安定，複数回43 APsまで観測） | **完全達成** |
 | C5 | 0エラー | wifi_os_adapter.h override必要 | ★**scan完走**（20 APs found, err=0，実SSID確認，再scan安定） | **完全達成** |
-| C6 | 0エラー | wifi_os_adapter.h override必要 | esp_wifi_init->0到達後，esp_shim_c6の既存Illegal instructionクラッシュ（toolchain非依存の既知事象と同一シグネチャ） | 合格（既知の別問題） |
+| C6 | 0エラー | wifi_os_adapter.h override必要 | ★**scan完走**（20 APs found, err=0，実SSID <SSID-INST>/<SSID-EDU>/<SSID-LAB>，rescanループ継続，single-reset 9/9 crashゼロ．実施92）。当初のset_isr直後Illegal instructionは調査ハーネスのdouble-reset由来アーティファクトと判明（v5.5.4回帰でもblob要因でもない） | **完全達成**（実施92で訂正） |
 
 **C3の途中経過について**：本ラウンド前半で「board固有の早期クラッシュ」と
 誤判定した記録が残っていたが，これは**調査ミス**——手動cmake configureで
@@ -203,6 +203,17 @@ C3/C5と同じ`ASP3_WIFI_BLOB_HAL`へ一本化した）。
   blob差替えで変わるが発生パターンは同一）。本blob統一が原因の新規
   回帰ではなく，既知の別問題（本タスクのスコープ外）。タスクの合格
   基準「build壁ゼロ＋esp_wifi_init到達」を満たす。
+- ★**訂正（`docs/wifi-shim-c6.md` 実施92）**：上記「合格・スコープ外」
+  という結論は妥当だが，理由「toolchain非依存の既存事象」は不正確。
+  実機A/Bで真因を特定した——このpc=0クラッシュは**blob非依存
+  （hal/v5.5.4で同一signature）**かつ**調査ハーネスのdouble-reset
+  由来アーティファクト**（esptool write-flash後の自動リセットで起動した
+  アプリを，直後のpyserial RTSリセットで走行中に中断→次ブートのWiFi
+  初期化がHW残留状態でnull跳躍）。**通常のsingle-reset起動では発生せず，
+  v5.5.4既定の`wifi_scan`は実機board Cで20 AP実スキャンを完走する**
+  （実SSID視認・rescanループ継続・WiFi線割込み442-926/boot）。§実施91
+  §5の「JTAG_CPUリセット限定」も不完全（RTS＝reset cause 0x15でも
+  double-resetなら決定的に再現）。詳細＝実施92。
 
 ## 5. reversibility（hal(v8)へ戻す方法）
 
@@ -432,3 +443,71 @@ v5.5.4）と揃い、**WiFi・BT 双方が既定 v5.5.4＝blob 統一完了**。
 - 可逆：`-DASP3_BT_IDF_V554=OFF` で v6.1 tree に戻る。
 - C6 は cold-PLL 別壁（blob 非依存の C6 silicon 固有）につき cold BLE は未収束のまま（warm
   bt_smoke_c6 2/2 は不変）。統一は «同一 blob へ揃える» 目的を達成、C6 cold は独立課題。
+
+## §12 C3 の v5.5.4 切替＝実装完了・実機bondは失敗（既定 OFF＝hal 維持）
+
+C3 の BT だけ hal blob を使い続けていた最後の1個。C5/C6（§8-11）と同じ
+`ASP3_BT_IDF_V554` を **C3 の `esp32c3_espidf/esp_bt.cmake` にも追加**（reversible，
+**既定 OFF＝hal**）。C5/C6 と違い C3 は「未検証の別 blob への新規切替」（hal blob
+`dfdadb9d` と v5.5.4 blob `d9753a31` はバイト不一致）のため慎重に扱う。
+
+### §12.1 切替対象（controller/phy/blob のみ．NimBLE host は hal のまま）
+HCI（VHCI）がホスト⇔コントローラの ABI 境界であり、C3 の bond 修正
+（INTMTX split-intr-lines・esp_shim queue port・`CONFIG_BT_NIMBLE_HS_PVCY=1`）は
+全て **ホスト/シム側で blob 非依存**（memory `c3-ble-d2d-gatt-notify-sm`）。よって
+`ASP3_BT_IDF_V554=ON` で v5.5.4（`~/tools/esp-idf`）へ切替えるのは以下だけ：
+- **controller `bt.c`**：v5.5.4 の bt.c は hal と 91 行差＝`OSI_VERSION 0x0001000A→0x0001000B`
+  ＋ osi テーブルに新フィールド `_malloc_retention`（`malloc_retention_wrapper`→
+  `heap_caps_malloc(size, MALLOC_CAP_RETENTION)`）追加。v5.5.4 blob の osi ABI に一致
+  させるため **bt.c も v5.5.4 へ切替が必須**（hal の bt.c のままでは osi 不一致）。
+- **PHY ソース**：`esp_phy/src/{phy_init,phy_common,lib_printf}.c` ＋
+  `esp_phy/esp32c3/phy_init_data.c`（libphy.a `a51adbdc` と matched set）。
+- **4 blob**：`libbtdm_app`（`d9753a31`）・`libphy`（`a51adbdc`）・`libbtbb`
+  （`daa743dd`）・`libcoexist`（`e1d30c14`）を `-L${BT_IDF}/...` から。
+- **include 直し**：`bt/include/esp32c3/include`（esp_bt.h）・`esp_phy/include` ＋
+  `esp_phy/esp32c3/include`・`esp_wifi/include`（phy_init.c の esp_private/wifi.h）・
+  `esp_coex/include`（bt.c の private/esp_coexist_internal.h）を `${BT_IDF}` へ。
+  それ以外（esp_hw_support/esp_system/esp_rom/heap/log/riscv/gpio/clock/efuse/
+  esp_event，ROM ld）は **チップ HAL＝blob 世代非依存で hal のまま**。
+
+### §12.2 新依存の解決（build 壁とその潰し方）
+- `MALLOC_CAP_RETENTION`：v5.5.4 bt.c が使用。`-DMALLOC_CAP_RETENTION=16384`（=1<<14，
+  hal/v5.5.4 の esp_heap_caps.h 定義と一致）を追加（既存 `MALLOC_CAP_DMA/INTERNAL` と同じ流儀）。
+- `RTC_CNTL_ATOMIC()`→`PERIPH_RCC_ATOMIC()`：hal/v5.5.4 双方の
+  esp_hw_support/include/esp_private/periph_ctrl.h に存在＝hal のまま解決。
+- `ble_min_conn_interval_enable`：esp_bt.h が `CONFIG_BT_CTRL_CHECK_CONFIG_EFF` 未定義時に
+  `CONFIG_BT_CTRL_BLE_MIN_CONN_INTERVAL_ENABLE=1` を定義→call 有効化。v5.5.4 blob に
+  `T ble_min_conn_interval_enable` があり解決（hal blob には無い＝matched pair）。
+- **build 壁（C5/C6 と同一）**：v5.5.4 の esp_wifi_types_generic.h が `esp_interface.h` を
+  直接 include（hal/v6.1 は不要）。実体は v5.5.4 `esp_hw_support/include/esp_interface.h`
+  （hal に無い）。`if(ASP3_BT_IDF_V554)` で `${BT_IDF}/components/esp_hw_support/include`
+  を追加して解決。
+
+### §12.3 実機 A/B（board `60:55:F9:57:BA:BC`，同一 host/session，back-to-back）
+ビルドは **ON/OFF とも clean（rc=0）**。ON ビルドは `ble_min_conn_interval_enable`（v5.5.4
+blob）・`malloc_retention_wrapper`（v5.5.4 bt.c）を link 確認、build.ninja の C3 BT blob 参照は
+v5.5.4 のみ・hal 参照 0（host は hal nimble 参照 316 で不変）。**acceptance は clean build でなく
+実機 bond**（`Bonded:yes`＋`Paired:yes`＋`Pairing successful`）。
+- **hal（OFF）**：`Bonded: yes` / `Paired: yes` / `Pairing successful` / ServicesResolved /
+  GATT 0xABF0 discovered＝**full bond 成功**。
+- **v5.5.4（ON）**：`org.bluez.Error.AuthenticationTimeout`（SMP ~30s タイムアウト）／
+  Paired・Bonded とも no。adv（`ASP3-C3-BLE` NEW）・connect（`Connected: yes`）は成功、
+  **SMP pairing だけがタイムアウト**。clean reset 後・複数回とも再現。
+
+同一 board で option だけ反転し back-to-back＝**v5.5.4 controller 切替が C3 の BLE bond を
+壊す**と決定的に切り分け（board/環境交絡を排除）。∴ **既定 OFF（hal）を維持、flip しない**。
+hal が working fallback。可逆機構自体は A/B で両方向 rc=0＋実機動作を実証済み。
+
+### §12.4 未解明の機序（次ラウンドの仮説，因果は未確定）
+症状（AuthenticationTimeout＝暗号確立後の SMP handshake 未完）は PVCY 修正 «前» の D-2d と
+同型だが、本ビルドは PVCY=1 が compile 済（`ble_hs_pvcy_set_our_irk`/`ble_store_config_init`
+link 確認）＝host 側修正は入っている。かつ過去に **stock IDF（同じ `d9753a31` blob）は bond
+成功**（memory `c3-ble-d2d-gatt-notify-sm` の「stock IDF 対照」）。→ 残差は「d9753a31 blob を
+**我々の統合（bt.c config／esp_shim／HCI flow control）に載せたとき** の非互換」に局在。
+hal blob（`dfdadb9d`）＋我々 host＋PVCY は bond する。次の一手候補（相関→因果を急がない）：
+(a) v5.5.4 bt.c が新規に立てる controller feature 既定
+（`CONFIG_BT_CTRL_BLE_SECURITY_ENABLE=1` 等 esp_bt.h の `#ifndef CHECK_CONFIG_EFF` ブロック）と
+`BT_CONTROLLER_INIT_CONFIG_DEFAULT`（bt_cfg）の突合、(b) 暗号後 ACL の HCI flow control /
+buffer 返却が d9753a31 blob で hal blob と異なる可能性を D-2d 計装（RXTRACE 相当）で局在化、
+(c) OSI テーブル `_malloc_retention` 追加以外の osi field 齟齬の再監査。
+**現状は「v5.5.4 は C3 で bond せず＝hal 維持」で確定。causal な真因特定は未実施。**
