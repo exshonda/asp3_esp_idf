@@ -43,7 +43,25 @@ get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf 
 #  esp_wifi.cmakeと同一のIDF v6.1パス（実施10で確立．eco2 C5対応の
 #  matched set）．BTもここからbt/phy/coexを採る．
 #
-set(IDF /home/honda/tools/esp-idf-v6.1)
+#  ★BT v5.5.4統一「実現性」判定（docs/blob-unify-v554.md「BTの
+#  v5.5.4実現性判定」節）：ASP3_BT_IDF_V554=ONで~/tools/esp-idf
+#  （WiFi統一と同じv5.5.4ツリー）へ切替え可能（reversible，既定OFF＝
+#  v6.1のまま）．事前md5実測（同ドキュメント参照）：libble_app.a・
+#  libphy.a・libbtbb.aはv5.5.4/v6.1間でC5もC6も**バイト完全一致**
+#  （register_chipv7_phy含む）——「v5.5.4はv8＝hal同様ハングする
+#  かもしれない」という当初懸念は，WiFi os_adapter ABIマクロ
+#  （0x08/0x09）を物理blobの代理指標にした早合点で，実測で否定された．
+#  唯一バイト不一致なのはlibcoexist.a（BT単体では非活性が濃厚）．
+#  bt.c/ble.cソース差分は283行のみで，差分の大半はCONFIG_BT_LE_SM_
+#  LEGACY/SC未定義（本ビルドでは常に0）によりコンパイル対象外の
+#  死コード（mbedtls/tinycrypt鍵合意）——実働に影響しない．
+#
+option(ASP3_BT_IDF_V554 "Use ESP-IDF v5.5.4 BT controller/phy/coexist tree instead of v6.1 (feasibility check)" OFF)
+if(ASP3_BT_IDF_V554)
+    set(IDF /home/honda/tools/esp-idf)
+else()
+    set(IDF /home/honda/tools/esp-idf-v6.1)
+endif()
 set(BT_CHIP_SERIES esp32c5)
 
 #
@@ -215,6 +233,18 @@ list(APPEND ASP3_INCLUDE_DIRS
     #  でのみ解決されるヘッダ．hal socより後に置く）
     ${IDF}/components/esp_phy/esp32c5/include
 )
+
+if(ASP3_BT_IDF_V554)
+    #  v5.5.4のesp_wifi_types_generic.hはv6.1と異なり"esp_interface.h"を
+    #  直接includeする（v6.1は不要．実機ビルドで発覚：phy_init.cが
+    #  esp_private/wifi.h経由でこのヘッダ連鎖を辿る）。v5.5.4のesp_
+    #  interface.h実体はesp_hw_support/includeにある（halには存在しない
+    #  ファイルのため，hal側のesp_hw_support/includeが先にあっても
+    #  衝突せず素通りする）。
+    list(APPEND ASP3_INCLUDE_DIRS
+        ${IDF}/components/esp_hw_support/include
+    )
+endif()
 
 #
 #  ------------------------------------------------------------------
