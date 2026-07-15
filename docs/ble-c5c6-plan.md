@@ -2452,3 +2452,101 @@ pmu_init/アナログ PHY 初期化（Direct Boot が飛ばす）。∴修正＝
 ASP3 BT init へ移植**（or ハンドオフを cold から実施＝stock cold ロック→ASP3 継承）。次の decisive＝
 «cold 電源断→ハンドオフ Arm B（stock 最小 BT init で cold ロック→ASP3 ジャンプ）» で ASP3 が cold から
 成功するかを confounder 無しで判定。
+
+## 20. ★C6 BT «cold PLL-lock» 修正の実装＝stock の pmu_init を移植（実装完了・warm 非回帰確認・cold 実機判定は親の電源断待ち）
+
+### 20.0 狙い（§19.8 の «真因＝Direct Boot が pmu_init を飛ばす» を直す）
+
+§19.8 で親の真電源断 control が確定させた通り，C6 BT の phy_init cold ハングの
+真因は，stock IDF が起動シーケンス（`esp_system/port/soc/esp32c6/clk.c` →
+`pmu_init()`）で行う **PMU HP_ACTIVE 電源/クロック/アナログ記述子＋DIG/RTC LDO＋
+bandgap o-code** の設定を，ASP3 の Direct Boot が丸ごと飛ばしていること．PMU が
+POR 既定のまま＝MODEM/RF アナログドメインが正しく給電されず，
+`register_chipv7_phy` の regi2c によるアナログ PLL 設定が着弾せず RF-synth-PLL
+（`0x600a00cc` bit8）が cold でロックしない．兄弟の C5 WiFi（memory
+`c5-wifi-modem-domain-unpowered`）が «残壁＝pmu_init 残り（HP_ACTIVE 電源記述子・
+PMU 0x600b000c-0x600b0130）» と局在化済みで，C6 BT も同一クラス．
+
+### 20.1 実装（hal 非編集＝リンク＋薄いシムのみ．禁则遵守）
+
+- **移植したソース（hal submodule．IDF v6.1 とバイト一致確認済）**：
+  `esp_hw_support/port/esp32c6/pmu_init.c`・`pmu_param.c`・`ocode_init.c` を
+  `esp_bt_idf61.cmake` の source list へ追加（**hal を編集せず «リンク» するだけ**）．
+- **薄いシム**（新規・target 側）：`bt/bt_pmu_init_c6.c` の
+  `esp_shim_bt_pmu_init()` が `pmu_init()`＋`esp_ocode_calib_init()` を呼ぶ．
+- **呼出し位置＝`target_kernel_impl.c` の `hardware_init_hook()` 末尾**
+  （`TOPPERS_ESP32C6_BT` ガード）．stock が pmu_init を呼ぶのと同じ «早期»
+  （カーネル/タイマ起動前）位相で呼ぶことで，HP_ACTIVE 電源記述子の適用が
+  稼働中カーネルを撹乱しない（advisor 指摘．late 呼出しの ocode CPU-freq
+  切替えリスクも回避）．
+- **regi2c は NON_OS_BUILD で ROM 直呼び**：pmu_init/ocode/rtc_clk の
+  `REGI2C_WRITE_MASK`/`regi2c_ctrl_write_reg*` を `esp_rom_regi2c_*`（ROM，
+  ロック無し）へ解決（`set_source_files_properties(... NON_OS_BUILD=1)`）．
+  最下層プロバイダ `esp_rom/patches/esp_rom_hp_regi2c_esp32c6.c` をリンク．
+  これで `regi2c_ctrl.c`（`esp_os_*`/saradc/tsens 依存）の肥大を避けた．
+  hardware_init_hook は単一スレッド・割込み前のためロック不要で妥当．
+- **ocode の reset-reason ゲート回避**：pmu_init 内の `esp_ocode_calib_init()`
+  は `reset_reason==POWERON` のときだけ走る．RTS ピンリセット（自己テスト）
+  では走らず真電源断（親テスト）と食い違うため，シムで «明示的に» 呼ぶ
+  （`set_ocode_by_efuse` は冪等＝二重呼出し無害．本 board=efuse blk_version
+  v0.3>=1 のため set_ocode_by_efuse 経路＝CPU 周波数切替えを伴わず稼働中でも
+  安全．bandgap o-code はアナログ基準電圧＝PLL にも効きうる）．
+- ビルド：`build/c6ble`（SM 版）RAM 72.36%・link 0 エラー（RAM は §19 の
+  72.35% から +0.01pt＝pmu_init 系の増分のみ・非回帰）．
+
+### 20.2 実機（free cold window）で判った «warm 交絡» と，自己テストの限界
+
+親が §19.8 で board を真電源断→cold standalone（pmu_init 無し）でハング
+（bit8=0）を採取した «直後» の board は cold（ハングは PLL をロックしないので
+warm-residual を残さない）．この free cold window を使って修正を自己テストした：
+
+1. **NEW（pmu_init 有り）を 0x0 へ焼き RTS 起動**：`HANDOFF entry
+   synth(0x600a00cc)=0x25824f50`（**bit8=1**）→ `esp_bt_controller_enable OK`
+   → `ble_hs SYNC` → `g_adv_rc=0` → **BlueZ で `ASP3-C6-BLE` 実放射**．
+   ＝機能的には完全動作（adv 到達・放射）．
+2. **ただし «cold 実証» にはならない（§19 の教訓を踏襲した within-session
+   control で確認）**：NEW を焼く際の `--after hard-reset` が capture 前に
+   NEW を一度起動しており，そのブートで PLL がロックすると以降の RTS ブートは
+   warm になる．これを切り分けるため **OLD（pmu_init 無し）を焼き直して
+   同条件で起動**したところ，**OLD «も» adv 到達・放射した**＝board は現在
+   warm（NEW の先行ブートが残した residual）．∴上記 NEW の成功は «warm board
+   上» の観測で，**cold での修正効果は自己テストでは判定不能**（RTS では
+   電源が切れず residual が decay しないため）．
+
+**＝§19 で犯した «warm 交絡を cold 成功と早合点» を，今回は within-session
+control（OLD 焼き直し）で先回りして検出し，cold 成功の主張を «保留» した．**
+bit8=1 が entry（ASP3 の BT init 前）で見えるのは «pmu_init が hardware_init_hook
+で先にロックした» とも «warm residual» とも解釈でき，RTS だけでは分離不能．
+
+### 20.3 ★親への依頼＝decisive cold 判定（真電源断が必須）
+
+board C（port1）は現在 **NEW（pmu_init 有り）standalone を 0x0 へ焼き，
+`--after no-reset` で «未起動» のまま**にしてある（parent の電源投入直後の
+一発目が clean cold になるように）．依頼：
+
+1. **port1 を真電源断（off→数秒→on．reflash しない）**．投入後の «一発目»
+   の console と BlueZ を採取．
+2. 判定（マーカ単独でなく BlueZ 実放射で）：
+   - **成功＝修正が効いた**：`HANDOFF entry synth(0x600a00cc)` が **bit8=1**
+     （`...f50`）で，`esp_bt_controller_enable OK`→`g_adv_rc=0`→**BlueZ で
+     `ASP3-C6-BLE` 放射**．§19.8 の cold ハング（bit8=0・`...e50`）からの
+     反転＝pmu_init 移植が cold PLL-lock を解決したと確定．
+   - **失敗＝修正が不十分**：bit8=0 のままハング（→WDT ループ・BlueZ 不在）．
+     この場合 pmu_init の power 記述子だけでは足りず，次段は «どの pmu_init
+     サブ処理が効くか» の bisect（C5 実施と同型）＋残る analog 前提の追加．
+3. **反証（warm 交絡回避）**：各試行の «直前に必ず真電源断» で cold を保証
+   （§19 の教訓）．できれば複数回の cold 電源断で再現性も確認．
+4. （任意・positive control）同 session で «cold 電源断→ハンドオフ Arm B
+   （stock 最小 BT init で cold ロック→ASP3 ジャンプ）» も採れば，standalone
+   修正の失敗と board ドリフト/退行を分離できる（advisor 提案）．
+
+### 20.4 変更ファイル
+
+- 新規：`asp3/target/esp32c6_espidf/bt/bt_pmu_init_c6.c`（`esp_shim_bt_pmu_init()`）．
+- `asp3/target/esp32c6_espidf/esp_bt_idf61.cmake`：pmu_init.c/pmu_param.c/
+  ocode_init.c＋ROM regi2c パッチをリンク，`esp_private` include 追加，
+  NON_OS_BUILD の per-file 定義（pmu_init/ocode/rtc_clk）．
+- `asp3/target/esp32c6_espidf/target_kernel_impl.c`：`hardware_init_hook()`
+  末尾に `TOPPERS_ESP32C6_BT` ガードで `esp_shim_bt_pmu_init()` 呼出し追加．
+- hal/・asp3_core は無編集（禁则遵守）．board C は NEW standalone を 0x0 に
+  未起動で staged．
