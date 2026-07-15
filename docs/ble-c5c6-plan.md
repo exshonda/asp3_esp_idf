@@ -1909,3 +1909,71 @@ ROM regi2c ポインタ載ることを再確認）の write/write_mask 枠を自
 - 次段（優先）：C5(動作) vs C6(ハング) の regi2c-write 差分を on-device
   採取（両者 GCC15・v9＝有効比較）→ C6 固有の欠落/異値 synth 設定を特定
   → 補完 → synth-lock bit8 の cold-boot 収束率で反証（host BT 不要）。
+
+### 18.5 ★C6-BT regi2c-write トレース採取＝synth/PLL は «完全に config 済みだが lock しない»（regi2c coverage 問題ではない）
+
+`build/c6bt_regi2c`（§18.3 計装・D-1）を board C で cold-hang させ，
+JTAG halt で `btr_buf` を生 dump（`btr_magic`=BTR1・`btr_count`=**212**＝
+リング1024に対しラップ無し＝全件・`btr_swapped`=2）。PC=synth poll loop。
+212 write を caller-PC で分類（`__builtin_return_address(0)`→
+`build/c6bt_regi2c/asp.elf` の nm で解決）：
+
+| caller（regi2c write 発生源） | 回数 | 意味 |
+|---|---|---|
+| `wifi_get_target_power` | 93 | TX target-power cal（block 0x62） |
+| `filter_dcap_set` | 17 | フィルタ dcap |
+| `phy_i2c_init1` | 11 | regi2c 初期化 |
+| **`rfpll_chgp_cal`** | **5** | **RFPLL チャージポンプ較正** |
+| `rf_init` | 4 | RF 初期化 |
+| **`get_rf_freq_init_new`** | **4** | **RF 周波数初期化（PLL freq）** |
+| **`bias_reg_set`** | **2** | **アナログバイアス（block 0x6a）** |
+| `i2c_rc_cal_set` | 2 | RC 較正 |
+| **`i2c_bbpll_set`** | **1** | **BBPLL 設定** |
+| **`freq_get_i2c_data`** | **1** | **チャネル周波数（最終 write）** |
+
+block 列（run-length）：`0x6a×6 0x66×2 0x6b×6 0x61×2 0x6b×6 0x61×2
+0x6b×2 0x67×18 0x6b×7 0x62×4 0x67×1 0x62×17 0x63×8 0x62×43 0x63×8
+0x62×36 0x63×8 0x62×36`＝バイアス(0x6a)→RF synth(0x6b)→BB trim(0x67)→
+周波数(0x62)＋SDM(0x63) の完全な PLL/synth programming。
+
+**★triage 結論（アドバイザ手法）**：C6-BT は synth/PLL を
+**完全に config している**——アナログバイアス（`bias_reg_set`）・BBPLL
+（`i2c_bbpll_set`）・**RFPLL チャージポンプ較正（`rfpll_chgp_cal`）**・
+RF 周波数（`get_rf_freq_init_new`）・チャネル周波数＋SDM（block
+0x62/0x63）まで全て regi2c で書き込み済み（212 write が truncation 無しで
+完走）。**にもかかわらず PLL が lock しない（0x600a00cc bit8 が永久 0）**。
+∴**これは «regi2c の書き漏れ／異値» 問題ではない**——config は完成して
+おり，残るのは «アナログ PLL が lock する物理前提»（PLL リファレンス
+クロック／VCO・LDO 電源／lock-enable ストローブ）が cold で欠けている，
+という層。§17 の「デジタルクロック前提は健全・残壁は RF アナログ/PLL」を
+regi2c 実測で裏付け・精密化した（config 完成×lock 不成立）。
+
+**§14 の warm 成功（RSSI-82）との整合**：同一 board の `wifi_scan`（v8）は
+同じ RF PLL を lock して scan する＝**PLL アナログ状態（LDO/bias/cal）が
+直前の WiFi 実行後に残留（warm）していれば，後続 BT boot の PLL が
+lock する**——これが §16.7(b)「§14 成功＝warm-residual」の具体的機序
+候補（未確定・要反証）。
+
+### 18.6 C5 側採取は保留（board ロック）・次段
+
+- **C5(port2) は並行タスクが占有（コンパイラ固定化）＝本ラウンドは
+  C5 に非接触**（build/flash/reset/read せず）。∴«C5-BT(v9,lock成功) vs
+  C6-BT(v9,lock不成立) の regi2c value 差分»（同世代＝valid value 比較）は
+  **C5 解放後に実施**（計装 `esp_bt_regi2c_trace.c` は C5 へ移植して同手法で
+  採取可能＝g_phyFuns 直パッチ，C5 のテーブルアドレスは要実測）。
+- ただし §18.5 の triage で調査の «重心» は移動した：regi2c は既に完成
+  しており，**C5 比較は «値がどこで違うか» より «C5 で lock する物理前提を
+  C6 が cold で欠く» の確認**が主眼になる。次段候補（ranked）：
+  - **(a) RF PLL アナログ電源/リファレンスの cold 有無**：`wifi_scan`（同
+    board・同 chip・PLL lock 成功）が esp_phy_enable 経路で行う «PLL VCO
+    LDO/リファレンス enable» を MMIO で洗い出し，BT 経路（cold）に欠ける
+    ものを特定。`rfpll_chgp_cal`/`freq_chan_en_sw` 周辺の非 regi2c
+    MMIO（0x600a0000 系 FE/synth）を C6-BT-hang と C6-wifiscan-pass で
+    比較（同 chip＝valid）。
+  - **(b) warm-residual 機序の反証**：`wifi_scan` を1回走らせて PLL を
+    lock させた «直後»（電源断せず）に BT build へ載せ替え（要 flash＝
+    warm）て synth-lock するか＝§14 の warm 成功再現テスト。成功すれば
+    「cold で欠ける PLL アナログ状態」を確定。
+  - **(c) C5-BT regi2c value 比較**（C5 解放後）：同世代 value 差分で
+    «C6 が SDM/PLL に異値を書く» 可能性を最終確認（優先度は (a)(b) の
+    後）。
