@@ -140,3 +140,84 @@ WDT/panic なし＝board latch（`memory/c5-latched-board-state.md`）無し。
 - `docs/bt-shim.md`「D-2d bond真因確定」（C5 BLE bond 実証の来歴）。
 - memory: `c5-wifi-hal-v8-scan-works`・`c5-canonical-compiler`（実施53で新規追加、
   本ラウンド〔esp-15.2実測〕で `c5-canonical-compiler` に追記）。
+
+## C3 Espressif esp-15.2.0 実測（2026-07-15，追加ラウンド）
+
+**目的**＝C5 で確認したエコシステム整合パターン（xpack正典 vs esp toolchain）
+を C3 でも実測確認する。C3 の正典（現行）＝xpack `riscv-none-elf-gcc` 15.2.0
+（`tmp/c3ble.sh`）。BLE は D-2c/D-2d 達成済み（`docs/bt-shim.md`）。
+
+**board**：C3 実機 `60:55:F9:57:BA:BC`（by-id `usb-Espressif_USB_JTAG_serial_debug_unit_60:55:F9:57:BA:BC-if00`）。C6（`14:C1:9F` port1・BT ハンドオフ調査中）・C5#1（`A7:44`）・
+C5#2（`C8:94`）には不接触。
+
+### 動作表（C3・実測追加）
+
+| コンパイラ | prefix | BLE（`ble_host_smoke`，BlueZ可視） | kernel QEMU（`test_porting`） |
+|---|---|---|---|
+| **xpack riscv-none-elf-gcc 15.2.0**（正典） | `riscv-none-elf-` | PASS（既存・D-2c/D-2d） | PASS（既存 `build/c3_test_porting_qemu`） |
+| **Espressif riscv32-esp-elf 15.2.0** | `riscv32-esp-elf-` | **PASS**（実測：ビルド壁ゼロ・BlueZで`ASP3-C3-BLE`放射を`remove`後の再scanで確認） | **PASS**（実測：`# 6/6 passed`，xpackと同一tree/同一結果） |
+
+### 詳細
+
+- toolchain: `/home/honda/tools/espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/bin`
+  （`riscv32-esp-elf-gcc` crosstool-NG，ESPパッチ入り。C5 実測と同一配布）。
+- ヘルパ：`tmp/c3ble_esp15.sh`（正典 `tmp/c3ble.sh` からの差分は3点のみ＝
+  GCC_BIN／`-DRISCV64_TOOLCHAIN_PREFIX=riscv32-esp-elf-`／別 BUILD dir
+  `build/c3ble_esp15`。`-DESP32C3_QEMU=OFF`（csrw mie 罠回避）・csrw mie
+  自己検査は `c3ble.sh` から継承）。
+- **march/mabi**：C3 chip.cmake 固定 `-march=rv32imc_zicsr_zifencei -mabi=ilp32`
+  が esp-15.2 の multilib（`riscv32-esp-elf-gcc -print-multi-lib`）に厳密
+  一致で存在（C5 と同一パターン）。march/mabi起因のビルド壁なし。
+- **BLE ビルド壁＝ゼロ**：`ble_host_smoke`（`ESP32C3_BT=ON ESP32C3_BT_SM=ON`）
+  が `-Wno-error=implicit-function-declaration` のみ（xpackと同一対処）で
+  リンク完走。RAM 93.53%（xpack実測と近似・非回帰）。
+  `CMakeFiles/3.28.3/CMakeCCompiler.cmake` の `CMAKE_C_COMPILER` が
+  esp-15.2 のフルパスであることを機械的に確認（PATH推測ではない実証）。
+- **BLE 実機動作**：flash→RTS boot 後，RTC マーカ
+  （`0x50 SYNC`=host sync／`0x5C ADV`=advertising開始／`0xC4 adv-rc`=0）
+  で到達を確認。ただしマーカ単独では判定しない
+  （`memory/feedback_hardware_investigation_rigor.md`）ため，
+  `bluetoothctl remove 60:55:F9:57:BA:BC` で既知エントリを消してから
+  再scanし，`ASP3-C3-BLE` が**再出現**することで実放射を確認
+  （キャッシュの偽陽性を排除）。
+- **kernel QEMU 非回帰**：`test/porting`（`ASP3_APPLDIR=test/porting`）を
+  esp-15.2 で configure/build。**注意**：C3 の `target_kernel_impl.c` は
+  `esp_rom_set_cpu_ticks_per_us()`（ROM関数．esp32c3.rom.ld由来の絶対
+  アドレスシンボル）を無条件で呼ぶが，このROMリンカスクリプトは
+  `esp_wifi.cmake`／`esp_bt.cmake` が `ESP32C3_WIFI` または `ESP32C3_BT`
+  ON時にのみ `-Wl,-T` で注入する（`target.cmake` 単体では注入されない）。
+  よって test_porting を素の設定でconfigureすると
+  **xpackでもesp-15.2でも同様に** `undefined reference to
+  esp_rom_set_cpu_ticks_per_us` でリンク失敗する（既存の
+  `build/c3_test_porting_qemu` を確認したところ実際に `-DESP32C3_WIFI=ON`
+  が付与されていた＝ツールチェーン非依存の既知の前提条件であり，
+  esp-15.2固有の壁ではない）。同じく `-DESP32C3_WIFI=ON` を付与して
+  configureしたところ0リンクエラーで完走（RAM 82.25%）。
+  QEMU実行結果は `# 6/6 passed`（xpackビルドの`build/c3_test_porting_qemu`
+  を同一QEMUで実行した結果とバイト単位で同一の出力構造・"no time event"
+  1回のみで非フラッド＝両ビルド共通の既知アーティファクト，
+  esp-15.2固有の回帰ではない）。
+- **結論**：C3 も esp-15.2（crosstool-NG，ESP公式配布）で
+  BLE(adv, BlueZ可視)・kernel(QEMU test_porting 6/6) いずれも xpack15 と
+  同一の対処（`-Wno-error=implicit-function-declaration`・
+  `-DESP32C3_WIFI=ON` for test_porting のみ，これはツールチェーン非依存）
+  でビルド・動作する。march/mabi完全一致のためmarch起因の移植コストは
+  ゼロ。**C3もエコシステム整合のためesp toolchainへ切替可能**（xpack15を
+  正典として維持しつつ）。
+- **C6 は本ラウンド対象外**：BT ハンドオフ調査中の別サブエージェントが
+  board（port1）を占有・`ble_host_smoke_c6.c` をWIP編集中のため，
+  esp-15.2 検証は**保留**（C6 board には不接触）。
+
+### エコシステム整合（更新）
+
+| プロジェクト/ターゲット | メインtoolchain | 実測状況 |
+|---|---|---|
+| 本プロジェクト C5 | xpack riscv-none-elf-gcc 15.2.0（正典） | WiFi/BLE両方PASS（esp-15.2もPASS，上記） |
+| 本プロジェクト C3 | xpack riscv-none-elf-gcc 15.2.0（正典） | BLE PASS（esp-15.2もPASS・kernel QEMU 6/6も同一，本ラウンド） |
+| 本プロジェクト C6 | xpack riscv-none-elf-gcc 15.2.0（正典） | esp-15.2検証は保留（BTハンドオフ調査中） |
+| P4 | Espressif riscv32-esp-elf esp-14.2.0 | Ethernet動作実証済み |
+| S31 | Espressif riscv32-esp-elf esp-15.2.0 | （姉妹プロジェクト側で使用中） |
+
+C5・C3 の2チップで esp-15.2 との動作差が見つからなかったことから，
+**asp3_esp_idf 全体としてもesp toolchainへの切替は技術的には可能**という
+所見が補強された（C6 は BT ハンドオフ決着待ちで未実測）。
