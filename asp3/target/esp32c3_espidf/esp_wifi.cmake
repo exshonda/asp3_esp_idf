@@ -207,10 +207,35 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
 #  2. リンクライブラリパス・ライブラリ（Wireless.mk 80-88行目）
 #  ------------------------------------------------------------------
 #
+#  ★v5.5.4統一（docs/blob-unify-v554.md）：WiFi/PHY/coexist blobを
+#  hal（esp-hal-3rdparty submodule，NuttX同期のv8）から実ESP-IDF
+#  v5.5.4（`~/tools/esp-idf`，同じos_adapter v8）へ切替える。
+#  os_adapter ABI（wifi_os_adapter.h）はC3の場合 hal/v5.5.4 で
+#  バイト同一（CONFIG_SOC_WIFI_HE_SUPPORTがC3のsoc_caps.hに存在せず
+#  条件分岐フィールドが両者とも無いため）＝ヘッダ差し替え不要で
+#  blob(.a)のみ差し替えれば足りる（C5/C6はこの前提が成立しないため
+#  ヘッダ側の追加対処が要る．esp_wifi_v8.cmake／esp_wifi.cmake(c6)
+#  参照）。reversible: ASP3_WIFI_BLOB_HAL=ON でhalへ戻せる。
+#
+option(ASP3_WIFI_BLOB_HAL "Use hal(v8) WiFi/PHY/coexist blob instead of ESP-IDF v5.5.4(v8) unification (reversible fallback)" OFF)
+if(NOT DEFINED IDF_V554)
+    set(IDF_V554 /home/honda/tools/esp-idf)
+endif()
+if(ASP3_WIFI_BLOB_HAL)
+    set(ASP3_WIFI_BLOB_SRC ${ESP_HAL_DIR})
+else()
+    set(ASP3_WIFI_BLOB_SRC ${IDF_V554})
+    #  v5.5.4 blobはhal blobに無い3関数(esp_wifi_sta_get_ie等)を欠く
+    #  （esp_shim_blobglue.c §11参照）ため，hal blob使用時のみ
+    #  そちらの定義を使い，v5.5.4使用時のみ本shim定義を有効化する
+    #  （hal blob使用時はshimと二重定義エラーになるため排他が必要）。
+    list(APPEND ASP3_COMPILE_DEFS ASP3_WIFI_BLOB_V554=1)
+endif()
+
 list(APPEND ASP3_LINK_OPTIONS
-    -L${ESP_HAL_DIR}/components/esp_wifi/lib/${WIFI_CHIP_SERIES}
-    -L${ESP_HAL_DIR}/components/esp_phy/lib/${WIFI_CHIP_SERIES}
-    -L${ESP_HAL_DIR}/components/esp_coex/lib/${WIFI_CHIP_SERIES}
+    -L${ASP3_WIFI_BLOB_SRC}/components/esp_wifi/lib/${WIFI_CHIP_SERIES}
+    -L${ASP3_WIFI_BLOB_SRC}/components/esp_phy/lib/${WIFI_CHIP_SERIES}
+    -L${ASP3_WIFI_BLOB_SRC}/components/esp_coex/lib/${WIFI_CHIP_SERIES}
 )
 
 list(APPEND ASP3_LINK_LIBS
