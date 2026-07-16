@@ -464,6 +464,29 @@ if(ASP3_C5_PMU_INIT)
             "(pmu_init.c/pmu_param.c are supplied by the esp-idf submodule; "
             "esp-hal-3rdparty does not ship the esp_hw_support port sources)")
     endif()
+    #
+    #  ★ESP32C5_WIFI 必須（実測に基づく制限．黙って壊れる構成を作らない）
+    #
+    #  WiFi/BT 両OFF（素の sample1／test_porting）で ON にすると、stock の
+    #  pmu_init 系ソースが要求する土台がまるごと欠ける——実測で確認した
+    #  未解決include＝`soc/rtc.h`（pmu_init.c:22／ocode_init.c:8）・
+    #  `freertos/FreeRTOS.h`（regi2c_ctrl.c:10）・`rom/efuse.h`
+    #  （efuse_ll.h:15）。これらは esp_wifi_v8.cmake が積む include パス群と
+    #  shim の FreeRTOS スタブが供給しており、WiFi無しビルドには存在しない。
+    #  ＝pmu_init は「モデム/RFの電源を立てる」ためのものでWiFi/BT無しでは
+    #  そもそも用途が無いので、**未検証のまま依存ブランチを増やすより
+    #  明示的に弾く**方が安全（BT単体は別途 pre-existing なビルド不良が
+    #  あり本オプションとは無関係＝evidence-c5-04 §6）。
+    #
+    if(NOT ESP32C5_WIFI)
+        message(FATAL_ERROR
+            "ASP3_C5_PMU_INIT=ON currently requires ESP32C5_WIFI=ON. "
+            "The stock pmu_init/ocode/regi2c sources need the include paths and "
+            "FreeRTOS shim that esp_wifi_v8.cmake supplies (measured unresolved "
+            "includes without it: soc/rtc.h, freertos/FreeRTOS.h, rom/efuse.h). "
+            "See .steering/20260716-c3c5c6-esp-idf-supply-migration/"
+            "evidence-c5-04-pmu-init-port.md")
+    endif()
 
     list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_PMU_INIT)
 
@@ -478,7 +501,16 @@ if(ASP3_C5_PMU_INIT)
         ${ESP_SUP_DIR}/components/esp_hw_support/include/esp_private
     )
 
+    #  ★PMU_instance() の strong 上書き（stock は weak 定義＝上書き前提の
+    #  拡張点）。stock の PMU_instance() は初期化子つき DRAM_ATTR static を
+    #  返すが，ASP3 の hardware_init_hook() は **.data 初期化より前**に走る
+    #  （start.S:120 → :127 bssクリア → :143 data初期化）ため，そのままだと
+    #  未初期化ポインタで Load access fault になる（実機実測．pmu_instance.c
+    #  の冒頭コメント／evidence-c5-04 §4 参照）。
+    #  ASP3_TARGET_C_FILES 側（libasp3.a）ではなく SYSSVC 側へ置く＝
+    #  stock の weak シンボルより確実に優先させるため。
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${TARGETDIR}/pmu_instance.c
         ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/pmu_init.c
         ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/pmu_param.c
         ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/ocode_init.c
@@ -497,19 +529,27 @@ if(ASP3_C5_PMU_INIT)
         ${ESP_SUP_DIR}/components/hal/lp_timer_hal.c
     )
 
-    #  WiFi/BT 両OFF時のみ：esp_wifi_v8.cmake が積む共通依存をここで補う
-    if(NOT (ESP32C5_WIFI OR ESP32C5_BT))
-        list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-            ${ESP_SUP_DIR}/components/hal/efuse_hal.c
-            ${ESP_SUP_DIR}/components/hal/esp32c5/efuse_hal.c
-            ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/rtc_clk.c
-            ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/rtc_time.c
-            ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/esp_clk_tree.c
-            ${ESP_SUP_DIR}/components/esp_hw_support/port/esp_clk_tree_common.c
-            ${ESP_SUP_DIR}/components/esp_hw_support/esp_clk.c
-            ${ESP_SUP_HAL_clock}/esp32c5/clk_tree_hal.c
-        )
-    endif()
+    #  efuse_hal.c／rtc_clk.c／rtc_time.c／esp_clk.c／esp_clk_tree*.c は
+    #  ESP32C5_WIFI 必須（上の FATAL_ERROR）なので esp_wifi_v8.cmake が
+    #  必ず積んでいる＝ここで重ねない（二重登録の回避）。
+endif()
+
+#
+#  ASP3_C5_NO_MODEM_ICG_SHIM（**診断専用**．既定OFF）
+#
+#  `esp_wifi_adapter.c` の `wifi_clock_enable_wrapper()` が呼ぶ
+#  自前シム `esp_shim_modem_icg_init()`（＝PMU HP_ACTIVE の icg_modem コード
+#  ＋MODEM_SYSCON/MODEM_LPCON の ICG ビットマップを叩いて MODEM ブロックを
+#  叩き起こす「その場しのぎ」．実施13）だけを無効化する。
+#  `ASP3_C5_PMU_INIT=ON` と組み合わせ、「stock の pmu_init() がこのシムを
+#  置き換えられるか」を実機で判定するためのもの（evidence-c5-04 §5）。
+#  **1実験1機構**：無効化するのは本シムのみ。
+#
+option(ASP3_C5_NO_MODEM_ICG_SHIM
+    "DIAGNOSTIC ONLY: disable the ad-hoc esp_shim_modem_icg_init() shim, to A/B whether stock pmu_init() replaces it. Default OFF"
+    OFF)
+if(ASP3_C5_NO_MODEM_ICG_SHIM)
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_NO_MODEM_ICG_SHIM)
 endif()
 
 #

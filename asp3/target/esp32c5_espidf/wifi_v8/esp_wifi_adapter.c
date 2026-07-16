@@ -760,7 +760,18 @@ wifi_clock_enable_wrapper(void)
 	 *  適用にはPMU即時反映パルス2本（update_dig_icg_modem_code／
 	 *  update_dig_icg_switch）の両方が必要（関数内で実施済み）。
 	 *  詳細はdocs/c5-bringup.md 実施13。 */
+#ifndef TOPPERS_ESP32C5_NO_MODEM_ICG_SHIM
 	esp_shim_modem_icg_init();
+#else
+	/*
+	 *  【evidence-c5-04 §5】シム除去A/B用。target.cmake の
+	 *  `-DASP3_C5_NO_MODEM_ICG_SHIM=ON`（診断専用．既定OFF）で，本シムだけを
+	 *  無効化して「stock の pmu_init() がこの手当てを置き換えられるか」を
+	 *  実機で判定する。**1実験1機構**：無効化するのは本シムのみで，
+	 *  直後の modem_clock_select_lp_clock_source()（WIFIPWRドメイン＝
+	 *  別系統のクロックゲート．実施6）はそのまま残す。
+	 */
+#endif
 
 	/*
 	 *  esp_perip_clk_init()（esp-hal-3rdpartyのesp_system/port/soc/
