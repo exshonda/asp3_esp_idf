@@ -35,6 +35,18 @@
 							   がシンボル実体を提供するため呼出しもガードする
 							   （下記hardware_init_hook参照） */
 #endif
+#ifdef TOPPERS_ESP32C5_PMU_INIT
+/*
+ *  stock ESP-IDF の pmu_init()（esp_hw_support/port/esp32c5/pmu_init.c，
+ *  target.cmake の ASP3_C5_PMU_INIT=ON でverbatimコンパイルされる）。
+ *
+ *  本来の宣言は esp_private/esp_pmu.h にあるが，同ヘッダは soc/pmu_struct.h
+ *  等 IDF 側の型定義を芋づるで引き込み，ASP3 のカーネル内部ヘッダ
+ *  （kernel_impl.h）と衝突しうるため，シグネチャだけを転記する
+ *  （`void pmu_init(void);` esp_pmu.h．変更されたらリンク時に検出される）。
+ */
+extern void	pmu_init(void);
+#endif
 
 /*
  *  【実施41】呼出し側マクロ（ESP32C5_R41_CALL_BOOTHOOK／
@@ -1466,6 +1478,39 @@ hardware_init_hook(void)
 	 *  発生しないこと）を必ず確認すること。
 	 */
 	esp32c5_reassert_wdt_disable();
+
+#ifdef TOPPERS_ESP32C5_PMU_INIT
+	/*
+	 *  【evidence-c5-04】stock ESP-IDF の pmu_init() を**そのまま**実行する
+	 *  （esp_hw_support/port/esp32c5/pmu_init.c をverbatimコンパイル．
+	 *  target.cmake の ASP3_C5_PMU_INIT オプション．既定OFF）。
+	 *
+	 *  なぜ要るか：pmu_init() の唯一の呼出し元は IDF の**app起動層**
+	 *  （esp_system/port/cpu_start.c:566 → esp_rtc_init() → pmu_init()）で
+	 *  あり 2nd-stage bootloader ではない。ASP3は自前起動なので
+	 *  **ブート方式に関係なく pmu_init が走らない**（evidence-c5-03 §4 の
+	 *  seam A/B が実機でこれを実証：PMUレジスタはビット単位で同一）。
+	 *  結果，PMUのHP_MODEM/HP_SLEEPバンク・LPバンク・電源ドメインforce
+	 *  ビットがPOR相当のまま残る（[[c5-wifi-modem-domain-unpowered]]）。
+	 *
+	 *  なぜここか：stockの実行順序に合わせる。stockでは
+	 *  `call_start_cpu0()` 末尾で `esp_rtc_init()`（＝pmu_init）を呼び，
+	 *  その**後**に `esp_clk_init()`（RTC_FAST/SLOW clk選択＋CPU周波数
+	 *  切替え）が走る。ASP3側の対応物は直後の
+	 *  esp32c5_r35_rtc_fast_clk_select()／esp32c5_r32_cpu_clock_switch()
+	 *  なので，本呼出しはそれらより**前**に置く。
+	 *
+	 *  ★pmu_init() 内の esp_ocode_calib_init() は POWERON リセット時のみ
+	 *  実行される（pmu_init.c:223）。本チップ（rev v1.0＝chip_version=100，
+	 *  efuse blk rev v0.3＝blk_ver>=2）では eFuse 値を書くだけの軽い経路
+	 *  （ocode_init.c:87 set_ocode_by_efuse）を通り，PLLを止める重い
+	 *  calibrate_ocode() 側には入らない＝CPUクロック切替えとの順序競合は
+	 *  生じない。CONFIG_ESP_ENABLE_PVT は C5 では n（Kconfig の
+	 *  `depends on SOC_PMU_PVT_SUPPORTED`＝C5のsoc_caps.hに無い）なので
+	 *  PVTブロックはコンパイル時に落ちる。
+	 */
+	pmu_init();
+#endif /* TOPPERS_ESP32C5_PMU_INIT */
 
 	/*
 	 *  CPUクロックの切替え

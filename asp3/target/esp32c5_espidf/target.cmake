@@ -413,6 +413,106 @@ if(NOT (ESP32C5_WIFI OR ESP32C5_BT))
 endif()
 
 #
+#  ------------------------------------------------------------------
+#  ASP3_C5_PMU_INIT：stock ESP-IDF の pmu_init() を**そのまま積む**
+#  （.steering/20260716-c3c5c6-esp-idf-supply-migration/
+#    evidence-c5-04-pmu-init-*.md）
+#  ------------------------------------------------------------------
+#
+#  背景（evidence-c5-03 §4 で実機確定）：`pmu_init()` の唯一の呼出し元は
+#  IDFの**app起動層** `esp_system/port/cpu_start.c:566 → esp_rtc_init()
+#  → pmu_init()` であり，2nd-stage bootloader ではない。ASP3は自前起動
+#  なので **ブート方式（Direct Boot／seam）に関係なく pmu_init が走らない**
+#  ——seam A/B で PMU レジスタがビット単位同一だったことが証拠。
+#  ∴ 正しい方向は「ブート方式の変更」ではなく「pmu_init 相当の実行」。
+#
+#  ★方式＝**移植/縮約ではなく stock ソースをそのままコンパイル**する。
+#  供給が esp-idf submodule(v5.5.4) へ全面移行済（evidence-c5-02，
+#  `ninja -t deps` の hal 参照 0）であるため，構造上これが可能になった
+#  ＝供給移行の直接の成果。過去ラウンド（実施35 候補3/4）が採った
+#  「stock実測値の固定定数注入」（`esp32c5_r35_pmu_hp_*_bank_fixed()`）は
+#  eFuse由来のボード固有電圧トリムを他基板へ焼き付ける副作用があり，
+#  かつ実機でrefute済み。本オプションはその**正攻法の置き換え**。
+#
+#  依存（v5.5.4・C5でのコンパイル対象．実測で確定）：
+#    - pmu_init.c   … pmu_hp/lp_system_init_default＋power_domain_force_default
+#                      ＋（POWERON時）esp_ocode_calib_init()
+#    - pmu_param.c  … HP/LP各モードの power/clock/digital/analog/retention
+#                      記述子（`get_act_hp_dbias()` は eFuse から実読み）
+#    - ocode_init.c … esp_ocode_calib_init()の実体
+#    - regi2c_ctrl.c… ocode_init.c の REGI2C_WRITE_MASK 実体
+#  ★CONFIG_ESP_ENABLE_PVT は C5 では **n**（Kconfig:321 `depends on
+#    SOC_PMU_PVT_SUPPORTED`＝C5のsoc_caps.hに当該マクロ無し＝実測）なので
+#    pmu_pvt.c は stock でもコンパイルされない＝本移植でも不要。
+#  ★efuse_hal.c／rtc_clk.c／rtc_time.c／esp_clk.c／esp_clk_tree*.c は
+#    ESP32C5_WIFI/BT 時に esp_wifi_v8.cmake が既に積んでいるため，
+#    二重登録を避けて WiFi/BT 両OFF時のみここで積む。
+#
+#  既定 OFF：実機で非回帰（scan／W1）を確認するまで昇格しない
+#  （C5 Wi-Fi は現状 `esp_shim_modem_icg_init()` 等の自前シムで**動いて
+#  いる**＝本オプションは「動かすため」ではなく「その場しのぎを正攻法へ
+#  置き換え stock 相当の電源状態にするため」のもの。壊さないことが最優先）。
+#
+option(ASP3_C5_PMU_INIT
+    "Run stock ESP-IDF pmu_init() (esp_hw_support/port/esp32c5/pmu_init.c, compiled verbatim) from hardware_init_hook(). Default OFF until hardware non-regression (scan/W1) is confirmed"
+    OFF)
+
+if(ASP3_C5_PMU_INIT)
+    if(NOT ASP3_ESPIDF_SUPPLY)
+        message(FATAL_ERROR
+            "ASP3_C5_PMU_INIT=ON requires ASP3_ESPIDF_SUPPLY=ON "
+            "(pmu_init.c/pmu_param.c are supplied by the esp-idf submodule; "
+            "esp-hal-3rdparty does not ship the esp_hw_support port sources)")
+    endif()
+
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_PMU_INIT)
+
+    list(APPEND ASP3_INCLUDE_DIRS
+        ${ESP_SUP_DIR}/components/esp_hw_support/include        # esp_private/esp_pmu.h, ocode_init.h
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/include   # esp_hw_log.h
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/private_include  # pmu_param.h, pmu_bit_defs.h
+        #  IDF本体の esp_hw_support は `PRIV_INCLUDE_DIRS port/include
+        #  include/esp_private`（CMakeLists.txt:209）で自分の私有ヘッダを
+        #  ディレクトリ名なしで解決する。pmu_init.c:18 の
+        #  `#include "regi2c_ctrl.h"` がこれに当たる（実測：無いと fatal error）。
+        ${ESP_SUP_DIR}/components/esp_hw_support/include/esp_private
+    )
+
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/pmu_init.c
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/pmu_param.c
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/ocode_init.c
+        ${ESP_SUP_DIR}/components/esp_hw_support/regi2c_ctrl.c
+        #  regi2c_ctrl.c が呼ぶ esp_rom_regi2c_{read,write}[_mask]() は
+        #  **C5ではROMに無い**（esp_rom/esp32c5/Kconfig.soc_caps.in:74
+        #  `ESP_ROM_WITHOUT_REGI2C`＝どの esp32c5.rom*.ld にもシンボルが
+        #  無いことを実測で確認）。stock も esp_rom/CMakeLists.txt:29-33 の
+        #  `if(CONFIG_ESP_ROM_HAS_REGI2C_BUG OR CONFIG_ESP_ROM_WITHOUT_REGI2C)`
+        #  でこのソフト実装パッチを積む＝stock 忠実。
+        ${ESP_SUP_DIR}/components/esp_rom/patches/esp_rom_hp_regi2c_esp32c5.c
+        #  rtc_time.c の rtc_time_get()（ocode_init.c の calibrate_ocode()
+        #  経路が参照．本チップでは実行時に通らないがリンクには要る）が
+        #  参照する。stock も hal/CMakeLists.txt:21 の
+        #  `if(CONFIG_SOC_LP_TIMER_SUPPORTED)` で積む。
+        ${ESP_SUP_DIR}/components/hal/lp_timer_hal.c
+    )
+
+    #  WiFi/BT 両OFF時のみ：esp_wifi_v8.cmake が積む共通依存をここで補う
+    if(NOT (ESP32C5_WIFI OR ESP32C5_BT))
+        list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+            ${ESP_SUP_DIR}/components/hal/efuse_hal.c
+            ${ESP_SUP_DIR}/components/hal/esp32c5/efuse_hal.c
+            ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/rtc_clk.c
+            ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/rtc_time.c
+            ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/esp_clk_tree.c
+            ${ESP_SUP_DIR}/components/esp_hw_support/port/esp_clk_tree_common.c
+            ${ESP_SUP_DIR}/components/esp_hw_support/esp_clk.c
+            ${ESP_SUP_HAL_clock}/esp32c5/clk_tree_hal.c
+        )
+    endif()
+endif()
+
+#
 #  フラッシュイメージ生成等（aspターゲット定義後に取込み）
 #
 set(ASP3_TARGET_RUN_CMAKE ${TARGETDIR}/run.cmake)
