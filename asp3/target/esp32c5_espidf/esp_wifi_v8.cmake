@@ -345,6 +345,84 @@ if(ASP3_WIFI_OSI_HAS_DISABLE_AC_AX)
     list(APPEND ASP3_COMPILE_DEFS ASP3_WIFI_OSI_HAS_DISABLE_AC_AX=1)
 endif()
 
+#
+#  ★HAL依存撤去（段階2a）：Wi-Fi経路のヘッダ供給をesp-idf submoduleへ
+#  （.steering/20260716-c3c5c6-esp-idf-supply-migration）。
+#
+#  動機＝ABI整合：blobは自身がビルドされたヘッダのmd5を埋込む
+#  （`g_esp_wifi_md5`等）。実測でhal版ヘッダはv5.5.4タグblobと«不一致»：
+#     esp_wifi.h              hal=9f7e672 / v5.5.4タグblobの要求=a78adff
+#     esp_wifi_types_generic.h hal=6773bf5 / 要求=dae1625
+#     esp_wifi_driver.h        hal=50fc486 / 要求=2331a76
+#  （wifi_os_adapter.h と esp_wifi_types_native.h のみ一致）。
+#  ＝現状はhalヘッダ＋v5.5.4タグblobの混成でありscan/W1は通るものの
+#  潜在的なABI skewが残る。esp-idf側へ寄せることでblobと版一致させる。
+#
+#  段階2aの範囲＝Wi-Fi直結の3コンポーネント（esp_wifi/esp_phy/esp_coex）のみ。
+#  PREPENDでhal側（§1で既にASP3_INCLUDE_DIRSへ入っている）より前に置き，
+#  同名ヘッダだけをesp-idf供給へ差し替える（未提供のヘッダはhalへ
+#  フォールバック＝段階的移行）。
+#
+#  ★★既定OFF＝**未完（WIP）**。ONにすると現状ビルドが«通らない»。
+#  実測で潰した壁と，残り壁（次ラウンドの作業項目）：
+#    済 (1) esp_wifi_types_generic.h -> `esp_interface.h`欠落
+#           （halに当該ファイル自体が無い）⇒ esp_hw_support/include をAPPENDで解決。
+#    済 (2) esp_private/wifi.h -> `freertos/FreeRTOS.h`欠落
+#           （hal版はOS非依存の`platform/os.h`＝NuttX向けにFreeRTOS依存を
+#           剥がしてある）⇒ 既存BT用FreeRTOSスタブ再利用で解決。
+#    残 (3) hal版wifi_init.c(716)が`wifi_nan_sync_config_t`を使うが，esp-idf版
+#           ヘッダでは`wifi_nan_config_t`へ«改名»されている
+#           （hal=wifi_nan_sync_config_t/CONFIG_ESP_WIFI_NAN_SYNC_ENABLE，
+#            esp-idf v5.5.4=wifi_nan_config_t/CONFIG_ESP_WIFI_NAN_ENABLE）。
+#           ⇒ 正攻法は**wifi_init.cもesp-idf供給へ移す**こと（ヘッダだけ
+#           移してソースをhalのまま残すのが不整合の元）。ただし
+#    残 (4) esp-idf版wifi_init.c(500)は`adc2_cal_include()`を«無条件»で呼ぶ
+#           （hal版は`#ifndef __NuttX__`で除外）。C5には
+#           esp_hw_support/port/esp32c5/adc2_init_cal.c が«無い»
+#           （実測：存在するのはesp32c3/esp32s2のみ）⇒ 空スタブが要る。
+#    残 (5) esp-idf版wifi_init.cは`esp_netif.h`をincludeする（ただし
+#           esp_netif_*の呼出しは«0件»＝実測．ヘッダパス追加だけで足りる見込み）。
+#  ＝ABI整合上は寄せる価値があるが，一里塚1/W1は既定(OFF)で実機達成済みの
+#  ため，段階2aは次ラウンドへ送る。根拠は
+#  .steering/20260716-c3c5c6-esp-idf-supply-migration/ に記録。
+#  reversible: 既定OFF＝従来のhalヘッダ（W1実機実証済みの構成）。
+#
+option(ASP3_WIFI_INC_IDF "WIP/EXPERIMENTAL: supply Wi-Fi path headers (esp_wifi/esp_phy/esp_coex) from esp-idf submodule instead of hal (HAL removal stage 2a). Default OFF: ON does NOT build yet - see walls (3)(4)(5) above" OFF)
+if(ASP3_WIFI_INC_IDF AND NOT ASP3_WIFI_BLOB_HAL)
+    list(PREPEND ASP3_INCLUDE_DIRS
+        ${IDF_V554}/components/esp_wifi/include
+        ${IDF_V554}/components/esp_wifi/include/local
+        ${IDF_V554}/components/esp_wifi/wifi_apps/roaming_app/include
+        ${IDF_V554}/components/esp_phy/include
+        ${IDF_V554}/components/esp_phy/${WIFI_CHIP_SERIES}/include
+        ${IDF_V554}/components/esp_coex/include
+    )
+    #  esp-idf版esp_wifi_types_generic.hが#include "esp_interface.h"する。
+    #  このヘッダはhalには«存在しない»（esp-idf固有．実測：
+    #  find hal/components -name esp_interface.h ＝0件）ため，esp_hw_support/
+    #  include をAPPENDで«後ろ»に足す（PREPENDにするとhalのesp_hw_support
+    #  ヘッダ群を広範にシャドウして段階2aの範囲を超えるため）。
+    #  ＝docs/blob-unify-v554.md §12でC5/C6 BT側が踏んだ壁と同一。
+    list(APPEND ASP3_INCLUDE_DIRS
+        ${IDF_V554}/components/esp_hw_support/include
+    )
+    #  esp-idf版esp_private/wifi.h・esp_wifi_private.hは
+    #  `#include "freertos/FreeRTOS.h"`／`freertos/queue.h`する（hal版は
+    #  OS非依存の`platform/os.h`＝esp-hal-3rdpartyがNuttX向けにFreeRTOS
+    #  依存を剥がしているための差）。ASP3はFreeRTOSを«使わない»ので，
+    #  既存のBTコントローラ用FreeRTOS互換スタブ（C3の bt/stub/include，
+    #  実体はesp_shimへ委譲）を再利用する。C5のesp_bt.cmakeが既に同じ
+    #  ディレクトリを再利用しており（§166），チップ非依存。
+    #  実測：esp-idf esp_wifi/include配下でfreertosを要求するのは上記2本
+    #  のみ，必要な型は`QueueHandle_t`1つだけ。
+    #  APPEND（＝halより«後ろ»）にするのは，同ディレクトリに同居する
+    #  bt_nimble_config.h／esp_partition.hでhal側を意図せずシャドウしない
+    #  ため（WiFi単体ビルドではこの2つはどこからもincludeされない）。
+    list(APPEND ASP3_INCLUDE_DIRS
+        ${C3_TARGETDIR}/bt/stub/include
+    )
+endif()
+
 list(APPEND ASP3_LINK_OPTIONS
     -L${ASP3_WIFI_BLOB_SRC}/components/esp_wifi/lib/${WIFI_CHIP_SERIES}
     -L${ASP3_WIFI_BLOB_SRC}/components/esp_phy/lib/${WIFI_CHIP_SERIES}
