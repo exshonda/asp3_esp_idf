@@ -294,7 +294,16 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
 #
 option(ASP3_WIFI_BLOB_HAL "Use hal(v8) WiFi/PHY/coexist blob instead of ESP-IDF v5.5.4(v8) unification (reversible fallback)" OFF)
 if(NOT DEFINED IDF_V554)
-    set(IDF_V554 /home/honda/tools/esp-idf)
+    #  ★esp-idf submodule（v5.5.4タグ＝735507283d）をリポジトリ同梱で参照する
+    #  （HAL依存撤去ミッション＝.steering/20260716-c3c5c6-esp-idf-supply-migration）。
+    #  従来は外部絶対パス /home/honda/tools/esp-idf を -L していたが，これは
+    #  (1) このマシン固有＝再現性が無く，(2) 実測すると v5.5.4-1169-gbb2188bf
+    #  （release/v5.5 の先端）で **v5.5.4タグではなかった**（version.hが5.5.4と
+    #  表示するため気づきにくい）。C5 WiFi blobは両者で全て相違する
+    #  （libnet80211 3996ba79 vs c7b13c02 等．docs/blob-unify-v554.md §14）。
+    #  外部ターゲット規約（PORTING_GUIDE.md §6）に従い CMAKE_CURRENT_LIST_DIR 相対。
+    #  A/B用に -DIDF_V554=<path> で従来の外部treeへ差し戻せる（可逆）。
+    get_filename_component(IDF_V554 ${CMAKE_CURRENT_LIST_DIR}/../../../esp-idf ABSOLUTE)
 endif()
 if(ASP3_WIFI_BLOB_HAL)
     set(ASP3_WIFI_BLOB_SRC ${ESP_HAL_DIR})

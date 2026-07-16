@@ -539,12 +539,25 @@ phy_get_max_pwr(void)
  *  ------------------------------------------------------------------
  */
 #if ASP3_WIFI_BLOB_V554
-bool
-esp_wifi_skip_supp_pmkcaching(void)
-{
-	return false;
-}
-
+/*
+ *  ★esp_wifi_skip_supp_pmkcaching のスタブは撤去した（供給をesp-idf
+ *  submodule＝v5.5.4「タグ」へ移した結果．.steering/20260716-c3c5c6-
+ *  esp-idf-supply-migration）。
+ *    nm実測（libnet80211.a）：v5.5.4タグ=定義あり／旧 ~/tools/esp-idf
+ *    （＝v5.5.4-1169-gbb2188bf＝タグではない）=無し／hal=定義あり。
+ *  よってv5.5.4タグblobに対しては本スタブは multiple definition を起こす
+ *  （ieee80211_supplicant.o と衝突＝実測のリンクエラー）。blobの実装を
+ *  使うのが正しい（我々のno-opはPMKキャッシュskip判定を潰してしまう）。
+ *  注：-DIDF_V554=<+1169系tree> でA/Bする場合のみ未定義参照になり得る。
+ *
+ *  残る2関数（sta_get_ie／is_wpa3_compatible_mode_enabled）は **esp-idf
+ *  v5.5.4にはblobにもソースにも存在しない hal 独自関数**で，halの
+ *  wpa_supplicantソースを我々がコンパイルしているために参照が生じている
+ *  ＝「halのwpa源 × esp-idfのblob」という混成供給が原因。wpa_supplicantを
+ *  esp-idfへ移行すれば参照ごと消え，本スタブ群は不要になる（そのとき
+ *  esp_wifi_sta_get_ieのno-op化＝RSN IE検証の無効化という回帰面
+ *  （docs/blob-unify-v554-review.md ★D5）も同時に解消する）。
+ */
 uint8_t *
 esp_wifi_sta_get_ie(uint8_t *bssid, uint8_t elem_id)
 {
