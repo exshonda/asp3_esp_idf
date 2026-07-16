@@ -326,6 +326,63 @@ if(ESP32C6_PMU_DIAG)
     list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_PMU_DIAG)
 endif()
 
+#
+#  ★evidence-c6-04：真cold のアナログ整定待ち（ms）．既定 0＝無効．
+#  stock は phy_init に t≈477ms で到達するが ASP3 は t≈83ms＝POR から
+#  約 1/6 の時刻で PHY 較正を始めている（evidence-c6-03 §4.1）．
+#  «時間» だけを動かして「欠けているのは初期化動作か時刻か」を判別する。
+#
+#
+#  ★evidence-c6-04：stock の recalib_bbpll() 相当（BBPLL 停止→再較正）を
+#  Direct Boot に補う．既定 OFF（実測で決める）．
+#  ASP3 は「ROM が 160MHz 設定済みだから触らない」と明示判断しているが，
+#  stock は「bootloader が用意した PLL は十分安定でない」として再較正する
+#  ＝「stock がやっていることを我々がやめた」型．実体＝bt/bt_pmu_init_c6.c．
+#  ★ESP32C6_BT_PMU_INIT=ON が前提（rtc_clk.c と実体を積むのがそこだけ）．
+#
+#
+#  ★★evidence-c6-04【真cold ハングの真因の修正】CPU/SOC ルートクロックを
+#  PLL@160MHz へ明示設定する（stock の 2nd-stage bootloader の rtc_clk_init()
+#  相当）．既定 ON．
+#
+#  ★実測（真cold・sentinel で真cold 証明済み）：ROM は Direct Boot へ
+#  **XTAL@40MHz** のまま渡してくる（STORE5=0xbb110280＝src=0/40MHz）。
+#  ASP3 の「ROM が SPLL/160MHz 設定済みだから触らない」という明示判断は
+#  **warm でしか成立していない**（PCR は warm で前ブートの SOC_CLK_SEL を保持）。
+#  SOC_ROOT_CLK=XTAL のままだと PLL 由来の modem/PHY クロックが所定周波数に
+#  ならず RF シンセ PLL がロックできない＝真cold JTAG で確定したハング
+#  （PC=ram_set_chan_freq_sw_start+0x1e＝0x600a00cc bit8 永久スピン）。
+#
+#  OFF＝従来（ROM 任せ）＝**逆方向対照**用。
+#  ★ESP32C6_BT_PMU_INIT=ON が前提（rtc_clk.c と実体を積むのがそこだけ）。
+#
+option(ESP32C6_COLD_CPU_PLL
+    "Explicitly set CPU/SOC root clock to PLL@160MHz at boot like stock rtc_clk_init() (evidence-c6-04)"
+    ON)
+#  ★WiFi・BT の両方で必要（同じ真cold ハングが両経路で起きる）。
+#  rtc_clk.c は esp_wifi.cmake / esp_bt_idf61.cmake の双方が既にリンク済み。
+#  素のビルド（WiFi/BT 両OFF）は rtc_clk.c を積まないので対象外＝PHY も使わない。
+if(ESP32C6_COLD_CPU_PLL AND (ESP32C6_WIFI OR ESP32C6_BT))
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES ${TARGETDIR}/cold_clk_init_c6.c)
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_COLD_CPU_PLL)
+endif()
+
+option(ESP32C6_COLD_RECALIB_BBPLL
+    "Re-calibrate BBPLL at boot like stock recalib_bbpll() (evidence-c6-04; superseded by ESP32C6_COLD_CPU_PLL)"
+    OFF)
+if(ESP32C6_COLD_RECALIB_BBPLL)
+    if(NOT ESP32C6_BT_PMU_INIT)
+        message(FATAL_ERROR "ESP32C6_COLD_RECALIB_BBPLL requires ESP32C6_BT_PMU_INIT=ON (rtc_clk.c/shim live there)")
+    endif()
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_COLD_RECALIB_BBPLL)
+endif()
+
+set(ESP32C6_COLD_SETTLE_MS "0" CACHE STRING
+    "Busy-wait this many ms in software_init_hook before the kernel starts (evidence-c6-04 cold-settle discriminator)")
+if(NOT ESP32C6_COLD_SETTLE_MS STREQUAL "0")
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_COLD_SETTLE_MS=${ESP32C6_COLD_SETTLE_MS})
+endif()
+
 option(ESP32C6_WIFI "Enable Wi-Fi (esp_wifi blob + os_adapter shim, Phase B-2a scan)" OFF)
 if(ESP32C6_WIFI OR ESP32C6_BT)
     list(APPEND ASP3_INCLUDE_DIRS
@@ -427,3 +484,16 @@ endif()
 #  フラッシュイメージ生成等（aspターゲット定義後に取込み）
 #
 set(ASP3_TARGET_RUN_CMAKE ${TARGETDIR}/run.cmake)
+
+#
+#  ★evidence-c6-04【最小集合の同定用】ESP32C6_COLD_CPU_PLL の中の
+#  clk_ll_mspi_fast_set_hs_divider(6) だけを外す（既定 OFF＝分周比を設定する）．
+#  ON にすると «MSPI 分周比を設定せずに PLL へ切替える» ＝その1手が
+#  最小集合に含まれるかどうかを単一変数で判定できる．
+#
+option(ESP32C6_COLD_CPU_PLL_NO_MSPI
+    "Drop the MSPI HS divider step from ESP32C6_COLD_CPU_PLL (minimal-set discriminator, evidence-c6-04)"
+    OFF)
+if(ESP32C6_COLD_CPU_PLL_NO_MSPI)
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_COLD_CPU_PLL_NO_MSPI)
+endif()

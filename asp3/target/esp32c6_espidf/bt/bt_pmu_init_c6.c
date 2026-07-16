@@ -34,6 +34,9 @@
 #include <stdint.h>
 #include "esp_private/esp_pmu.h"
 #include "esp_private/ocode_init.h"
+#ifdef TOPPERS_ESP32C6_COLD_RECALIB_BBPLL
+#include "soc/rtc.h"
+#endif
 
 /*  pmu_init() は esp_private/esp_pmu.h で宣言済み（void pmu_init(void)）．
  *  esp_ocode_calib_init() は esp_private/ocode_init.h で宣言済み． */
@@ -69,6 +72,71 @@ esp_shim_bt_pmu_diag(uint32_t slot)
 	*(volatile uint32_t *)(0x600B1000UL + (slot * 4U)) = (uint32_t)(ctx->hal);
 }
 #endif /* TOPPERS_ESP32C6_PMU_DIAG */
+
+#ifdef TOPPERS_ESP32C6_COLD_RECALIB_BBPLL
+/*
+ *  【evidence-c6-04】stock の recalib_bbpll() 相当を Direct Boot に補う．
+ *
+ *  ★動機：真cold の実機 JTAG で，ハング位置を
+ *  **PC=ram_set_chan_freq_sw_start+0x1e＝RF synth PLL ロック待ちスピン
+ *  （0x600a00cc bit8 が永久に立たない）** と確定した（resume を挟んだ
+ *  独立2サンプルとも同一 PC）．＝PHY が RF シンセをロックできない．
+ *
+ *  ★stock（esp_system/port/soc/esp32c6/clk.c:349 recalib_bbpll，
+ *  CONFIG_ESP_SYSTEM_BBPLL_RECALIB=y で esp_rtc_init から呼ばれる）は
+ *  起動時に **BBPLL を一旦止めて較正し直す**：
+ *      // In earlier version of ESP-IDF, the PLL provided by bootloader is
+ *      // not stable enough. Do calibration again here so that we can use
+ *      // better clock for the timing tuning.
+ *      if (old_config.source == SOC_CPU_CLK_SRC_PLL) {
+ *          rtc_clk_cpu_freq_set_xtal();       // BBPLL 停止
+ *          rtc_clk_cpu_freq_set_config(&old_config); // enable→configure＝再較正
+ *      }
+ *  ASP3 は target_kernel_impl.c で「ROM が既に 160MHz に設定済みだから
+ *  触らない」と **明示的に «やらない» 判断**をしている＝
+ *  **「stock がやっていることを我々がやめた」型**（C6 実施90-91 と同型）．
+ *
+ *  ★★注意：これは «仮説» であって «原因» ではない．BBPLL（システム PLL）と
+ *  RF シンセ（PHY 内の別 PLL）は別物であり，«BBPLL 再較正が RF シンセの
+ *  ロックを回復させる» 機序は **未証明**．ただし両者は regi2c アナログ
+ *  マスタと bandgap 基準を共有するため無関係ではない．判別は安い＝
+ *  真cold で 0x600B1000 が 0xb1d00005→0xb1d00008 に変われば決まる．
+ *
+ *  ★★XIP ハザード：stock は本処理を **IRAM_ATTR** に置く
+ *  （"Placed in IRAM because disabling BBPLL may influence the cache"）が，
+ *  ASP3 では rtc_clk.c は flash XIP（0x42xxxxxx）に載る．∴ BBPLL 停止中に
+ *  命令フェッチが壊れて **死ぬ可能性がある**．«効かなかった» と «死んだ» を
+ *  区別できないと誤結論になるので，**復帰後に LP_AON STORE5(0x600B1014) へ
+ *  完了マーカ 0xBB110000|1 を書く**：
+ *    - STORE5 が書けていれば «recalib は生還した»（＝以降の判定が有効）
+ *    - STORE5 が 0 のままなら «recalib 中に死んだ»（＝IRAM 化が要る）
+ *  ★STORE5 は bt_smoke_c6 が未使用（STORE0 と STORE7 のみ使う）．
+ */
+void
+esp_shim_cold_recalib_bbpll(void)
+{
+	rtc_cpu_freq_config_t	old_config;
+
+	rtc_clk_cpu_freq_get_config(&old_config);
+
+	if (old_config.source == SOC_CPU_CLK_SRC_PLL) {
+		rtc_clk_cpu_freq_set_xtal();
+		rtc_clk_cpu_freq_set_config(&old_config);
+	}
+
+	/*  生還マーカ（上のコメント参照）．source!=PLL だった場合も «通過» は
+	 *  記録し，値の下位で分岐が判るようにする．
+	 *  ★STORE5 = 0xBB11_0000 | (source & 0xF) | ((freq_mhz & 0xFFF) << 4)
+	 *    ＝ROM が Direct Boot 到達時点で残した «実際の» CPU クロック源と
+	 *      周波数を真cold で直読みする（ASP3 の «ROM が SPLL/160MHz 設定済み»
+	 *      という前提は warm で測られた疑いがある＝要検証）．
+	 *    soc_cpu_clk_src_t: XTAL=0, PLL=1, RC_FAST=2 （C6）           */
+	*(volatile uint32_t *)0x600B1014UL =
+		0xBB110000UL | ((uint32_t)old_config.source & 0xFU)
+		| (((uint32_t)old_config.freq_mhz & 0xFFFU) << 4);
+}
+#endif /* TOPPERS_ESP32C6_COLD_RECALIB_BBPLL */
+
 
 void
 esp_shim_bt_pmu_init(void)

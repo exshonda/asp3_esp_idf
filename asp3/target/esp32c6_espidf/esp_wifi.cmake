@@ -935,3 +935,28 @@ endif() # ESP32C6_WIFI
 #    ROM ld:          7（-Tオプション．実在確認済み，コンパイルソースではない）
 #    合計: 62 + 3 + 58 = 123（ROM ld 7本は別枠）
 #
+
+#
+#  ★evidence-c6-04：ESP32C6_COLD_CPU_PLL（cold_clk_init_c6.c）が
+#  rtc_clk_cpu_freq_set_config() を «実際に呼ぶ» ようになったため，
+#  従来 --gc-sections で落ちていた rtc_clk.c の PLL 較正経路
+#  （＝上の「他のPLL較正関数群は取り込まれない想定」という前提）が
+#  リンクされるようになり，regi2c_ctrl_write_reg / _mask が未解決になる（実測）。
+#
+#  esp_bt_idf61.cmake と同じ解法：rtc_clk.c 内の REGI2C_* を «ROM 直呼び»
+#  （esp_rom_regi2c_*，ロック無し）へ解決させる（NON_OS_BUILD）。
+#  cold_clk_init_c6.c は software_init_hook（単一スレッド・カーネル起動前・
+#  割込み前）から呼ぶので regi2c_ctrl.c のクリティカルセクション
+#  （esp_os_*/saradc/tsens 依存）は不要＝リンク肥大も避けられる。
+#
+if(ESP32C6_COLD_CPU_PLL)
+    set_source_files_properties(
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c6/rtc_clk.c
+        PROPERTIES COMPILE_DEFINITIONS "NON_OS_BUILD=1"
+    )
+    #  NON_OS_BUILD の最下層プロバイダ＝esp_rom_regi2c_read/write_mask を
+    #  提供する ROM パッチ（esp_bt_idf61.cmake と同一の1本）。
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${ESP_SUP_DIR}/components/esp_rom/patches/esp_rom_hp_regi2c_esp32c6.c
+    )
+endif()

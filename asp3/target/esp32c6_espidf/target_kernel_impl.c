@@ -329,6 +329,41 @@ software_init_hook(void)
 {
 	diag_mark(1U);	/* DIAGNOSTIC: software_init_hook入口＝bss/dataクリア通過（PMP fix確認済） */
 
+#if defined(TOPPERS_ESP32C6_COLD_SETTLE_MS) && (TOPPERS_ESP32C6_COLD_SETTLE_MS > 0)
+	/*
+	 *  【evidence-c6-04・判別実験】真cold(POR) 直後の «アナログ整定待ち» を
+	 *  模擬する busy wait．
+	 *
+	 *  ★動機（実測された非対称）：stock は phy_init に **t≈477ms**（app 相対）
+	 *  で到達するのに対し，ASP3 の Direct Boot は **t≈83ms** で到達する
+	 *  （evidence-c6-03 §4.1．stock は 2nd-stage bootloader＋IDF フル startup を
+	 *  経るぶん遅い）＝**ASP3 は POR から約 1/6 の時刻で PHY 較正を始めている**．
+	 *  ∴「POR 直後はアナログ（bandgap／レギュレータ／XTAL／BBPLL 較正）が
+	 *  未整定で，phy_init の RF synth PLL がロックできない」という仮説
+	 *  （H3）が立つ．warm では前ブートから電源が切れていない＝整定済み
+	 *  なので通る，と cold/warm 分岐も説明できる．
+	 *
+	 *  ★本オプションは «時間» という単一変数だけを動かす判別器：
+	 *   - 通れば ⇒ 欠けているのは «初期化動作» ではなく «時刻»（H3 の側）．
+	 *   - 通らなければ ⇒ H3 は反証され，«やっていない初期化動作» の側
+	 *     （recalib_bbpll 等）に絞れる．
+	 *  ★どちらに転んでも探索空間が半分になる＝先に走らせる価値がある
+	 *   （rigor 標準「安い判別実験を先に」）．
+	 *
+	 *  esp_rom_delay_us は hardware_init_hook の
+	 *  esp_rom_set_cpu_ticks_per_us(CORE_CLK_MHZ) 済みなので正確（実施48）．
+	 *  ここは .data 初期化後・sta_ker 前・sio 初期化前＝誰も撹乱しない．
+	 */
+	{
+		extern void esp_rom_delay_us(uint32_t us);
+		uint32_t	i;
+
+		for (i = 0U; i < (uint32_t) TOPPERS_ESP32C6_COLD_SETTLE_MS; i++) {
+			esp_rom_delay_us(1000U);
+		}
+	}
+#endif /* TOPPERS_ESP32C6_COLD_SETTLE_MS > 0 */
+
 #ifdef TOPPERS_ESP32C6_PMU_DIAG
 	/*
 	 *  【evidence-c6-04・診断専用（既定OFF）】.data 初期化 «後» の
@@ -340,6 +375,37 @@ software_init_hook(void)
 		esp_shim_bt_pmu_diag(9U);
 	}
 #endif /* TOPPERS_ESP32C6_PMU_DIAG */
+
+#ifdef TOPPERS_ESP32C6_COLD_CPU_PLL
+	/*
+	 *  ★★evidence-c6-04【真cold ハングの真因の修正】CPU/SOC ルートクロックを
+	 *  PLL@160MHz へ明示設定する（stock の 2nd-stage bootloader の
+	 *  rtc_clk_init() 相当）．真cold では ROM が **XTAL@40MHz** のまま渡して
+	 *  くることを実機で確定した（STORE5=0xbb110280＝src=0(XTAL)/40MHz）．
+	 *  ASP3 の「ROM が SPLL/160MHz 設定済みだから触らない」という前提は
+	 *  **warm でしか成立していなかった**．実体＝bt/bt_pmu_init_c6.c．
+	 *  ★.bss/.data 初期化後でなければならない（rtc_clk.c の s_cur_pll_freq）．
+	 */
+	{
+		extern void esp_shim_cold_cpu_clk_init(void);
+		esp_shim_cold_cpu_clk_init();
+	}
+#endif /* TOPPERS_ESP32C6_COLD_CPU_PLL */
+
+#ifdef TOPPERS_ESP32C6_COLD_RECALIB_BBPLL
+	/*
+	 *  ★evidence-c6-04：stock の recalib_bbpll() 相当（BBPLL を止めて
+	 *  再較正）．実体＝bt/bt_pmu_init_c6.c．.data 初期化後・カーネル起動前・
+	 *  sio 初期化前＝クロックを揺らしても誰も撹乱しない位置で呼ぶ
+	 *  （stock も esp_rtc_init＝.data 初期化後に呼ぶ）．
+	 *  ★rtc_clk.c の static（s_cur_pll_freq＝.bss）を使うので
+	 *  **.bss クリア後でなければならない**＝hardware_init_hook では駄目．
+	 */
+	{
+		extern void esp_shim_cold_recalib_bbpll(void);
+		esp_shim_cold_recalib_bbpll();
+	}
+#endif /* TOPPERS_ESP32C6_COLD_RECALIB_BBPLL */
 
 #if defined(TOPPERS_ESP32C6_BT_PMU_INIT) && defined(TOPPERS_ESP32C6_PMU_INIT_LATE)
 	/*
