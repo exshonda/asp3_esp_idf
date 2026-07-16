@@ -86,6 +86,22 @@ get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf 
 #    - 動作する   → 原因は **hal のグルー/シム**（blob は無罪／統一は可能）
 #  が**一意に決まる**。＝実機ラウンドで最優先に測るべき対照（evidence-c6-01 §7）。
 #
+#  ★★【2026-07-17 実機結果＝evidence-c6-05。上の «2択» はどちらでもなかった】
+#  本DUT（14:C1:9F:E0:5A:9C・rev v0.2）で3アームを同一条件で回した実測：
+#      hal  （hal型グルー × blob 75db98e5/cb429107）: warm D-1 / 真cold D-1
+#      v554 （C3型グルー  × blob 75db98e5/cb429107）: warm D-1 / 真cold D-1  ★4アーム目
+#      v61  （C3型グルー  × blob c28653df/3fea0708）: warm D-1 / 真cold D-1
+#  ＝**3供給すべて D-1 到達**。∴ **blob 無罪・グルー無罪**。
+#  上の2択表は「hal＝ハング」を所与にしていたが、**その所与が本個体で再現しない**
+#  （§10-12 の hal ハングは board C＝rev v0.3 での観測。本DUT は rev v0.2）。
+#  ⇒ **「非収束は blob の版が原因」は反証**され、**「動作する⇒hal グルーが原因」も
+#  成立しない**（グルーを替えなくても動くため）。**§10-12 の正体は未解決＝個体/rev 交絡**
+#  （board C 非接続で分離不能）。
+#  ⇒ **実務結論：submodule の v5.5.4 供給で C6 BT は D-1 に到達する＝外部 v6.1 tree 依存は
+#  外せる**（evidence-c6-01 §6 の据置きは撤回）。**ただし v554 の実績は D-1 まで／
+#  現行既定 v6.1 は D-2b/D-2c まで**＝**既定を替える前に v554 で D-2b を確認すること**。
+#  正本＝.steering/20260716-c3c5c6-esp-idf-supply-migration/evidence-c6-05-blob-vs-glue-4th-arm.md
+#
 option(ASP3_BT_IDF_V554 "Use the esp-idf submodule (TRUE v5.5.4 tag = 735507283d) BT controller/phy/coexist instead of v6.1. Default OFF = v6.1 (the only C6 BT config with D-1/D-2b/D-2c hardware evidence). ON = the decisive 4th arm: C3-type glue x hal-identical blobs (v5.5.4 tag BT blobs are byte-identical to hal), which de-confounds §13's simultaneous blob+glue swap" OFF)
 
 set(ESP_IDF61_DIR /home/honda/tools/esp-idf-v6.1 CACHE PATH
