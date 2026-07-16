@@ -844,3 +844,96 @@ STORE3 の直接測定（ARM C の `our=0`）のおかげ**であって、再接
 | `c5_ble_bonddiag`（`TOPPERS_C5_BOND_COUNT_DIAG`） | build rc=0 | **0** | `BONDDIAG` 実在 |
 
 BT 供給は不変（`ASP3_BT_IDF_V554=ON`＝真の v5.5.4 タグ submodule）。`asp3_core`/`hal` の改変ゼロ。
+
+---
+
+## 12. ★`reason=517` 真因追跡 予測（**実機を触る前に固定。測定後に改竄しない**）
+
+> 節番号：コーディネータ指示は「§11 として追記」だが **§11 は既に bond 永続化の測定結果で使用済**の
+> ため **§12** とする（内容＝指示どおり §11.6-1 の実バグ追跡）。
+
+### 12.0 ★着手前の «無料» の実測（予測ではない。§12.1 の土台）
+
+**(a) ★私の `517` のデコードが誤っていた（自己訂正）**
+
+`esp-idf/.../nimble/include/nimble/ble.h:202-203` 実測：
+```
+BLE_ERR_AUTH_FAIL      = 0x05      ← 517 = BLE_HS_HCI_ERR(0x05) = «Authentication Failure»
+BLE_ERR_PINKEY_MISSING = 0x06      ← これは 518。今回観測していない
+```
+⇒ **§11.2／memory／commit `112c7ee` に書いた「517 = PIN or Key Missing」は誤り**。
+正しくは **「Authentication Failure」**。**意味が変わる**：「鍵が無い」ではなく
+**「認証／暗号化手続きが失敗した」**＝`our=1`（鍵は在る）と**むしろ整合する**。
+（`BLE_HS_ERR_HCI_BASE=0x200`・`BLE_HS_HCI_ERR(x)=0x200+x`＝`ble_hs.h:171,174` で確認）
+
+**(b) H4（517 の発信元）＝ ほぼ静的に決着：**「**central（BlueZ）が切った**」
+
+NimBLE 全ソースを検索すると `BLE_ERR_AUTH_FAIL` は **`ble_hs_hci.c:42`（定義）と
+`:153`（ログ用の文字列テーブル）にしか出現しない**＝**NimBLE 側に 0x05 で terminate する
+コードパスは存在しない**。∴ device が見た `DISCONNECT reason=0x05` は
+**peer が送った LL_TERMINATE_IND の理由**＝**central が「認証失敗」と判断して切った**。
+（実機で «device が terminate していない» ことの傍証も併せて採る）
+
+**(c) 再接続時の LTK 照合パス（`ble_sm.c:1396-1416, 1590-1600`）**
+```c
+ble_sm_retrieve_ltk(ediv, rand, addrs.peer_id_addr.type, peer_id_addr, &value_sec)
+  key_sec.peer_addr = {type, val}          ← ★identity address «で索く»
+  rc = ble_store_read_our_sec(&key_sec, value_sec);
+  if (rc != 0) return rc;
+  if (value_sec->ediv != ediv || value_sec->rand_num != rand) return BLE_HS_ENOENT;  ← ★第2の関門
+```
+⇒ 失敗しうる箇所は **①`ble_store_read_our_sec` の照合（peer_addr 不一致）** と
+**②`ediv`/`rand` 不一致** の2つ。失敗すると LTK nack → central が暗号化失敗 → 切断。
+
+**(d) H1（RPA/IRK）は «host 側だけで» 既に強い逆風**
+
+| | 実測 |
+|---|---|
+| BlueZ adapter | `Address=8C:1D:96:BA:6D:BD` / **`AddressType = public`** |
+| DUT の device object | `Address=D0:CF:13:F0:A7:44` / **`AddressType = public`** / `Paired=1 Bonded=1` |
+
+⇒ **両側とも public＝RPA が登場しない**なら「RPA を IRK で解決できず不一致」は起こり得ない。
+**ただし host 側プロパティだけでは «device が実際に受け取った peer アドレス» を証明しない**
+（BlueZ が privacy 有効で RPA を使う可能性は `btmgmt` が root 必須で未確認）。**device 側で実測する**。
+
+### 12.1 予測（★安い順に潰す＝H3/H4 → H1 → H2）
+
+- **予測 H3：死（device は再起動していない）**。根拠＝store は RAM backed なので、再起動すれば
+  `our` は 0 に戻る。**再接続失敗の «直後» に STORE3 を読んで `0xb0d50101`（our=1）なら、
+  同一ブート内であることと鍵の存在が同時に示される**（＝H3 反証）。
+- **予測 H4：death of "device が切った"＝central が切った**（12.0(b) の静的根拠）。
+- **予測 H1：死**（12.0(d)）。device が受け取る peer アドレスは **public `8C:1D:96:BA:6D:BD`**
+  であり RPA ではない、と予測する。
+- **予測 H2：生存＝真因はここ**。`ble_store_read_our_sec` が
+  **(H2a) そもそも呼ばれない** か **(H2b) 呼ばれるが rc≠0（peer_addr 不一致）** か
+  **(H2c) rc=0 だが ediv/rand 不一致で `retrieve_ltk` が ENOENT** のいずれか。
+  **どれかは «測ってから» 言う**（現時点で1つに賭けない）。
+
+### 12.2 ★反証条件（＝この含意が本当に成立するかを自問してから書く。§10.2 の失敗を繰り返さない）
+
+前回 §10.2 は「P1 FAIL ⇒ `our=0` は実体」という **成立しない含意**を書いた。今回は
+**各仮説の «直接の観測量» だけで判定し、仮説間の含意を連鎖させない**：
+
+| 仮説 | 判定に使う直接の観測量 | 死ぬ条件 | 生きる条件 |
+|---|---|---|---|
+| H3 | 失敗直後の **STORE3** | `0xb0d50101`（our=1）＝同一ブート・鍵在り | `0xb0d50000` なら **H3 生存**（再起動していた＝鍵喪失は当然） |
+| H4 | NimBLE の terminate 呼出の有無（静的）＋ device 側 disconnect reason | 0x05 の emitter が NimBLE に無い | — |
+| H1 | **device 側で受けた peer アドレスの «type»** | `type=public(0)` かつ addr=BlueZ の public | `type=random(1)` かつ上位2bit=0b01（RPA）なら **H1 生存** |
+| H2 | **store_read(OUR_SEC) の «呼出有無・照合キー・rc»** | 呼ばれて rc=0 かつ ediv/rand 一致 | 呼ばれない／rc≠0／ediv-rand 不一致 なら **H2 生存**（どの枝かも同時に判る） |
+
+★**「H1 が死んだら H2 が真因」とは書かない**（H1/H2 以外＝未知の H5 が残りうる）。
+**H2 の観測量が «正常» だったら、真因は未特定として報告する**（無理に成功を作らない）。
+
+### 12.3 計装（`TOPPERS_C5_LTK_DIAG`・**既定 OFF**・非回帰を実測）
+
+**submodule（`esp-idf`）は編集しない**（CLAUDE.md 禁則）。**app 層だけで測る**：
+`ble_store_config_init()` が `ble_hs_cfg.store_read_cb = ble_store_config_read` を張った «後» に
+**アプリ側ラッパで包む**（＝NimBLE の照合キーと rc を非侵襲に覗ける唯一の合法な窓）。
+
+- **STORE9**＝直近の `store_read(OUR_SEC)`：`0x5A<<24 | count(4) | addr_type(4) | rc(8) | addr[0](8)`
+- **STORE8**＝**保存済** our_sec[0] の素性：`0x57<<24 | type(4) | addr[0](8) | addr[5](8) | ediv/rand が非0 か(2)`
+- **STORE3**＝bond 件数（§11 の `TOPPERS_C5_BOND_COUNT_DIAG` を流用）
+- **GAP CONNECT 時の peer アドレス**（`ble_gap_conn_find` の `peer_id_addr`/`peer_ota_addr`）も記録
+
+★**LP_AON へ無条件ミラーを主判定**にする（syslog は補助）。§11.6-3 の教訓＝C5 では
+「変化時だけ syslog」はバースト欠落で消える。

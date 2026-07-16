@@ -523,9 +523,24 @@ get_free_heap_size_wrapper(void)
 /*
  *		イベント（esp_event_shim.cの最小実装へ）
  */
+#ifndef TOPPERS_ESPIDF_SUPPLY
+/*
+ *  hal（esp-hal-3rdparty）供給時：esp_private/wifi.h が esp_event.h を
+ *  includeしないため，ここで局所externを置く．
+ */
 extern int esp_event_post(const char *event_base, int32_t event_id,
 						  void *event_data, size_t event_data_size,
 						  uint32_t ticks_to_wait);
+#else
+/*
+ *  esp-idf（v5.5.4）供給時：esp_private/wifi.h が esp_event.h を
+ *  includeする（＝本物の宣言が既に見えている）ため局所externは置かない．
+ *  版差（実測）：event_data が hal=`void *` / esp-idf=`const void *` で
+ *  あり，局所externを残すと "conflicting types" になる（C5と同一事象）．
+ *  esp_event.h の宣言をそのまま使う（実体は esp_event_shim.c）．
+ */
+#include "esp_event.h"
+#endif
 
 static int32_t
 event_post_wrapper(const char *event_base, int32_t event_id,
@@ -999,15 +1014,25 @@ extern uint8_t coex_schm_flexible_period_get(void);
 extern void *coex_schm_get_phase_by_idx(int idx);
 
 /*
- *  v5.5.4統一（docs/blob-unify-v554.md）：C5版（wifi_v8/esp_wifi_adapter.c）
- *  と同一の事象・同一の対処。wifi_os_adapter.h（v5.5.4版．
- *  idf_v554_override/経由で有効）はC6（soc_caps.hでSOC_WIFI_HE_SUPPORT=1）
- *  向けに`_wifi_disable_ac_ax`フィールドを持つ。実ESP-IDF
- *  （esp_wifi/esp32c6/esp_adapter.c）の実装に倣い「11ac/11axの無効化は
- *  未サポート」＝falseを返す。CONFIG_SOC_WIFI_HE_SUPPORTはhal/nuttx/
- *  esp32c6/include/sdkconfig.hで既に1に定義済み。
+ *  ★★訂正（2026-07-17・実測．evidence-c6-01 §3．C5版
+ *  wifi_v8/esp_wifi_adapter.c の同一訂正を転写）：
+ *
+ *  旧記述は「wifi_os_adapter.h（v5.5.4版．idf_v554_override/経由）は
+ *  SOC_WIFI_HE_SUPPORT=1のC6向けに`_wifi_disable_ac_ax`を持つ」として
+ *  `CONFIG_SOC_WIFI_HE_SUPPORT && ASP3_WIFI_BLOB_V554` でガードしていたが
+ *  **前提が誤り**だった。**真のv5.5.4タグ**（submodule esp-idf＝
+ *  735507283d）の wifi_os_adapter.h は当該フィールドを持たない
+ *  （halのヘッダとバイト同一）。持つのは release/v5.5 先端（+1169）だけ。
+ *
+ *  ＝チップのHEサポート有無（SOC_WIFI_HE_SUPPORT）ではなく
+ *  **ヘッダ供給元の版**で決まる。よってガードは供給元版を表す
+ *  ASP3_WIFI_OSI_HAS_DISABLE_AC_AX（esp_wifi.cmake．既定OFF）へ改める。
+ *  ONにするのは `-DIDF_V554=~/tools/esp-idf`（+1169）でA/Bする時だけ。
+ *
+ *  実装は実ESP-IDF（esp_wifi/esp32c6/esp_adapter.c）に倣い
+ *  「11ac/11axの無効化は未サポート」＝falseを返す。
  */
-#if CONFIG_SOC_WIFI_HE_SUPPORT && ASP3_WIFI_BLOB_V554
+#if ASP3_WIFI_OSI_HAS_DISABLE_AC_AX
 static bool
 wifi_disable_ac_ax_wrapper(void)
 {
@@ -1140,7 +1165,7 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 	._coex_schm_flexible_period_set = coex_schm_flexible_period_set,
 	._coex_schm_flexible_period_get = coex_schm_flexible_period_get,
 	._coex_schm_get_phase_by_idx = coex_schm_get_phase_by_idx,
-#if CONFIG_SOC_WIFI_HE_SUPPORT && ASP3_WIFI_BLOB_V554
+#if ASP3_WIFI_OSI_HAS_DISABLE_AC_AX
 	._wifi_disable_ac_ax = wifi_disable_ac_ax_wrapper,
 #endif
 	._magic = ESP_WIFI_OS_ADAPTER_MAGIC,

@@ -475,25 +475,34 @@ phy_get_max_pwr(void)
 
 /*
  *  ------------------------------------------------------------------
- *  v5.5.4統一（docs/blob-unify-v554.md）：C3/C5版esp_shim_blobglue.cと
- *  同一の事象・同一の対処。wpa_supplicant/esp_supplicantが「blobが
- *  実装する想定」で宣言している関数（esp_wifi_driver.h）のうち，hal
- *  のnet80211.a/pp.aには実装されているがESP-IDF v5.5.4（`~/tools/
- *  esp-idf`）の同blobには存在しない3関数（nm実測で確認）。wifi_scanは
- *  素のopen scanのみ（WPA関連分岐は実行時に到達しない）ため，リンク
- *  解決のためのno-op／機能無効化スタブで足りる。ASP3_WIFI_BLOB_V554
- *  （esp_wifi.cmake．v5.5.4 blob選択時のみ定義）でガード＝hal blob
- *  使用時（ASP3_WIFI_BLOB_HAL=ON）はhal blob自身がこの3関数を提供する
- *  ため二重定義しない。
+ *  wpa_supplicant/esp_supplicantが「blobが実装する想定」で宣言している
+ *  関数（esp_wifi_driver.h）のうち，hal のnet80211.a/pp.aには実装されて
+ *  いるが v6.1系 blob には存在しないもののスタブ。wifi_scanは素のopen
+ *  scanのみ（WPA関連分岐は実行時に到達しない）ため，リンク解決のための
+ *  no-op／機能無効化スタブで足りる。ASP3_WIFI_BLOB_V554（esp_wifi.cmake．
+ *  非hal blob選択時に定義）でガード＝hal blob使用時
+ *  （ASP3_WIFI_BLOB_HAL=ON）はhal blob自身が提供するため二重定義しない。
+ *
+ *  ★esp_wifi_skip_supp_pmkcaching のスタブは撤去した（2026-07-17．
+ *  C5 wifi_v8/esp_shim_blobglue.c の同一撤去を転写．evidence-c6-01 §3）：
+ *  供給を **真のv5.5.4タグ**（submodule esp-idf＝735507283d）へ移すと
+ *  libnet80211.a が当該関数を **実装している**（nm実測：`T
+ *  esp_wifi_skip_supp_pmkcaching`）ため，スタブが残っていると
+ *  `multiple definition` でリンクできない（実測で発生）。
+ *  ＝このスタブは「v5.5.4」と称していた外部tree（実体は +1169／v6.1系．
+ *  当該シンボルを持たない）に対してのみ正しかった。
+ *
+ *  ★残る2関数（esp_wifi_sta_get_ie／esp_wifi_is_wpa3_compatible_mode_
+ *  enabled）は，esp-idf供給では **wpa側の参照ごと消滅**する（実測：
+ *  参照する wpa ソースは hal=3/4ファイル，esp-idf=0ファイル）ため
+ *  --gc-sections で脱落する＝走行経路に載らない。
+ *  ⇒ `docs/blob-unify-v554-review.md` ★D5（esp_wifi_sta_get_ieの
+ *  no-op化＝RSN IE検証の恒常無効化）は本移行でC6でも解消する
+ *  （hal fallback を使う限り残る点はC5と同じ）。定義自体は
+ *  ASP3_WIFI_BLOB_HAL=OFF かつ v6.1 blob を選ぶ構成のため残置する。
  *  ------------------------------------------------------------------
  */
 #if ASP3_WIFI_BLOB_V554
-bool
-esp_wifi_skip_supp_pmkcaching(void)
-{
-	return false;
-}
-
 uint8_t *
 esp_wifi_sta_get_ie(uint8_t *bssid, uint8_t elem_id)
 {
