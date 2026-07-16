@@ -857,6 +857,47 @@ main_task(EXINF exinf)
 #ifdef TOPPERS_ESP32C5_BT_SM
 		bt5_security_tick();
 #endif
+#if defined(TOPPERS_ESP32C5_BT_SM) && defined(TOPPERS_C5_BOND_COUNT_DIAG)
+		/*
+		 *  ★判別計装（既定OFF＝未定義時は完全に非回帰．evidence-05 §11）：
+		 *  bond 件数を «PAIRING_COMPLETE の瞬間ではなく» 1秒周期で数え直す．
+		 *  狙い＝`bonds our=0` が
+		 *    (i) 「数えるタイミングが早すぎるだけ（artifact）」なのか
+		 *    (ii) 「鍵が本当に保存されていない（実体）」なのか
+		 *  を非依存に判別する．NimBLE は ble_sm.c:1114-1121 で
+		 *  ble_gap_pairing_complete_event()（＝我々の PAIRING_COMPLETE ハンドラ）を
+		 *  «先に» 呼び，その «後» に ble_sm_persist_keys() を呼ぶため，
+		 *  ハンドラ内の計数は構造的に «保存前» を見ている．
+		 *  ⇒ 後から数えて 1 以上になれば (i)／0 のままなら (ii)．
+		 */
+		{
+			static int	last_our = -1, last_peer = -1;
+			int			our_cnt = 0, peer_cnt = 0;
+
+			(void) ble_store_util_count(BLE_STORE_OBJ_TYPE_OUR_SEC, &our_cnt);
+			(void) ble_store_util_count(BLE_STORE_OBJ_TYPE_PEER_SEC, &peer_cnt);
+			/*
+			 *  ★syslog «だけ» に頼らない：C5 は既知の syslog バースト欠落で
+			 *  «変化した瞬間の1行» が消える（実測：cold boot 直後の our=0 行が
+			 *  "done (host task continues in backgrou" の途中切れと同じ burst で
+			 *  失われ、以後は «変化なし» で無言になった）。
+			 *  ⇒ STORE3 へ «毎秒無条件に» 現在値をミラーする＝esptool read-mem で
+			 *  いつでも回収できる（0xB0D5<our:8><peer:8>）。STORE3 は
+			 *  ble_hs reset マーカだが reset は健全時に発火しない＆本計装は既定OFF。
+			 */
+			sil_wrw_mem((void *) LP_AON_STORE3,
+						0xB0D50000UL
+						| (((uint32_t) our_cnt & 0xffUL) << 8)
+						| ((uint32_t) peer_cnt & 0xffUL));
+			if (our_cnt != last_our || peer_cnt != last_peer) {
+				syslog(LOG_NOTICE,
+					   "ble_host_smoke_c5: BONDDIAG bonds our=%d peer=%d (late count)",
+					   (int_t) our_cnt, (int_t) peer_cnt);
+				last_our = our_cnt;
+				last_peer = peer_cnt;
+			}
+		}
+#endif
 #ifdef TOPPERS_ESP32C5_BT_RXTRACE
 		/*  RXTRACE の粗タイマ（1s毎）．enc 到着→ETIMEOUT の経過秒測定用．  */
 		{
