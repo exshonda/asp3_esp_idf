@@ -368,3 +368,79 @@ libcoexist.a  submodule=c516e24e  hal=c516e24e  IDENTICAL
 4. **syslog バースト交錯で VHCI 生バイトが読めない**（4.3）。C5 で HCI バイト列の直接物証が
    要るラウンドでは、LP_AON STORE マーカ（app が既に持つ）か採取レートの見直しが要る。
 5. C3 / C6 への横展開は未着手（HANDOFF §4-3）。
+
+---
+
+## 7. ★D-2c/D-2d 予測（**ビルド・実機を触る前に固定。測定後に改竄しない**）
+
+ユーザー判断で C3/C6 横展開より先に **C5 の D-2c/D-2d** を実施する（6.2-2 の申し送りを埋める）。
+コーディネータの訂正を受け、**W2＝connect＋`ServicesResolved`（標準 GAP/GATT の探索完了）までであり、
+D-2c/D-2d 水準ではない**ことを前提とする。
+
+### 7.0 着手前に実測で確定した事実（＝予測の土台。これ自体は測定済み）
+
+| 事実 | 実測値 |
+|---|---|
+| `apps/ble_host_smoke_c5/ble_host_smoke_c5.c` に `0xABF0`〜`0xABF4` | **0 件**（608行・notify 0・READ_ENC 0） |
+| `ESP32C5_BT_SM` option | **既定 ON**（`esp_bt.cmake:445`）＝`TOPPERS_ESP32C5_BT_SM` 付与 |
+| **W2 ビルドで SM/tinycrypt が実リンク済みか** | **リンク済**：`ble_store_config_init`/`ble_sm_pair_initiate`/`ble_sm_alg_encrypt`/`tc_aes_encrypt`/`ble_gap_security_initiate` 各1・`uECC_*` **15** |
+| SM 配管（`sm_bonding=1`・`ble_store_config_init`・`bt5_security_tick`・ENC/PAIRING マーカ） | app に**既存** |
+
+⇒ **欠けているのは app の GATT surface だけ**＝**C6 §15 と同型**（C6 は app 完備で cmake トグルのみ／
+C5 は cmake 完備で app のみ）。**新規設計はせず C3 `ble_host_smoke.c:206-313` を逐語転写する**。
+
+### 7.1 予測（ビルド）
+
+- **予測 B1：cmake 変更は不要**。SM/tinycrypt/`ble_store_config` は既にリンク済（7.0 実測）
+  ⇒ **app ソース追加のみで通る**。C3 の `ESP32C3_BT_PVCY` 相当の追加トグルも不要。
+- **予測 B2：壁は 0〜2 件**。候補は (i) `host/ble_gatt.h`/`host/ble_uuid.h`/`os/os_mbuf.h` の
+  include 追加漏れ、(ii) **`bt_nimble_config.h` の GATT リソース上限**で `ble_gatts_count_cfg` が
+  非0 を返す可能性（C6 §14 は同ファイルを stub 側へ隔離した経緯あり）。
+- **予測 B3：`g_conn_handle` の ifdef 移動が要る**。現状 `TOPPERS_ESP32C5_BT_SM` 配下だが
+  `notify_tick` は SM 非依存で必要 ⇒ 無条件化する（SM=OFF ビルドの非回帰を壊さないこと）。
+
+### 7.2 予測（実機 D-2c）
+
+**予測 C1：`0xABF1` READ / `0xABF2` NOTIFY / `0xABF3` WRITE の3方向とも通る。**
+根拠＝同一の NimBLE（submodule v5.5.4 タグ）で C3 が全4特性を OTA 実証済み、かつ C5 は既に
+connect＋`ServicesResolved` まで到達している（§4.4）＝ATT サーバは現に動いている。
+
+**予測 C2：`0xABF0` は BlueZ から見える**（＝C3 で起きた「不可視」は再発しない）。
+根拠＝C3 の不可視は **100% central 側 GATT キャッシュ**と実測断定済（`0x5eed8309`＝f=1/svc=3/chr=9・
+`add_svcs rc=0`）で**デバイス側登録失敗ではなかった**。今回の central は BlueZ で、
+**本セッションで `bluetoothctl devices` が空＝キャッシュ無し**を実測済み。
+- ★ただし**一度接続するとキャッシュが生まれる**ため、**特性を変更した後は毎回 `remove` してから
+  再探索する**（憶測で「キャッシュだろう」と片付けないための手順化）。
+
+### 7.3 予測（実機 D-2d）
+
+**予測 D1：`0xABF4` の暗号必須 READ は bond 後に通る**（`"BT4-OK"` が返る）。
+根拠＝(i) SM/tinycrypt/uECC が**実リンク済**（7.0）、(ii) C3 が同一設計で OTA フル実証済、
+(iii) C5 は `sm_sc=1`/`sm_io_cap=NO_IO`＝Just Works で BlueZ 側に入力 UI が要らない。
+
+**予測 D2：未ペア READ は insufficient-authentication で弾かれ、BlueZ が pairing を自動開始する。**
+
+### 7.4 ★外れた場合に何を意味するか（反証条件を先に書く）
+
+| 観測 | 意味づけ |
+|---|---|
+| `0xABF0` が BlueZ から**不可視** | **憶測で「キャッシュ」と言わない**。`TOPPERS_C5_GATTS_REGDIAG`（C3 の `TOPPERS_C3_GATTS_REGDIAG` を転写・既定OFF・非回帰）で `gatts_register_cb` の登録結果を LP_AON へ出し、**f（OP_SVC で UUID==0xABF0 到達）＋svc 数＋chr 数**を読む。f=1 なら **central 側キャッシュ**、f=0 なら **svc 定義が `ble_gatts_start` で丸ごと弾かれた**（C3 で `0xABF4` が容疑になった型）＝**非依存に決定**する。 |
+| `0xABF1` READ は通るが `0xABF2` NOTIFY だけ来ない | CCCD/subscribe 経路（`BLE_GAP_EVENT_SUBSCRIBE` の `attr_handle==val_handle` 照合）を疑う。`g_notify_sent`/`g_notify_fail`/`g_notify_last_rc` で **device 側の送出可否を先に**切り分ける（central 側表示の問題と混同しない）。 |
+| `0xABF4` READ で **bond は成立するのに暗号 read が返らない** | SM 最終段（鍵配布→bond 登録）の問題。`PAIRING_COMPLETE` の status と `our_sec`/`peer_sec` を STORE6 で読む（C5 は STORE6 が ENC/PAIRING 共用＝last-wins：成功なら `0x5DC0…`／失敗なら `0x5DE0<status>` が残る）。 |
+| **connect＋bond が「成功」したように見える** | **古い bond の再利用でも起こる**（C3 の実績）。**`remove` 後のフレッシュ試行**でのみ真の可否を測る。 |
+| ビルドが `count_cfg` 非0 | 予測 B2(ii) 的中＝`bt_nimble_config.h` のリソース上限。**上限を上げるのが正しい**（app 側で特性を削らない）。 |
+
+### 7.5 変えないもの（非回帰の約束）
+
+- **BT 供給は現状維持**＝`ASP3_BT_IDF_V554=ON`（真の v5.5.4 タグ submodule）。D-1/W2 が通った構成を壊さない。
+  **hal 参照 0・外部 `~/tools/esp-idf` 参照 0 を各ビルドで再測**する。
+- **全アーム UART0（CP2102N）採取で `rst:0x1 (POWERON)` を毎回確認**（4.1 の自己発見を守る）。
+- 電源は `sudo uhubctl -l 1-6 -p 3-4` のみ・毎サイクル **S3-B 在席確認**・書込前 **MAC 照合**。
+
+### 7.6 LP_AON STORE の割当（C5 は **STORE0-9 のみ実在**＝全8+2 が使用中）
+
+新規に要るのは **write マーカ（`0xABF3`）**。C3 は D-2c で「storm probe を無効化して 2reg を接続観測へ
+明け渡す」ことで解決した。**C5 も同じ判断**を採る：`storm_monitor_task` の **STORE5（線2累積ミラー）を
+write マーカへ転用**する（STORE4＝線1ミラーは残す）。妥当性＝**storm 非発生は §4.3/§4.4 で
+`line1=0 line2=0` を live 実測済＝線2 ミラーの情報価値は既に尽きている**。`report_intr_rate()` は
+両線ともコンソールへ出し続けるので観測能力は落ちない。
