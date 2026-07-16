@@ -478,12 +478,20 @@ if(ASP3_C5_PMU_INIT)
     #  明示的に弾く**方が安全（BT単体は別途 pre-existing なビルド不良が
     #  あり本オプションとは無関係＝evidence-c5-04 §6）。
     #
-    if(NOT ESP32C5_WIFI)
+    #  ★evidence-c5-05 §6：BT 供給の submodule 移行で **BT 単体ビルドが
+    #  復旧した**ため、evidence-04 §7.3 の「次の一手2＝BT が直れば BT でも
+    #  pmu_init の A/B ができ、既定 ON 昇格の判断材料が揃う」が実行可能に
+    #  なった。esp_bt.cmake も（esp_wifi_v8.cmake と同様に）
+    #  esp_hw_support の include 群と FreeRTOS スタブ（C3 bt/stub/include）を
+    #  供給するため、WiFi と同じ土台が BT 構成でも揃う＝実測でビルド成立を
+    #  確認した上で BT を受理側に加える（WiFi/BT 両OFF は従来どおり弾く）。
+    if(NOT ESP32C5_WIFI AND NOT ESP32C5_BT)
         message(FATAL_ERROR
-            "ASP3_C5_PMU_INIT=ON currently requires ESP32C5_WIFI=ON. "
+            "ASP3_C5_PMU_INIT=ON currently requires ESP32C5_WIFI=ON or ESP32C5_BT=ON. "
             "The stock pmu_init/ocode/regi2c sources need the include paths and "
-            "FreeRTOS shim that esp_wifi_v8.cmake supplies (measured unresolved "
-            "includes without it: soc/rtc.h, freertos/FreeRTOS.h, rom/efuse.h). "
+            "FreeRTOS shim that esp_wifi_v8.cmake / esp_bt.cmake supply (measured "
+            "unresolved includes without either: soc/rtc.h, freertos/FreeRTOS.h, "
+            "rom/efuse.h). "
             "See .steering/20260716-c3c5c6-esp-idf-supply-migration/"
             "evidence-c5-04-pmu-init-port.md")
     endif()
