@@ -201,6 +201,7 @@ main_task(EXINF exinf)
 	BT_D1_TRACE(3);			/* controller_init 呼出し直前 */
 	err = esp_bt_controller_init(&cfg);
 	if (err != ESP_OK) {
+		BT_D1_TRACE(0x13);	/* init が «エラーを返した»（＝ハングと区別する） */
 		syslog(LOG_ERROR, "bt_smoke_c6: esp_bt_controller_init -> %d", (int_t) err);
 		return;
 	}
@@ -217,6 +218,13 @@ main_task(EXINF exinf)
 	BT_D1_TRACE(5);			/* controller_enable 呼出し直前 */
 	err = esp_bt_controller_enable(ESP_BT_MODE_BLE);
 	if (err != ESP_OK) {
+		/*
+		 *  ★enable が «エラーを返した» ＝ 制御は戻っている．stage=5 の
+		 *  まま止まる «ハング» と一意に区別するために別マーカを打つ
+		 *  （これが無いと stage=5 は「ハング」と「エラー復帰」の
+		 *   どちらとも読めて帰属が決まらない）．
+		 */
+		BT_D1_TRACE(0x15);
 		syslog(LOG_ERROR, "bt_smoke_c6: esp_bt_controller_enable -> %d", (int_t) err);
 		report_intr_trace();
 		report_apm_latch();

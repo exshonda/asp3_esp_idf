@@ -131,13 +131,30 @@ if(ASP3_APPLNAME STREQUAL "ble_host_smoke_c6")
     set(ESP32C6_BT_IDF61_NIMBLE ON)
 endif()
 
+#
+#  ★§20 pmu_init（evidence-c6-02 §5）を A/B するためのトグル。
+#
+#  既定 ON ＝ evidence-c6-01 までの挙動と «完全に同一»（非回帰）。
+#  OFF ＝ §20（2c39cad）以前の挙動＝pmu_init を «呼ばない・積まない»。
+#
+#  なぜトグルが要るか：§20 は「stock の pmu_init を移植して C6 BT の cold
+#  PLL-lock を直す」変更だが，**コミットメッセージ自身が「cold実機検証は
+#  次段（親の真電源断が必要）」と書いており実機で一度も検証されていない**。
+#  そして evidence-c6-02 の実測では，§20 «以前» のバイナリ
+#  （build/c6bt_idf61＝§13 の D-1 成功イメージ）は本個体で phy_init を
+#  通過するのに，現在のコードを同一 toolchain（GCC14.2）で再ビルドすると
+#  phy_init でハングする。∴ §20 が回帰の «容疑者» になった。
+#
+#  ★これは «相関» に過ぎない（rigor 標準・第6再発「change X → symptom Y
+#  は因果の証拠にならない」）。だから憶測で消さず，**トグルで反実仮想
+#  （pmu_init だけを外して再測）を実際に走らせて判定する**。
+#
+option(ESP32C6_BT_PMU_INIT
+    "Call the ported stock PMU HP_ACTIVE init (§20/2c39cad) early from hardware_init_hook. Default ON = the behaviour of evidence-c6-01 (unchanged). OFF = pre-§20 behaviour (pmu_init neither linked nor called); use to A/B the §20 port, which was never hardware-verified"
+    ON)
+
 list(APPEND ASP3_COMPILE_DEFS
     TOPPERS_ESP32C6_BT
-    #  ★§20 pmu_init 呼出しの有効化（target_kernel_impl.c）。実体
-    #  bt/bt_pmu_init_c6.c を積むのは本ファイルだけなので，定義も本ファイル
-    #  限定にする（hal 版のリンク不能を解消＝★B2／★B3(iii)．
-    #  v6.1／v5.5.4 経路の挙動は不変）。
-    TOPPERS_ESP32C6_BT_PMU_INIT
     ESP_PLATFORM
     CONFIG_BT_ENABLED
     CONFIG_BT_CONTROLLER_ENABLED
@@ -362,20 +379,31 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     #  リンクし，薄いシム bt_pmu_init_c6.c 経由で hardware_init_hook から
     #  早期に呼ぶ（hal は編集しない＝禁则遵守）．regi2c は ROM 直呼び
     #  （NON_OS_BUILD）でロック不要にし regi2c_ctrl.c 依存を避ける．
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_init.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_param.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/ocode_init.c
-    #  ★実体を積むのはこの経路だけ＝呼出し側のガード
-    #  TOPPERS_ESP32C6_BT_PMU_INIT も **ここでだけ**定義する
-    #  （下の list(APPEND ASP3_COMPILE_DEFS ...) 参照）。hal 版
-    #  （esp_bt.cmake 本体）は本ファイルを積まないため呼出しも無効化され，
-    #  §20 以前と同じ挙動でリンクできる（★B2 可逆性の回復）。
-    ${BT_TARGETDIR}/bt_pmu_init_c6.c
     #  esp_rom_regi2c_read/write_mask（ROM regi2c ラッパ）を提供する ROM
     #  パッチ．pmu_init/ocode/rtc_clk が NON_OS_BUILD で ROM 直呼びに落ちる
     #  ときの最下層プロバイダ．
     ${ESP_HAL_DIR}/components/esp_rom/patches/esp_rom_hp_regi2c_${BT_CHIP_SERIES}.c
 )
+
+#
+#  ★§20 の pmu_init 一式は ESP32C6_BT_PMU_INIT=ON のときだけ積む
+#  （既定 ON＝従来と同一．OFF で §20 以前＝pmu_init を積まない/呼ばない）。
+#  実体を積むのはここだけなので，呼出し側ガード
+#  TOPPERS_ESP32C6_BT_PMU_INIT の定義も «ここでだけ» 行う
+#  （hal 版＝esp_bt.cmake 本体は本ファイルを積まないので呼出しも無効＝
+#   §20 以前と同じ挙動でリンクできる＝★B2 可逆性）。
+#
+if(ESP32C6_BT_PMU_INIT)
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_init.c
+        ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_param.c
+        ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/ocode_init.c
+        ${BT_TARGETDIR}/bt_pmu_init_c6.c
+    )
+    list(APPEND ASP3_COMPILE_DEFS
+        TOPPERS_ESP32C6_BT_PMU_INIT
+    )
+endif()
 
 #
 #  ★os_mempool.c は v6.1 のみ（上の「レイアウト差」注記を参照）。
@@ -398,10 +426,17 @@ endif()
 #  saradc/tsens 依存）は不要＝リンク肥大を避ける．rtc_clk.c は ocode の
 #  calibrate 経路（本 board=efuse blk>=1 では非実行）から参照されるため
 #  同様に NON_OS へ寄せて regi2c_ctrl_write_reg 未解決を回避．
-set_source_files_properties(
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_init.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/ocode_init.c
+set(_c6_non_os_srcs
     ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_clk.c
+)
+if(ESP32C6_BT_PMU_INIT)
+    list(APPEND _c6_non_os_srcs
+        ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_init.c
+        ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/ocode_init.c
+    )
+endif()
+set_source_files_properties(
+    ${_c6_non_os_srcs}
     PROPERTIES COMPILE_DEFINITIONS "NON_OS_BUILD=1"
 )
 
