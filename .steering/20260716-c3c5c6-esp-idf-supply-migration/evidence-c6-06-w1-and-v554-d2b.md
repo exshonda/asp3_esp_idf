@@ -122,10 +122,156 @@ uint32_t efuse_hal_blk_version(void);     /* line 36 ＝eFuse ブロック版数
 
 ## 5. 実機測定（2026-07-17）
 
-（実機実施後に記入）
+### 5.0 結論（先に3行）
+
+1. **★A：W1（GOT IP + ping）が «真cold» で通った**＝**ミッションの完了条件を達成**
+   （`IP acquired: 192.168.1.69`・**ping 36/36 OK・失敗0・切断0**）。
+2. **★B：v554 は D-2b を «warm・真cold の両方» で達成**し、**SM=ON（§15 と同じ D-2c/D-2d 構成）でも
+   device-side D-2a/D-2b 非回帰**＝**v6.1 の実機実績（warm のみ）を全レベルで «追い越した»**
+   ⇒ **既定を `ASP3_BT_IDF_V554=ON` へ flip**（**外部 v6.1 tree 参照が 0 になった**・OFF で可逆）。
+3. **★C：§10-12 の hal ハングは «tree 変化» でも説明できない**（hal 経路のコードも hal submodule
+   ポインタも §10-12 と**同一**＝実測）＝**未解決のまま候補列挙に留める**（§6）。
+
+### 5.1 ★A：W1（GOT IP + ping）＠**真cold**（依頼 (a)）
+
+**真cold の証明**：by-id 読み戻し **0** ＋ センチネル `0xCAFE5A9C`→**`0x00000000`**。
+**採取＝coldcap**（電源ON→ポーリング最速 open→45s 保持）＝**途中 open をしない**。
+
+| 項目 | 実測 |
+|---|---|
+| **GOT IP** | **`wifi_dhcp: IP acquired: 192.168.1.69`** |
+| **ping** | **`net: ping gateway -> OK` × 36**／**失敗・timeout 0** |
+| 切断 | **`reason=` 0 件**（＝切断なし） |
+| DHCP | `net: DHCP bound` |
+| capture | 1252 byte（`evidence-c6-04` の cold `wifi_scan` は 601 byte／修正前は **0 byte**） |
+
+⇒ **C6 の WiFi は真cold で «PHY → MAC → supplicant(WPA2 4-way) → DHCP → lwIP → ICMP» まで
+一気通貫で動く**。**★これは `evidence-c6-04` の cold 修正が «PHY だけでなく上位層まで» 効いて
+いることの実証**（`wifi_scan` は PHY/RX までしか示さない）。
+
+★**SSID/パスワードは本ファイルに書かない**（§3）。ログの `wifi_dhcp: SSID='…'` はマスク。
+**パスワードのログ出現＝0 件**（`grep -ac` で確認）。
+
+### 5.2 ★B：v554 の D-2b／SM=ON（依頼 (b)）
+
+**判定＝`STORE0`(sync)・`STORE2`(adv)・`STORE3`(adv rc)・`STORE7`(intr trace)**。
+★**`STORE4`(=`RTC_XTAL_FREQ_REG`)・`STORE1`(=`RTC_SLOW_CLK_CAL_REG`) は判定に使っていない**（§4.3）。
+★**センチネルは «判定対象の `STORE0` そのもの» に置いた**（`ble_host_smoke_c6` は STORE0-9 を
+**全部**使うので空きが無い）＝**自己検証**：`STORE0==0xCAFE5A9C` なら **POR が起きていない＝
+その run は無効**として弾く設計（全 run で発生せず＝全て有効）。
+
+| # | arm | 供給 | **warm** | **真cold** |
+|---|---|---|---|---|
+| 1 | **v554**（`ble_host_smoke_c6`） | **submodule v5.5.4** | **sync `0x5ade51c0` / adv `0x0ade5000` / rc `0xad000000` / intr `0xa1020704`＝D-2b** | **同左＝D-2b** |
+| 2 | **v61**（対照・同一セッション） | 外部 v6.1 | **D-2b** | **D-2b** |
+| 3 | **v554 ＋ `SM=ON`**（§15 と同一構成） | submodule v5.5.4 | **D-2a/D-2b 非回帰** | **D-2a/D-2b 非回帰** |
+| 4 | **★既定ビルド（フラグ無し＝flip 後）** | submodule v5.5.4 | **D-2b** | **D-2b** |
+
+**SM=ON の tripwire（§15 と同一）**：`ble_sm_pair_initiate`=1・`ble_store_config_init`=1・
+`tc_aes_encrypt`=1・`uECC_*`=14 ＝**v554/v61 で完全一致**。
+
+### 5.3 ★★既定 flip の判断（依頼 (b)）＝**flip した**
+
+**実機実績の比較（すべて同一ボード＝board C）**：
+
+| level | **v6.1**（§13-15） | **v554**（本ラウンド） |
+|---|---|---|
+| D-1 | warm | **warm ＋ ★真cold**（`evidence-c6-05`） |
+| D-2b（sync→adv rc=0） | warm | **warm ＋ ★真cold** |
+| SM=ON build ＋ device-side D-2a/D-2b | warm | **warm ＋ ★真cold** |
+| **D-2c/D-2d OTA** | **未実施**（memory「残 D-2c/D-2d は OTA」） | **未実施**（＝同条件） |
+
+⇒ **v554 は全レベルで v6.1 «以上»**（v6.1 側に真cold の実績が無い）
+＝**自分の申し送り「D-1 の実績で D-2b の実績を上書きしない」（`evidence-c6-05` §6.3）に抵触しない**
+⇒ **既定 `ASP3_BT_IDF_V554=ON` へ flip した**。
+
+**flip の実測効果**：
+
+| build | **外部 v6.1 tree 参照** | submodule BT 参照 |
+|---|---|---|
+| **既定（flip 後）** | **★0**（＝provenance の罠が既定で外れた） | 264 |
+| `-DASP3_BT_IDF_V554=OFF` | 311 | — |
+
+⇒ **既定で «外部の非 submodule tree（`/home/honda/tools/esp-idf-v6.1`）» に一切触らなくなった**
+＝`evidence-c6-01 §6` の据置き撤回の**実装**。**OFF で完全に戻せる＝可逆**。
+
+### 5.4 ★v554 で踏んだ «版差の壁» は 2件・いずれも低かった（依頼 (b)）
+
+| # | 壁 | 実測した原因 | 修正（既存パターン踏襲） |
+|---|---|---|---|
+| 1 | cmake `Cannot find source file: …/port/src/esp_nimble_mem.c` | **v6.1** は `esp_nimble_mem.h` が `void *nimble_mem_malloc(…)` を**関数宣言**し実体は同名 `.c`（339行）。**v5.5.4** は同ヘッダが `#define nimble_platform_mem_malloc bt_osi_mem_malloc` ＝**マクロで `bt_osi_mem_*` へ直接展開**＝**`.c` は存在しない**（`port/src/` は `nvs_port.c` のみ） | `if(NOT ASP3_BT_IDF_V554)` で囲む（**`os_mempool.c` と同じ版差吸収パターン**）。実体供給は v5.5.4 実在の `porting/mem/bt_osi_mem.c` |
+| 2 | `fatal error: hci_log/bt_hci_log.h: No such file` | **v5.5.4 の `nimble_port.c:49` が include する**（v6.1 の同ファイルは要求しない＝版差）。実体は `components/bt/common/hci_log/include/` に**両版とも実在** | include path に追加（供給元非依存＝無害）。★`esp_bt_idf61.cmake` の既存注記「もし実機ビルドで `hci_log/bt_hci_log.h` が要求されたら」が**現実化したもの** |
+
+**tripwire（版差が正しく吸収されたことの実証）**：
+`esp_nimble_mem.c` のコンパイル数＝**v61:3 / v554:0**（＝v554 は積んでいない）、
+`bt_osi_mem_malloc`＝**両アームとも 1**（＝v554 はマクロ経由でここへ着地）。
 
 ---
 
-## 6. §10-12 の hal ハングが «同じボードで» 消えた理由（tree 変化）
+## 6. ★C：§10-12 の hal ハングが «同じボードで» 消えた理由（依頼 (f)）＝**未解決**
 
-（調査後に記入）
+### 6.1 ★「tree 変化」説も**実測で支持されなかった**
+
+親の推論「差はボードでなくツリー＝07-15 以降の tree 変化が唯一生き残った説明」を**検算した**：
+
+| 検算 | 実測 | 判定 |
+|---|---|---|
+| 07-15 以降に **hal 経路（`bt/bt_shim.c`・`esp_bt.cmake`）** を触った commit | **`35c37ac` の1件のみ** | — |
+| その `35c37ac` が **`bt_shim.c`** に与えたコード差分 | **0 行**（stat に `bt_shim.c` が出ない＝`esp_bt.cmake` のみ 32+/5-） | **★コード変化なし** |
+| `35c37ac` が `esp_bt.cmake` でした «機能的» 変更 | **`option(ESP32C6_BT_IDF61 … OFF)` → `… ON)` ＝既定値だけ** | **★hal 経路の挙動は不変** |
+| §11 のクロック2修正（`cba11c6`）は §10-12 当時に入っていたか | **入っていた**（§11＝`cba11c6` が §12 より前） | **★差ではない** |
+| **`hal/` submodule ポインタ**（07-15 vs 現在） | **`b90b1837cb5` で完全一致** | **★hal ツリーも不変** |
+
+⇒ **hal 経路のコードも hal submodule も §10-12 と «同一»**。
+⇒ **「07-15 以降の tree 変化」では説明できない**（＝親の推論も、私の「個体/rev」も、両方外れ）。
+★**私の cold 修正でもない**（`evidence-c6-05` の逆方向対照＝hal は `COLD_CPU_PLL=OFF` でも warm で D-1）。
+
+### 6.2 ★残る候補（**憶測で断定しない**）と、**実機で決める方法**
+
+| # | 候補 | 実機で決める方法（安い順） |
+|---|---|---|
+| **1** | **§10-12 の観測自体が条件交絡していた**（例：当時の «warm» が実は PCR ごと落ちるリセット＝cold 相当だった。**memory：C6 は `watchdog_reset` 非対応→esptool が RTS へ自動フォールバック**／§13 の留保「**全RTSリセット**」） | **★最有力かつ最安**：**§10-12 当時のリセット経路（RTS/EN）で hal を起動し `STORE5`（clk src）を読む**。`0xbb110280`(XTAL/40) が出れば **«当時の warm» は cold 相当だった**＝§10-12 のハング＝私が直した cold バグ、で全部繋がる。**1 run で決まる** |
+| **2** | 当時のビルド構成が今と違う（app／マーカ／トグル） | **`git checkout` で §10-12 期のツリーを取り出して hal をビルド→本ボードで実行**（コード同一の主張の直接検証） |
+| **3** | 環境要因（温度・電源） | **候補としては挙げるが、1と2を潰す前に持ち出さない**（rigor 標準「「壊れている」と言う前に安い判別を先に」） |
+
+★**候補1が正しければ話は完全に閉じる**：「§10-12 の hal synth-lock ハング」＝
+「`evidence-c6-04` の真cold バグ（ROM が XTAL@40MHz で渡す）」＝**同一現象**。
+そして「§13 で v6.1 が直した」ように見えたのは……**v6.1 も真cold ではハングする**
+（`evidence-c6-03` #4＝`c6u_v61_after` が真cold `0xb1d00005` 2/2）ので、
+**候補1だけでは §13 の成功を説明できない**＝**まだ穴がある**。
+⇒ **∴ 断定しない。上の1→2 の順で測るのが次の1ラウンド。**
+
+---
+
+## 7. 結論・申し送り
+
+### 7.1 一言
+
+**W1（GOT IP+ping）が真cold で通った＝ミッションの完了条件を達成。**
+**v554 は D-2b/SM=ON まで warm・真cold で v6.1 «以上» の実績を得たので既定を flip
+＝外部 v6.1 tree 依存が既定で 0 になった。**
+**§10-12 の hal ハングの正体は «個体» でも «rev» でも «tree 変化» でもなく、依然未解決。**
+
+### 7.2 ★認証情報の混入 0（依頼 (e)）
+
+- **注入はビルド時のみ**（`-DASP3_EXTRA_COMPILE_DEFS='WIFI_SSID="…";WIFI_PASSWORD="…"'`）。
+  **値はシェル呼出しの中だけに存在し、ファイルへ書いていない**。
+- **`build/` は `.gitignore` 済み**（`git check-ignore -q build` で確認）＝`CMakeCache.txt` は追跡外。
+- **`git diff` / `git status` で作業ツリーへの混入 0 を commit 前に確認**（両タスクとも）。
+- **本 evidence にも memory にも SSID/パスワードを書いていない**（ログ引用時は SSID をマスク）。
+- **ログ中のパスワード出現＝0 件**（`grep -ac` 実測）。
+
+### 7.3 ★残ブロッカー／ユーザー判断事項
+
+1. **§10-12 の hal ハングの正体＝未解決**（§6.2 の候補1→2 で次ラウンド。**ユーザーの物理作業は不要**）。
+   ★**「個体差」「rev v0.2/v0.3」「board C 非接続」は全て消えた**（§2）。**「tree 変化」も実測で
+   支持されなかった**（§6.1）。**残るのは «当時の観測条件» の再現**。
+2. **C6 の D-2c/D-2d は «OTA 未実施»**（v6.1 も v554 も同条件）＝**スマホ central が要る（ユーザー手動）**。
+   ★**C3 で実証した GATT キャッシュの罠**に注意（過去に `ASP3-C6-BLE` 接続歴があれば forget→BT OFF/ON）。
+3. **「hal 参照 0」は未達**（`evidence-c6-05` §5.6 の壁＝`esp_bt*.cmake` の `ESP_HAL_DIR` 計122箇所＋
+   clk/periph API ドリフト）。**BT 供給の submodule 化とは別作業**。
+4. ★**`ble_host_smoke_c6.c` の `STORE4`＝`RTC_XTAL_FREQ_REG`／`STORE1`＝`RTC_SLOW_CLK_CAL_REG`
+   は潜在バグのまま**（本ラウンドは «判定に使わない» ことで回避しただけ）。
+   **`evidence-c6-04` の cold 修正は `software_init_hook`（アプリ起動前）で `STORE4` を読むので
+   現状は無害**だが、**起動後に xtal を読み直す経路が増えたら壊れる**。
+5. `rst:` の **EN/RTS 経路での `STORE5` 読み**は未実施（§6.2 候補1＝**次ラウンドの本命**）。

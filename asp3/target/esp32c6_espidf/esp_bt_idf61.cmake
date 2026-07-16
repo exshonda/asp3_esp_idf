@@ -102,7 +102,21 @@ get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf 
 #  現行既定 v6.1 は D-2b/D-2c まで**＝**既定を替える前に v554 で D-2b を確認すること**。
 #  正本＝.steering/20260716-c3c5c6-esp-idf-supply-migration/evidence-c6-05-blob-vs-glue-4th-arm.md
 #
-option(ASP3_BT_IDF_V554 "Use the esp-idf submodule (TRUE v5.5.4 tag = 735507283d) BT controller/phy/coexist instead of v6.1. Default OFF = v6.1 (the only C6 BT config with D-1/D-2b/D-2c hardware evidence). ON = the decisive 4th arm: C3-type glue x hal-identical blobs (v5.5.4 tag BT blobs are byte-identical to hal), which de-confounds §13's simultaneous blob+glue swap" OFF)
+#
+#  ★★【2026-07-17 evidence-c6-06：既定を ON へ反転した】
+#  4アーム目（evidence-c6-05）で blob 無罪・グルー無罪が確定し、本ラウンドで
+#  v554 の実機実績が v6.1 に «追いついた／追い越した»（同一ボード board C 実測）：
+#      level                          v6.1(§13-15)   v554(evidence-c6-06)
+#      D-1                            warm           warm + ★真cold
+#      D-2b (sync→adv rc=0)           warm           warm + ★真cold
+#      SM=ON build + device D-2a/2b   warm           warm + ★真cold
+#      D-2c/D-2d OTA                  未実施          未実施（同条件）
+#  ⇒ **v554 は全レベルで v6.1 以上**＝「D-1 の実績で D-2b の実績を上書きする」問題は無い。
+#  ⇒ 既定 ON にすることで **外部 v6.1 tree（ESP_IDF61_DIR＝submodule でない
+#     ローカルパス＝provenance の罠）への依存を «既定で» 外す**（evidence-c6-01 §6 の
+#     据置き撤回の実装）。**OFF で v6.1 へ完全に戻せる＝可逆**。
+#
+option(ASP3_BT_IDF_V554 "Use the esp-idf submodule (TRUE v5.5.4 tag = 735507283d) BT controller/phy/coexist. Default ON (evidence-c6-06): on board C the v5.5.4-submodule supply reaches D-1 / D-2b / SM=ON device-side D-2a-2b at BOTH warm and TRUE COLD, i.e. >= the v6.1 evidence (which is warm-only), and it removes the dependency on the external non-submodule v6.1 tree. OFF = v6.1 matched set (reversible)" ON)
 
 set(ESP_IDF61_DIR /home/honda/tools/esp-idf-v6.1 CACHE PATH
     "Path to an ESP-IDF v6.1 tree (NOT a submodule; supplies the C6 BLE matched set). Override with -DESP_IDF61_DIR=<path>")
@@ -269,6 +283,13 @@ list(APPEND ASP3_INCLUDE_DIRS
     ${IDF}/components/bt/common/ble_log/include
     ${IDF}/components/bt/porting/include
     ${IDF}/components/bt/porting/include/os
+    #  ★evidence-c6-06：v5.5.4 の nimble_port.c:49 は `hci_log/bt_hci_log.h` を
+    #  include する（v6.1 の同ファイルは要求しない＝版差）。実体は
+    #  components/bt/common/hci_log/include/hci_log/bt_hci_log.h（v5.5.4・v6.1 とも実在）。
+    #  ∴ 供給元非依存で include path に加える（無害＝v6.1 でも同じ物が在る）。
+    #  ※本ファイル下方の注記「もし実機ビルドで hci_log/bt_hci_log.h が要求されたら」が
+    #    まさに現実化したもの（ASP3_BT_IDF_V554=ON 経路）。
+    ${IDF}/components/bt/common/hci_log/include
     ${IDF}/components/bt/porting/npl/freertos/include
     ${IDF}/components/bt/porting/transport/include
     ${IDF}/components/bt/controller/${BT_CHIP_SERIES}
@@ -615,13 +636,29 @@ if(ESP32C6_BT_IDF61_NIMBLE)
     #  ---- ソースファイル ----
     #  D-1 で既に npl_os_freertos.c／os_msys_init.c／bt_osi_mem.c／os_mempool.c／
     #  hci_transport.c はリンク済み．
-    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-        ${BT_ROOT}/porting/transport/driver/vhci/hci_driver_nimble.c
-        ${NIMBLE_ROOT}/transport/esp_ipc/src/hci_esp_ipc.c
+    #
+    #  ★evidence-c6-06：nimble のメモリ供給元は «版で形が違う»（実測）
+    #    - v6.1  : esp_nimble_mem.h が `void *nimble_mem_malloc(...)` を «関数宣言» し、
+    #              実体は port/src/esp_nimble_mem.c（339行）。∴ 積む必要がある。
+    #    - v5.5.4: 同ヘッダが `#define nimble_platform_mem_malloc bt_osi_mem_malloc`
+    #              ＝**マクロで bt_osi_mem_* へ直接展開**。port/src/ に
+    #              esp_nimble_mem.c は **存在しない**（src/ は nvs_port.c のみ）。
+    #              ∴ 積んではならない（cmake が「Cannot find source file」で落ちる＝実測）。
+    #  実体の供給は porting/mem/bt_osi_mem.c（v5.5.4 に実在）が担う。
+    #  ★os_mempool.c の if(NOT ASP3_BT_IDF_V554) と同じ «版差の吸収» パターン。
+    #
+    if(NOT ASP3_BT_IDF_V554)
         #  nimble_mem_malloc/calloc/free（ホスト各所が直接呼ぶ．heap_caps_* へ
         #  委譲）．v6.1 blob は plain 名で未解決参照＝C5 BLE実施05 と同じ壁．
         #  ★v6.1 に乗れている検証点：hal blob なら不要だが v6.1 では必須．
-        ${BT_ROOT}/host/nimble/port/src/esp_nimble_mem.c
+        list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+            ${BT_ROOT}/host/nimble/port/src/esp_nimble_mem.c
+        )
+    endif()
+
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${BT_ROOT}/porting/transport/driver/vhci/hci_driver_nimble.c
+        ${NIMBLE_ROOT}/transport/esp_ipc/src/hci_esp_ipc.c
         ${IDF}/components/bt/host/nimble/nimble/porting/nimble/src/nimble_port.c
         ${IDF}/components/bt/host/nimble/nimble/porting/npl/freertos/src/nimble_port_freertos.c
         #  ホストスタック本体（C5/C6-hal と同一トリム集合．ble_svc_gap/gatt のみ）
