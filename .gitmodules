@@ -8,3 +8,6 @@
 [submodule "lwip"]
 	path = lwip
 	url = https://github.com/lwip-tcpip/lwip.git
+[submodule "esp-idf"]
+	path = esp-idf
+	url = https://github.com/espressif/esp-idf.git
