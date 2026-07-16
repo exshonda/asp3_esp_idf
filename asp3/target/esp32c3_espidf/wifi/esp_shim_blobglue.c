@@ -399,17 +399,30 @@ coex_condition_set(uint32_t type, bool_t dissatisfy)
  *
  *      ASP3_WIFI_BLOB_V554（esp_wifi.cmake．v5.5.4 blob選択時のみ
  *      定義）でガード＝hal blob使用時（ASP3_WIFI_BLOB_HAL=ON）は
- *      hal blob自身がこの3関数を提供する（nm確認済み）ため，本shimを
+ *      hal blob自身がこの2関数を提供する（nm確認済み）ため，本shimを
  *      二重定義しない。
+ *
+ *      ★esp_wifi_skip_supp_pmkcaching のスタブは撤去した（2026-07-17．
+ *      C6 が先行実施した同一修正の転写）。理由＝上の「v5.5.4のblob世代
+ *      ではそもそもこの機能自体が存在しない」という前提が**実測で誤り**
+ *      だったため：
+ *
+ *        tree                       skip_supp_pmkcaching の定義
+ *        -------------------------  --------------------------
+ *        esp-idf submodule(v5.5.4)  **有り**（T）
+ *        hal(b90b1837)              **有り**（T）
+ *        ~/tools/esp-idf(v5.5.0)    **有り**（T）
+ *        v6.1-beta1                 無し
+ *
+ *      ＝当該シンボルを欠くのは **v6.1系のみ**。∴どの v5.5.x blob を
+ *      選んでもスタブは `multiple definition` になる（本PCの移行前
+ *      既定ビルドが実際にこれでリンク不能だった＝evidence-c3-01 §3）。
+ *      元の前提が正しかったのは，当時 `IDF_V554` が指していた
+ *      **v5.5.4-1169（≡v6.1系）** に対してのみ＝**「v5.5.4」という
+ *      名前の嘘がソースの #if ガードにまで伝播していた**事例。
  *  ------------------------------------------------------------------
  */
 #if ASP3_WIFI_BLOB_V554
-bool
-esp_wifi_skip_supp_pmkcaching(void)
-{
-	return false;
-}
-
 uint8_t *
 esp_wifi_sta_get_ie(uint8_t *bssid, uint8_t elem_id)
 {

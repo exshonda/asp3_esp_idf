@@ -49,8 +49,60 @@ set(BT_TARGETDIR ${TARGETDIR}/bt)
 #  可逆：-DASP3_BT_IDF_V554=OFF でhalへ完全復帰．
 #
 option(ASP3_BT_IDF_V554 "ESP32-C3: use ESP-IDF v5.5.4 BT controller(bt.c)/phy/blobs instead of hal (default OFF=hal. NimBLE host stays on hal; VHCI is the ABI boundary. Reversible)" OFF)
+
+#
+#  ------------------------------------------------------------------
+#  ★2026-07-17 provenance訂正（evidence-c3-01 §4）：上のブロックの
+#  「決定的事実（md5実測）」は **真のv5.5.4タグに対しては成立しない**。
+#  ------------------------------------------------------------------
+#
+#  従来ここは `set(BT_IDF /home/honda/tools/esp-idf)` と外部絶対パスを
+#  直書きし，それを「v5.5.4」と呼んでいた。**その名前は嘘だった**：
+#
+#    tree                       libbtdm_app.a   bt.c OSI_VERSION / _malloc_retention
+#    -------------------------  --------------  ----------------------------------
+#    repo submodule esp-idf/    859e8c8e…       0x0001000B / 有り  ← **真のv5.5.4タグ**
+#    hal(b90b1837)              dfdadb9d…       0x0001000A / 無し
+#    ~/tools/esp-idf-v6.1       d9753a31…       0x0001000B / 有り
+#    ~/tools/esp-idf（本PC）    93abf3c7…       0x0001000A / 無し  ← **v5.5.0**
+#
+#  ★上の旧コメントが「v5.5.4=v6.1=d9753a31…」と記録した値は，本ラウンドの
+#  実測では **v6.1 の値そのもの**＝当時の `~/tools/esp-idf` は **+1169
+#  （≡v6.1系）** であり，それを版名で「v5.5.4」と誤認していた
+#  （C6 evidence-c6-01 §2.1-3 と同一の罠．**旧記録自身の数値がそれを証明する**）。
+#  ⇒ 旧コメントの「libphy.a・libbtbb.aも hal相違」も**真のタグでは偽**
+#     （実測：libphy/libbtbb/libcoexist は **真のv5.5.4タグ ≡ hal でバイト一致**）。
+#     halと相違するのは **libbtdm_app.a のみ**（＝C6とは構造が違う。C6は
+#     BT blob 4/4 が hal と一致＝「v5.5.4統一」が「halへ戻す」と同義だった）。
+#
+#  ★本PCで従来のパスを使うと **v5.5.0**（bt.c OSI 0x0001000A・retention無し
+#  ＝旧コメントの説明と食い違う第4のツリー）を掴む＝再現性が無い。
+#  ⇒ 外部絶対パスを撤去し，**既定を submodule（真のv5.5.4タグ）** とする
+#     キャッシュ変数へ変更した。`ASP3_BT_IDF_V554` の**既定は OFF のまま**
+#     ＝**既定ビルドの挙動は不変**（従来どおり hal）。
+#
+#  ★★重要な申し送り（BT供給移行は本ラウンドのスコープ外）：
+#  HANDOFF §4-4 が記録する「C3 BT の v5.5.4 切替は実機 bond 失敗
+#  （AuthenticationTimeout）ゆえ既定 OFF」という**実機エビデンスは，
+#  上記のとおり «+1169（≡v6.1系）» に対して得られたものであり，
+#  «真のv5.5.4タグ» を一度も測っていない**。∴ 本変更後の
+#  `-DASP3_BT_IDF_V554=ON` は **未測定の新しい構成**であって，
+#  「bondが失敗すると分かっている構成」ではない。**再測が要る**。
+#  （libbtdm_app.a のみ hal と相違＝C3では真の A/B が成立する＝
+#   C6 と違って「v5.5.4統一」に実体がある。）
+#
+set(ASP3_BT_IDF_V554_DIR ${IDF_V554}
+    CACHE STRING "ESP-IDF tree supplying the C3 BT controller/phy/blobs when ASP3_BT_IDF_V554=ON. Default = repo submodule esp-idf/ (the TRUE v5.5.4 tag, 735507283d). Override for A/B, e.g. -DASP3_BT_IDF_V554_DIR=/path/to/esp-idf-v6.1")
+
 if(ASP3_BT_IDF_V554)
-    set(BT_IDF /home/honda/tools/esp-idf)
+    if(NOT EXISTS ${ASP3_BT_IDF_V554_DIR}/components/bt/controller/${BT_CHIP_SERIES}/bt.c)
+        message(FATAL_ERROR
+            "ASP3_BT_IDF_V554=ON but ASP3_BT_IDF_V554_DIR='${ASP3_BT_IDF_V554_DIR}' "
+            "does not look like an esp-idf tree (bt/controller/${BT_CHIP_SERIES}/bt.c not found). "
+            "Default is the repo submodule esp-idf/ (true v5.5.4 tag); init it with "
+            "`git submodule update --init esp-idf`, or point -DASP3_BT_IDF_V554_DIR=<tree>.")
+    endif()
+    set(BT_IDF ${ASP3_BT_IDF_V554_DIR})
 else()
     set(BT_IDF ${ESP_HAL_DIR})
 endif()

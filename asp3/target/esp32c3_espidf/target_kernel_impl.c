@@ -84,9 +84,59 @@ hardware_init_hook(void)
 	 *  CPUクロックをPLL（160MHz）へ切り替える
 	 *
 	 *  Direct Boot（二段ブートローダ無し）では，CPUはリセット既定の
-	 *  XTAL/2＝20MHzのまま起動する（実機dlynse計測で確認）．BBPLL
-	 *  （480MHz）はROMブートローダがブート時に有効化したものを流用
-	 *  する（SPI_FAST_FLASH_BOOT経路ではROMがPLLを使用している）．
+	 *  XTAL/2＝20MHzのまま起動する（実機dlynse計測で確認）．
+	 *
+	 *  ------------------------------------------------------------------
+	 *  ★2026-07-17 訂正（.steering/20260716-c3c5c6-esp-idf-supply-migration
+	 *    evidence-c3-01 §2）：旧コメントの
+	 *      「BBPLL（480MHz）はROMブートローダがブート時に有効化したものを
+	 *        流用する（SPI_FAST_FLASH_BOOT経路ではROMがPLLを使用している）」
+	 *    は **静的解析で誤りと確定した**（挙動は正しい＝コードは無変更．
+	 *    誤っていたのは «理由» の記述だけ）．
+	 *
+	 *  実際（PROVEN．esp32c3_rev3_rom.elf 逆アセンブル＋レジスタ既定値）：
+	 *    - **C3のマスクROMはBBPLLに一切触れない**．ROMは rtc_clk_* の
+	 *      クロックAPIを1つも持たず（nm実測：rtc_clk_bbpll_enable/
+	 *      rtc_clk_cpu_freq_set* とも**不在**．在るのは rtc_boot_control /
+	 *      rtc_get_reset_reason 等のみ），ブート経路
+	 *      main→boot_prepare→ets_run_flash_bootloader→ets_run_direct_boot
+	 *      はcache/MMU初期化とジャンプのみ＝**regi2cトランザクションを
+	 *      1回も行わない**．∴ROMがBBPLLを設定した，という前提は成立しない．
+	 *    - **BBPLLはシリコンのリセット既定で既に有効**：
+	 *      RTC_CNTL_OPTIONS0_REG の BBPLL_FORCE_PD(bit10)／
+	 *      BBPLL_I2C_FORCE_PD(bit8)／BB_I2C_FORCE_PD(bit6) は
+	 *      **いずれも default: 1'b0**（soc/rtc_cntl_reg.h:101,113,125）＝
+	 *      「電源断を強制しない」．ESP-IDFの clk_ll_bbpll_enable() は
+	 *      まさにこの3bitをクリアするだけ（hal/esp32c3/clk_tree_ll.h:67-71）
+	 *      ＝**POR既定では no-op**（stockの「enable」は先行する
+	 *      rtc_clk_bbpll_disable() を打ち消すためだけに在る）．
+	 *      周波数も SYSTEM_PLL_FREQ_SEL(bit2) が **default: 1'b1＝480MHz**
+	 *      （soc/system_reg.h:55）＝既定で480M宣言済み．
+	 *
+	 *  ★C6（真coldでphy_initがハング．evidence-c6-04）と同型の罠には
+	 *    **該当しない**——理由は2つとも構造的：
+	 *      (1) C6のバグは「ASP3が何も書かず，warm残留のPLL設定に暗黙依存
+	 *          していた」こと．**C3は下の2行でmuxを毎ブート無条件に書く**
+	 *          ＝warm残留に依存する余地が無い．
+	 *      (2) BBPLLのenable状態はRTCドメイン（OPTIONS0）＝warm保持・
+	 *          POR既定復帰だが，**POR既定が «有効» の側**なので
+	 *          coldはむしろ安全側．危険なのは «disableを呼んだ後のwarm» で，
+	 *          ASP3-C3は rtc_clk_bbpll_disable() を一度も呼ばない（実測）．
+	 *
+	 *  ★ただし «未検証» として申し送る（原因主張はしない．実機は別ラウンド）：
+	 *    - stockの rtc_clk_bbpll_configure() の**アナログ側**（regi2cによる
+	 *      div_ref/dcur/dbias等8本の較正書込み）は本ポートでは**未適用**＝
+	 *      BBPLLは工場アナログ既定のまま走る．起動する事実は実績があるが，
+	 *      温度/電圧マージンは未検証（cold/warm差の話ではない）．
+	 *    - ∴**C6の cold_clk_init_c6.c を反射的に移植してはならない**：
+	 *      C3のBBPLLは既定で上がっているため無益で，かつC6が真coldで
+	 *      実際に踏んだ「BBPLL較正のregi2c完了待ち無限スピン」を
+	 *      **持ち込む**risk がある．
+	 *    - 決着させる決定的測定＝**RTC_CNTL_OPTIONS0_REG(0x60008000) を
+	 *      本hookの先頭でSTOREへラッチし，真POR と warm を比較**する．
+	 *      bit10/8/6 が cold/warm とも 0 なら本記述が確定．cold で 1 なら
+	 *      本記述は反証され，PLL切替前に bbpll_enable/configure が要る．
+	 *  ------------------------------------------------------------------
 	 */
 	sil_mskw((void *)ESP32C3_SYSTEM_CPU_PER_CONF,
 			 ESP32C3_CPU_PER_CONF_PLL_160M, ESP32C3_CPU_PER_CONF_CLK_MASK);
