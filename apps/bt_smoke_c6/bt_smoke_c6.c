@@ -37,6 +37,34 @@ extern void esp_shim_bt_clock_init(void);
 #define BT_INTR_TRACE_REG	0x600B101CUL
 
 /*
+ *  ★D-1 段階トレース（evidence-c6-02 §3.7．TOPPERS_C6_BT_D1_TRACE=ON で
+ *  のみ有効・既定OFF＝非回帰）．
+ *
+ *  狙い：BLE実施03の事故（`no time event is processed in hrt interrupt.`の
+ *  syslog氾濫がD-1到達ログをかき消して「BLOCKED」と誤診＝実は達成済み
+ *  だった）を避け，**LP_AONへの無条件ミラーを主判定にする**ため．
+ *  コンソールが氾濫しても，esptool read-memでSTORE0を直読みすれば
+ *  「どこまで進んだか」が一意に決まる．
+ *
+ *  LP_AON_STORE0（0x600B1000）を使う理由：bt_smoke_c6はSTORE7相当
+ *  （0x600B101C＝intr trace）しか使っておらず衝突しない．STORE1
+ *  （0x600B1004）はwifi/esp_wifi_adapter.cがcal値に使うため避ける．
+ *
+ *  ★マーカはresetを跨いで残る＝過去のブートの値を現在の証拠に誤用
+ *  しないこと（memory：C3/C6の「adv-rcマーカはreset-surviveで現在放射を
+ *  証明しない」）．cleared-boot-read（0クリア→0を読んで検証→1回だけ
+ *  ブート→読む）を型として使う．
+ */
+#define BT_D1_TRACE_REG		0x600B1000UL
+
+#ifdef TOPPERS_C6_BT_D1_TRACE
+#define BT_D1_TRACE(stage)	\
+	sil_wrw_mem((uint32_t *) BT_D1_TRACE_REG, 0xB1D00000UL | (uint32_t)(stage))
+#else	/* !TOPPERS_C6_BT_D1_TRACE */
+#define BT_D1_TRACE(stage)	((void) 0)
+#endif	/* TOPPERS_C6_BT_D1_TRACE */
+
+/*
  *  HP_APM M0-M3例外ラッチ（実施87/88と同一レジスタ配置．
  *  target_kernel_impl.cのesp32c6_r87_apm_unblock()がブート時に一度
  *  クリアしているため，ここで非0が読めればBT有効化後の新規違反）．
@@ -76,6 +104,7 @@ vhci_notify_host_recv(uint8_t *data, uint16_t len)
 			   "bt_smoke_c6: HCI Command Complete received -> "
 			   "controller alive, VHCI loopback OK");
 		hci_reset_done = true;
+		BT_D1_TRACE(8);		/* ★D-1達成＝Command Complete受信でしか到達しない */
 	}
 	return(0);
 }
@@ -146,12 +175,14 @@ main_task(EXINF exinf)
 	(void) exinf;
 
 	esp_shim_initialize();
+	BT_D1_TRACE(1);			/* main_task 到達 */
 
 	/*
 	 *  実施91のICGアンロック．esp_bt_controller_init()より前に呼ぶこと
 	 *  （coldブート時のPHY初期化ハング対策．bt/bt_shim.c参照）．
 	 */
 	esp_shim_bt_clock_init();
+	BT_D1_TRACE(2);			/* クロック初期化 通過 */
 
 #ifdef TOPPERS_ESP32C6_BT_REGI2C_TRACE
 	/*
@@ -167,15 +198,23 @@ main_task(EXINF exinf)
 
 	syslog(LOG_NOTICE, "bt_smoke_c6: esp_bt_controller_init");
 
+	BT_D1_TRACE(3);			/* controller_init 呼出し直前 */
 	err = esp_bt_controller_init(&cfg);
 	if (err != ESP_OK) {
 		syslog(LOG_ERROR, "bt_smoke_c6: esp_bt_controller_init -> %d", (int_t) err);
 		return;
 	}
+	BT_D1_TRACE(4);			/* controller_init OK */
 	syslog(LOG_NOTICE, "bt_smoke_c6: esp_bt_controller_init OK (heap free=%u)",
 		   (uint_t) esp_shim_heap_free_size());
 
 	syslog(LOG_NOTICE, "bt_smoke_c6: esp_bt_controller_enable(BLE)");
+	/*
+	 *  ★§10-12のsynth-lock無限スピン（register_chipv7_phy→bb_init→
+	 *  tx_cap_init_loop→set_chan_freq）はこの中で起きる．∴ stage=5で
+	 *  停止＝ハング再現／stage>=6＝PHY収束，が一意に決まる．
+	 */
+	BT_D1_TRACE(5);			/* controller_enable 呼出し直前 */
 	err = esp_bt_controller_enable(ESP_BT_MODE_BLE);
 	if (err != ESP_OK) {
 		syslog(LOG_ERROR, "bt_smoke_c6: esp_bt_controller_enable -> %d", (int_t) err);
@@ -183,6 +222,7 @@ main_task(EXINF exinf)
 		report_apm_latch();
 		return;
 	}
+	BT_D1_TRACE(6);			/* ★controller_enable OK＝register_chipv7_phy 収束の物証 */
 	syslog(LOG_NOTICE, "bt_smoke_c6: esp_bt_controller_enable OK (heap free=%u)",
 		   (uint_t) esp_shim_heap_free_size());
 
@@ -201,6 +241,7 @@ main_task(EXINF exinf)
 	for (retry = 0; retry < 50 && !esp_vhci_host_check_send_available(); retry++) {
 		(void) tslp_tsk(100000);	/* 100ms */
 	}
+	BT_D1_TRACE(7);			/* HCI Reset 送信 */
 	esp_vhci_host_send_packet(hci_reset, sizeof(hci_reset));
 
 	for (retry = 0; retry < 30 && !hci_reset_done; retry++) {
@@ -211,6 +252,7 @@ main_task(EXINF exinf)
 		syslog(LOG_NOTICE, "bt_smoke_c6: Phase D-1 milestone reached");
 	}
 	else {
+		BT_D1_TRACE(0x0F);	/* Command Complete 来ず */
 		syslog(LOG_NOTICE, "bt_smoke_c6: FAILED (no HCI Command Complete)");
 	}
 
