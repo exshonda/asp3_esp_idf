@@ -289,6 +289,43 @@ if(ESP32C6_BT AND ESP32C6_WIFI)
     message(FATAL_ERROR "ESP32C6_BT + ESP32C6_WIFI is not supported yet (RAM budget; C3の前例踏襲)")
 endif()
 
+#
+#  ★evidence-c6-04：pmu_init() を «.data 初期化後»（software_init_hook）で
+#  呼ぶ．既定 ON．
+#
+#  §20 は pmu_init() を hardware_init_hook から呼んだが，start.S は
+#      jal hardware_init_hook → .bss クリア → .data コピー → jal software_init_hook
+#  の順（実機バイナリの逆アセンブルで確認）＝**hardware_init_hook は .data
+#  初期化より前**．stock の PMU_instance() は初期化子つき static（.data 配置．
+#  nm 実測 `d pmu_context.0`）を返し，pmu_hp_system_init() が `ctx->hal->dev`
+#  を辿って PMU 記述子を書く．∴ hardware_init_hook から呼ぶと **真cold では
+#  ゴミポインタで走り PMU が設定されない**（warm は前ブートの .data が SRAM に
+#  残るので «たまたま» 動く＝cold/warm 分岐の機序）．
+#
+#  OFF＝§20 の呼出し位置（hardware_init_hook）に戻す＝**逆方向対照**用．
+#  詳細＝.steering/20260716-c3c5c6-esp-idf-supply-migration/evidence-c6-04-*.md
+#
+option(ESP32C6_PMU_INIT_LATE
+    "Call pmu_init() from software_init_hook (after .data init) instead of hardware_init_hook (evidence-c6-04)"
+    ON)
+if(ESP32C6_PMU_INIT_LATE)
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_PMU_INIT_LATE)
+endif()
+
+#
+#  ★evidence-c6-04：PMU_instance()->hal を LP_AON STORE8（hardware_init_hook＝
+#  .data 前）／STORE9（software_init_hook＝.data 後）へミラーする診断．
+#  既定 OFF（恒久ビルド非影響）．bt_smoke_c6 専用（STORE8/9 は
+#  ble_host_smoke_c6 が GAP マーカに使う）．ESP32C6_BT_PMU_INIT=ON が前提
+#  （PMU_instance() の実体を積むのは esp_bt_idf61.cmake だけ）．
+#
+option(ESP32C6_PMU_DIAG
+    "Mirror PMU_instance()->hal to LP_AON STORE8/9 to measure the pre-.data garbage-pointer window (evidence-c6-04)"
+    OFF)
+if(ESP32C6_PMU_DIAG)
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_PMU_DIAG)
+endif()
+
 option(ESP32C6_WIFI "Enable Wi-Fi (esp_wifi blob + os_adapter shim, Phase B-2a scan)" OFF)
 if(ESP32C6_WIFI OR ESP32C6_BT)
     list(APPEND ASP3_INCLUDE_DIRS

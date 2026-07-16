@@ -277,7 +277,24 @@ hardware_init_hook(void)
 	 */
 	esp32c6_r87_apm_unblock();
 
-#ifdef TOPPERS_ESP32C6_BT_PMU_INIT
+#ifdef TOPPERS_ESP32C6_PMU_DIAG
+	/*
+	 *  【evidence-c6-04・診断専用（既定OFF）】hardware_init_hook 時点
+	 *  （＝.data 初期化 «前»）の PMU_instance()->hal を LP_AON STORE8
+	 *  （0x600B1020）へ無条件ミラーする．post-.data の値は
+	 *  software_init_hook 側で STORE9（0x600B1024）へ記録する．
+	 *  両者が食い違えば「hardware_init_hook から pmu_init() を呼ぶと
+	 *  .data 未初期化のゴミポインタで走る」が実測で確定する．
+	 *  ★hal を «deref しない»（ゴミなら不正アドレスになるため）．
+	 *  ★bt_smoke_c6 は STORE8/9 を使わない＝衝突しない．
+	 */
+	{
+		extern void esp_shim_bt_pmu_diag(uint32_t slot);
+		esp_shim_bt_pmu_diag(8U);
+	}
+#endif /* TOPPERS_ESP32C6_PMU_DIAG */
+
+#if defined(TOPPERS_ESP32C6_BT_PMU_INIT) && !defined(TOPPERS_ESP32C6_PMU_INIT_LATE)
 	/*
 	 *  ★§20：C6 BT «cold RF-synth-PLL ロック» 修正．stock IDF が起動
 	 *  シーケンスで呼ぶ pmu_init()（PMU HP_ACTIVE 電源/クロック/アナログ
@@ -304,13 +321,58 @@ hardware_init_hook(void)
 	 */
 	extern void esp_shim_bt_pmu_init(void);
 	esp_shim_bt_pmu_init();
-#endif /* TOPPERS_ESP32C6_BT_PMU_INIT */
+#endif /* TOPPERS_ESP32C6_BT_PMU_INIT && !TOPPERS_ESP32C6_PMU_INIT_LATE */
 }
 
 void
 software_init_hook(void)
 {
 	diag_mark(1U);	/* DIAGNOSTIC: software_init_hook入口＝bss/dataクリア通過（PMP fix確認済） */
+
+#ifdef TOPPERS_ESP32C6_PMU_DIAG
+	/*
+	 *  【evidence-c6-04・診断専用（既定OFF）】.data 初期化 «後» の
+	 *  PMU_instance()->hal を LP_AON STORE9（0x600B1024）へミラー．
+	 *  hardware_init_hook 側（STORE8）との差が «未初期化 .data» の物証．
+	 */
+	{
+		extern void esp_shim_bt_pmu_diag(uint32_t slot);
+		esp_shim_bt_pmu_diag(9U);
+	}
+#endif /* TOPPERS_ESP32C6_PMU_DIAG */
+
+#if defined(TOPPERS_ESP32C6_BT_PMU_INIT) && defined(TOPPERS_ESP32C6_PMU_INIT_LATE)
+	/*
+	 *  ★evidence-c6-04：pmu_init() を «.data 初期化後» に呼ぶ．
+	 *
+	 *  §20 は本呼出しを hardware_init_hook に置いたが，start.S（riscv_gcc
+	 *  共通）は
+	 *      jal hardware_init_hook → .bss クリア → .data コピー
+	 *      → jal software_init_hook → j sta_ker
+	 *  の順であり（実機バイナリの逆アセンブルで確認済），
+	 *  hardware_init_hook は **.data 初期化より前** に走る．
+	 *  stock の PMU_instance()（hal/…/esp32c6/pmu_init.c）は
+	 *      static DRAM_ATTR pmu_hal_context_t pmu_hal = { .dev = &PMU };
+	 *      static DRAM_ATTR pmu_context_t pmu_context = { .hal = &pmu_hal, … };
+	 *  ＝**初期化子つき static＝.data 配置**（nm 実測：`d pmu_context.0`）で，
+	 *  pmu_hp_system_init() は `ctx->hal->dev` を辿って PMU 記述子を書く
+	 *  （逆アセンブル：`lw a4,0(a0)` → `lw a0,0(a4)` → `sw t3,0(a5)`）．
+	 *  ∴ hardware_init_hook から呼ぶと **真cold では .data がゴミ＝
+	 *  dev が PMU(0x600B0000) を指さず，PMU が一切設定されない**．
+	 *  warm では前ブートが初期化した .data が SRAM に残っているため
+	 *  «たまたま» 正しく動く＝これが cold/warm 分岐の機序（evidence-c6-04）．
+	 *
+	 *  software_init_hook は **.data 初期化後・カーネル起動(sta_ker)前**
+	 *  ＝§20 が求めた «稼働中カーネルを撹乱しない早期» を保ったまま
+	 *  ゴミポインタ問題だけを解消する（stock も .data 初期化後に
+	 *  esp_rtc_init→pmu_init を呼ぶ＝stock により近い）．
+	 */
+	{
+		extern void esp_shim_bt_pmu_init(void);
+		esp_shim_bt_pmu_init();
+	}
+#endif /* TOPPERS_ESP32C6_BT_PMU_INIT && TOPPERS_ESP32C6_PMU_INIT_LATE */
+
 	/* Initialize sio for fput */
 #ifdef TOPPERS_OMIT_TECS
 	sio_initialize(0);

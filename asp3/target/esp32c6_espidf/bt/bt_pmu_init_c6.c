@@ -38,6 +38,38 @@
 /*  pmu_init() は esp_private/esp_pmu.h で宣言済み（void pmu_init(void)）．
  *  esp_ocode_calib_init() は esp_private/ocode_init.h で宣言済み． */
 
+#ifdef TOPPERS_ESP32C6_PMU_DIAG
+/*
+ *  【evidence-c6-04・診断専用（既定OFF）】PMU_instance()->hal を
+ *  LP_AON STORE<slot>（0x600B1000 + slot*4）へミラーする．
+ *
+ *  ★目的：「hardware_init_hook（.data 初期化 «前»）から pmu_init() を
+ *  呼ぶと，PMU_instance() が返す .data 上の pmu_context.hal がゴミで，
+ *  pmu_hp_system_init() の `ctx->hal->dev` が PMU(0x600B0000) を指さない」
+ *  を **実機で直接測る**（推論でなく実測にする）．
+ *   - hardware_init_hook（slot=8）と software_init_hook（slot=9）の両方で
+ *     記録し，真cold で 8≠9 なら機序が確定する．
+ *   - warm では SRAM に前ブートの .data が残るため 8==9 になるはず
+ *     ＝これが cold/warm 分岐の説明になる．
+ *
+ *  ★hal ポインタを «deref しない»：ゴミなら不正アドレスで例外になり得る
+ *  （この時点では mtvec 未設定＝chip_initialize は target_initialize で走る）．
+ *  読むのは .data 上の 1 ワード（マップ済み SRAM）だけ＝安全．
+ *
+ *  ★slot 8/9 を使う理由：bt_smoke_c6 は STORE0（0x600B1000＝D-1 stage）と
+ *  STORE7（0x600B101C＝intr trace）しか使わない．STORE1 は wifi の cal 値．
+ *  STORE8/9 は ble_host_smoke_c6 が GAP connect/disconnect に使うため，
+ *  本診断は bt_smoke_c6 専用（既定OFF なので恒久ビルドに影響しない）．
+ */
+void
+esp_shim_bt_pmu_diag(uint32_t slot)
+{
+	pmu_context_t	*ctx = PMU_instance();
+
+	*(volatile uint32_t *)(0x600B1000UL + (slot * 4U)) = (uint32_t)(ctx->hal);
+}
+#endif /* TOPPERS_ESP32C6_PMU_DIAG */
+
 void
 esp_shim_bt_pmu_init(void)
 {
