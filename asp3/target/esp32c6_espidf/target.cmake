@@ -65,9 +65,38 @@ if(NOT DEFINED IDF_V554)
     get_filename_component(IDF_V554 ${CMAKE_CURRENT_LIST_DIR}/../../../esp-idf ABSOLUTE)
 endif()
 
+#
+#  ★既定値は「WiFi/素のビルド＝ON（HAL-free）」「BT＝OFF（hal基盤）」とする。
+#  ------------------------------------------------------------------
+#  【なぜBTだけ既定OFFか（実測に基づく．evidence-c6-01 §6）】
+#  C6のBTは実機エビデンス（§13 D-1／§14 D-2a/D-2b／§15 D-2c/D-2d，board C 2/2）が
+#  すべて **「hal基盤 ＋ BTだけIDF v6.1」** の構成で得られている。基盤を
+#  esp-idf v5.5.4へ移すと，BT側のcmake（esp_bt.cmake／esp_bt_idf61.cmakeは
+#  esp_hw_support等をhalから採る）との間で **供給元の混成**が生じ，
+#  実測で `shared_periph_module_t` 未定義が噴出する
+#  （hal の `esp_private/esp_modem_clock.h` が要求する型が，esp-idf v5.5.4 の
+#  `soc/periph_defs.h` には **存在しない**＝実測。hal内／esp-idf内は
+#  それぞれ整合しており，**壊れているのは «混ぜたこと» そのもの**）。
+#  ＝HANDOFF §4-3-5 が予告した罠に一致する。
+#
+#  ∴ 本ラウンドではBTの供給移行は**行わず**，検証済み構成をそのまま維持する
+#  （「無理に成功を作らない」）。BTを移すなら esp_bt*.cmake の
+#  ESP_HAL_DIR（計122箇所）も**同時に**移す必要があり，かつ C6 BT が要求する
+#  blob は v6.1（＝submodule に無い）なので「submodule供給」には到達しない
+#  ——BTのhal離脱は v6.1 ツリー参照によって達成される（下記 ESP_IDF61_DIR）。
+#  詳細と実機ラウンドへの申し送りは evidence-c6-01 §6/§7。
+#
+#  ユーザーが明示的に -DASP3_ESPIDF_SUPPLY=ON を渡せばBTでも試せる（可逆）。
+#
+if(ESP32C6_BT)
+    set(_asp3_espidf_supply_default OFF)
+else()
+    set(_asp3_espidf_supply_default ON)
+endif()
+
 option(ASP3_ESPIDF_SUPPLY
-    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (v5.5.4 tag) instead of esp-hal-3rdparty. Default ON = HAL-free. OFF = hal fallback (reversible)"
-    ON)
+    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (v5.5.4 tag) instead of esp-hal-3rdparty. Default ON = HAL-free (WiFi / plain builds). Default OFF for ESP32C6_BT=ON: the C6 BLE hardware evidence (D-1/D-2b/D-2c) exists only for the hal-base + v6.1-BT configuration, and mixing an esp-idf base with hal's esp_hw_support breaks (shared_periph_module_t). Reversible either way"
+    ${_asp3_espidf_supply_default})
 
 if(ASP3_ESPIDF_SUPPLY)
     set(ESP_SUP_DIR ${IDF_V554})

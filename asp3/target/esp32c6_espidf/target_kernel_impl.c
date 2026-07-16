@@ -277,7 +277,7 @@ hardware_init_hook(void)
 	 */
 	esp32c6_r87_apm_unblock();
 
-#ifdef TOPPERS_ESP32C6_BT
+#ifdef TOPPERS_ESP32C6_BT_PMU_INIT
 	/*
 	 *  ★§20：C6 BT «cold RF-synth-PLL ロック» 修正．stock IDF が起動
 	 *  シーケンスで呼ぶ pmu_init()（PMU HP_ACTIVE 電源/クロック/アナログ
@@ -288,10 +288,23 @@ hardware_init_hook(void)
 	 *  カーネル/タイマ起動前（stock の pmu_init 呼出しと同じ «早期» 位相）
 	 *  で呼ぶことで，HP_ACTIVE 電源記述子の適用が稼働中カーネルを撹乱
 	 *  しない。実体は bt/bt_pmu_init_c6.c（hal 非編集＝リンクのみ）。
+	 *
+	 *  ★ガードを TOPPERS_ESP32C6_BT → TOPPERS_ESP32C6_BT_PMU_INIT へ変更
+	 *  （2026-07-17．docs/blob-unify-v554-review.md ★B3(iii)／★B2．
+	 *   evidence-c6-01 §5）：
+	 *   §20（2c39cad）は本呼出しを TOPPERS_ESP32C6_BT で無条件化した一方，
+	 *   実体 bt_pmu_init_c6.c を **esp_bt_idf61.cmake にしか追加しなかった**。
+	 *   ∴ hal 版（ESP32C6_BT_IDF61=OFF）は 2026-07-15 以降
+	 *   `undefined reference to esp_shim_bt_pmu_init` で **リンク不能**
+	 *   だった（実測．＝★B1「素の -DESP32C6_BT=ON が hal に着地」は
+	 *   «ハングする構成に着地» ではなく «そもそもビルドできない» が正確）。
+	 *   本マクロは実体を積む esp_bt_idf61.cmake だけが定義する＝
+	 *   v6.1／v5.5.4 経路の挙動は**不変**（非回帰），hal 経路は §20 以前の
+	 *   挙動（pmu_init を呼ばない）に戻ってリンク可能になる＝★B2 の可逆性回復。
 	 */
 	extern void esp_shim_bt_pmu_init(void);
 	esp_shim_bt_pmu_init();
-#endif /* TOPPERS_ESP32C6_BT */
+#endif /* TOPPERS_ESP32C6_BT_PMU_INIT */
 }
 
 void

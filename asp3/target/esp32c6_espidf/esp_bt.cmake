@@ -23,12 +23,39 @@ if(ESP32C6_BT)
 #
 #  ★BLE実施13（docs/ble-c5c6-plan.md §13）：IDF v6.1 matched-set swap
 #  トグル．ON にすると bt/phy/coex/libble_app.a を hal submodule ではなく
-#  IDF v6.1（~/tools/esp-idf-v6.1）から採り，C3型 bt.c（esp_bt_idf61.cmake）
-#  で D-1（controller-only）をビルドする．既定 OFF＝従来の hal 版（本
-#  ファイル本体）．RFシンセ非ロック（§11/§12）が v6.1 で解けるかの実機
-#  判定用．board C を戻すときは OFF で再ビルド or build/c6bt_fix を再フラッシュ．
+#  IDF v6.1 から採り，C3型 bt.c（esp_bt_idf61.cmake）でビルドする．
+#  OFF＝従来の hal 版（本ファイル本体）．
 #
-option(ESP32C6_BT_IDF61 "Use IDF v6.1 matched-set (bt/phy/coex/libble_app.a) instead of hal submodule for C6 BLE D-1 (BLE実施13)" OFF)
+#  ------------------------------------------------------------------
+#  ★★既定を OFF→ON へ是正（2026-07-17．docs/blob-unify-v554-review.md ★B1．
+#    真因を特定した上での変更＝憶測ではない．evidence-c6-01 §5）
+#  ------------------------------------------------------------------
+#  【B1の真因】本トグルが**上位ゲート**であり，v5.5.4統一の既定flipコミット
+#  （e1e965c）は下位の `ASP3_BT_IDF_V554`（esp_bt_idf61.cmake:48）の既定しか
+#  変えていない。ところが `ASP3_BT_IDF_V554` は `if(ESP32C6_BT_IDF61)` の
+#  **内側でしか評価されない**ため，本トグルが OFF である限り**下位flipは
+#  一度も効かない**（＝二段オプションの構造的な穴）。
+#  ∴ 素の `-DESP32C6_BT=ON` は hal 版に着地していた。
+#
+#  【なぜ ON が正しいか（実測に基づく）】
+#   - OFF（hal 版）＝ §10-12 で `register_chipv7_phy` の RFシンセ非ロックが
+#     再現し **D-1 未達**の構成（clock 2修正込みの c6bt_fix でもハング）。
+#   - ON（v6.1）＝ §13 で D-1，§14 で D-2a/D-2b，§15 で D-2c/D-2d ビルド＋
+#     device-side 非回帰を **board C 実機 2/2 で達成**した唯一の構成。
+#     board C の最終 flash（build/c6bt_idf61_sm）もこの経路。
+#   ＝「既定＝実機エビデンスのある構成」に揃える。hal 版へは
+#     `-DESP32C6_BT_IDF61=OFF` の**単一ノブ**で完全に戻れる（★B2 も解消）。
+#
+#  【★C6 で「v5.5.4 統一」を既定にしない理由（重要．evidence-c6-01 §2）】
+#  md5 実測：**真の v5.5.4 タグ（submodule esp-idf＝735507283d）の C6 BT blob は
+#  hal の blob と 4/4 バイト完全一致**（libble_app.a 75db98e5／libphy.a cb429107／
+#  libbtbb.a cbe3022f／libcoexist.a 55344862）。
+#  ＝C6 では「v5.5.4 へ統一する」ことと「hal に戻す」ことが**同じ blob を
+#  リンクする**ことを意味し，§10-12 のハングを持ち込む側になる。
+#  ∴ C6 BT の既定は v6.1 とし，v5.5.4（submodule）は
+#  `-DASP3_BT_IDF_V554=ON` の**明示 opt-in**（＝下記の決定的対照実験用）とする。
+#
+option(ESP32C6_BT_IDF61 "Use IDF v6.1 matched-set (bt/phy/coex/libble_app.a) instead of hal submodule for C6 BLE. Default ON = the only C6 BT configuration with hardware evidence (D-1/D-2b/D-2c). OFF = hal (esp-hal-3rdparty; §10-12 register_chipv7_phy synth-lock hang, D-1 unreached)" ON)
 if(ESP32C6_BT_IDF61)
     include(${CMAKE_CURRENT_LIST_DIR}/esp_bt_idf61.cmake)
 else()

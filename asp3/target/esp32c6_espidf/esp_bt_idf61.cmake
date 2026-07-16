@@ -36,20 +36,76 @@
 set(BT_TARGETDIR ${TARGETDIR}/bt)
 get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf ABSOLUTE)
 
-#  esp_wifi.cmake と同一の IDF v6.1 パス（eco/matched set）．
 #
-#  ★BT v5.5.4統一「実現性」判定（docs/blob-unify-v554.md）：C5と同じ
-#  ASP3_BT_IDF_V554トグル（既定OFF＝v6.1のまま）．事前md5実測：
-#  libble_app.a・libphy.a・libbtbb.aはv5.5.4/v6.1間でC6もバイト完全
-#  一致（register_chipv7_phy含む）——差はlibcoexist.aのみ。C5 D-1で
-#  v5.5.4のesp_bt_controller_enable完走を実機実証済み（本トグルは
-#  同じ切替をC6へも適用するもの．C6固有のcold PLL問題は本トグルとは
-#  独立の既知課題＝docs/blob-unify-v554.md参照）。
-option(ASP3_BT_IDF_V554 "Use ESP-IDF v5.5.4 BT controller/phy/coexist tree instead of v6.1 (default ON=blob統一. v5.5.4 blob=v6.1バイト同一. C6はcold-PLL別壁でwarm bt_smoke 2/2動作. OFFでv6.1へ可逆)" ON)
+#  ------------------------------------------------------------------
+#  ★★供給元の選択（2026-07-17 に全面訂正．evidence-c6-01 §1・§2・§5）
+#  ------------------------------------------------------------------
+#
+#  【旧記述は実測で反証された】旧コメントは
+#    「事前md5実測：libble_app.a・libphy.a・libbtbb.a は v5.5.4/v6.1 間で
+#      C6 もバイト完全一致（register_chipv7_phy含む）——差はlibcoexist.aのみ」
+#  としていたが，**C6 では成立しない**。本PCでの md5 実測：
+#
+#    file           submodule(v5.5.4tag)  hal        v6.1-beta1  ~/tools/esp-idf
+#    libble_app.a   75db98e5              75db98e5   c28653df    54cb6f5f
+#    libphy.a       cb429107              cb429107   3fea0708    6b62ea91
+#    libbtbb.a      cbe3022f              cbe3022f   d31c8865    1037b470
+#    libcoexist.a   55344862              55344862   797d4daf    cd3c5cff
+#
+#  ＝(a) **真の v5.5.4 タグ ≡ hal（4/4 バイト一致）**，
+#    (b) v5.5.4 タグ と v6.1 は **4/4 すべて相違**（「バイト同一」は誤り）。
+#  旧記述が成立していたのは，当時の `~/tools/esp-idf`（＝別PCの
+#  `v5.5.4-1169-gbb2188bf`＝release/v5.5 先端）が **BT blob について v6.1 と
+#  一致していた**ためで，そのツリーを「v5.5.4」と**名前で誤認**した結果である
+#  （実際は +1169）。＝本質は「v5.5.4≡v6.1」ではなく「**+1169≡v6.1**」。
+#
+#  【★外部絶対パスの撤去（本PCでは版すら違う）】旧実装は
+#  `set(IDF /home/honda/tools/esp-idf)`（v5.5.4を名乗る）と
+#  `set(IDF /home/honda/tools/esp-idf-v6.1)` のローカルパス直書きだった。
+#  実測：**本PCの `~/tools/esp-idf` は v5.5(=v5.5.0, 8c750b08) の shallow clone**
+#  ＝v5.5.4 タグでも +1169 でもない**第3の版**であり，どのラウンドでも
+#  検証されていない。同じパス名が PC ごとに別版を指す＝再現性が無い。
+#  ⇒ v5.5.4 は **submodule（IDF_V554＝735507283d）を相対参照**する。
+#     v6.1 は submodule 化されていないため `ESP_IDF61_DIR` キャッシュ変数
+#     （既定＝従来パス）とし，不在なら明示的に FATAL_ERROR で落とす。
+#
+#  【既定＝v6.1（OFF）とする理由】上表 (a) より，C6 で v5.5.4 を選ぶことは
+#  **hal と同一の blob をリンクする**ことと等価であり，§10-12 の
+#  `register_chipv7_phy` RFシンセ非ロック（D-1未達）を持ち込む側になる。
+#  実機エビデンス（D-1/D-2b/D-2c）があるのは v6.1 のみ（§13-15）。
+#
+#  【★ASP3_BT_IDF_V554=ON は「決定的対照」実験のためにこそ在る】
+#  §13 の A/B は **blob と グルー(bt.c/シム) を同時に**入れ替えていた
+#  （hal＝esp_os_*/platform-os.h 型 → v6.1＝C3型＋bt_shim_idf61.c）＝
+#  2変数同時変更で交絡しており，「非収束は blob の版が原因」という帰属は
+#  **分離されていない**（HANDOFF §5-1「決定的対照を省くと偽の成功譚になる」）。
+#  実測：**submodule v5.5.4 タグの C6 bt.c は v6.1 と同じ C3型**（hal だけが
+#  esp_os_* 型）。∴ 本トグル ON ＝「**C3型グルー × hal と同一の blob**」＝
+#  §13 に欠けていた **4アーム目**であり，これを実機で回すと
+#    - ハングする → 原因は **blob の版**（v6.1 が必須／C6のv5.5.4統一は不可）
+#    - 動作する   → 原因は **hal のグルー/シム**（blob は無罪／統一は可能）
+#  が**一意に決まる**。＝実機ラウンドで最優先に測るべき対照（evidence-c6-01 §7）。
+#
+option(ASP3_BT_IDF_V554 "Use the esp-idf submodule (TRUE v5.5.4 tag = 735507283d) BT controller/phy/coexist instead of v6.1. Default OFF = v6.1 (the only C6 BT config with D-1/D-2b/D-2c hardware evidence). ON = the decisive 4th arm: C3-type glue x hal-identical blobs (v5.5.4 tag BT blobs are byte-identical to hal), which de-confounds §13's simultaneous blob+glue swap" OFF)
+
+set(ESP_IDF61_DIR /home/honda/tools/esp-idf-v6.1 CACHE PATH
+    "Path to an ESP-IDF v6.1 tree (NOT a submodule; supplies the C6 BLE matched set). Override with -DESP_IDF61_DIR=<path>")
+
 if(ASP3_BT_IDF_V554)
-    set(IDF /home/honda/tools/esp-idf)
+    #  ★真の v5.5.4 タグ＝submodule（target.cmake が相対で定義済み）
+    set(IDF ${IDF_V554})
 else()
-    set(IDF /home/honda/tools/esp-idf-v6.1)
+    set(IDF ${ESP_IDF61_DIR})
+    if(NOT EXISTS ${IDF}/components/bt/controller/esp32c6/bt.c)
+        message(FATAL_ERROR
+            "C6 BLE default supply is IDF v6.1, but no v6.1 tree was found at "
+            "ESP_IDF61_DIR='${IDF}'. v6.1 is NOT vendored as a submodule. "
+            "Either pass -DESP_IDF61_DIR=<path-to-esp-idf-v6.1>, or select "
+            "another supply: -DASP3_BT_IDF_V554=ON (esp-idf submodule, true "
+            "v5.5.4 tag) or -DESP32C6_BT_IDF61=OFF (hal). "
+            "See .steering/20260716-c3c5c6-esp-idf-supply-migration/"
+            "evidence-c6-01-*.md")
+    endif()
 endif()
 set(BT_CHIP_SERIES esp32c6)
 
@@ -77,6 +133,11 @@ endif()
 
 list(APPEND ASP3_COMPILE_DEFS
     TOPPERS_ESP32C6_BT
+    #  ★§20 pmu_init 呼出しの有効化（target_kernel_impl.c）。実体
+    #  bt/bt_pmu_init_c6.c を積むのは本ファイルだけなので，定義も本ファイル
+    #  限定にする（hal 版のリンク不能を解消＝★B2／★B3(iii)．
+    #  v6.1／v5.5.4 経路の挙動は不変）。
+    TOPPERS_ESP32C6_BT_PMU_INIT
     ESP_PLATFORM
     CONFIG_BT_ENABLED
     CONFIG_BT_CONTROLLER_ENABLED
@@ -250,7 +311,22 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     #  os_mempool_* を plain名で未解決参照＝C5 BLE実施03の教訓．hal C6 は
     #  blob 同梱で不要だったが v6.1 blob は異なる．os_mbuf.c は未参照の
     #  ため引き続き含めない＝多重定義が出れば除去する）．
-    ${IDF}/components/bt/porting/mem/os_mempool.c
+    #
+    #  ★供給元による**レイアウト差**（実測．evidence-c6-01 §5）：
+    #    v6.1        … components/bt/porting/mem/os_mempool.c
+    #    v5.5.4タグ  … components/bt/porting/mem/ に **無い**
+    #                  （在るのは host/nimble/nimble/porting/nimble/src/ の方
+    #                  ＝NimBLE本家サブモジュール側の旧レイアウト）
+    #  ＝v6.1 で bt/porting へ移された。∴ `${IDF}` を差し替えるだけでは
+    #  configure が通らない（実測：Cannot find source file）。
+    #  なお v5.5.4タグの libble_app.a は **hal とバイト同一**であり，hal は
+    #  os_mempool.c を要さなかった（blob 同梱）ため，v5.5.4 側では
+    #  そもそも積まないのが正しい＝下の if で分岐する。
+    #  ★この事実自体が「旧 ASP3_BT_IDF_V554=ON は v5.5.4 タグを
+    #  一度も指していなかった」ことの傍証：旧実装は `${IDF}` を
+    #  `~/tools/esp-idf`（+1169＝v6.1系レイアウト）に向けていたため
+    #  この経路が通っていた。
+    #  （実体は下の if(NOT ASP3_BT_IDF_V554) で追加する）
     #  PHY／クロック／ペリフェラルの実ソース（bt/phy/coex は IDF v6.1，
     #  hw_support/clock/rtc/efuse/periph/modem_clock はチップ依存で hal 版．
     #  C5 esp_bt.cmake と同じ origin-split）
@@ -289,12 +365,31 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_init.c
     ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_param.c
     ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/ocode_init.c
+    #  ★実体を積むのはこの経路だけ＝呼出し側のガード
+    #  TOPPERS_ESP32C6_BT_PMU_INIT も **ここでだけ**定義する
+    #  （下の list(APPEND ASP3_COMPILE_DEFS ...) 参照）。hal 版
+    #  （esp_bt.cmake 本体）は本ファイルを積まないため呼出しも無効化され，
+    #  §20 以前と同じ挙動でリンクできる（★B2 可逆性の回復）。
     ${BT_TARGETDIR}/bt_pmu_init_c6.c
     #  esp_rom_regi2c_read/write_mask（ROM regi2c ラッパ）を提供する ROM
     #  パッチ．pmu_init/ocode/rtc_clk が NON_OS_BUILD で ROM 直呼びに落ちる
     #  ときの最下層プロバイダ．
     ${ESP_HAL_DIR}/components/esp_rom/patches/esp_rom_hp_regi2c_${BT_CHIP_SERIES}.c
 )
+
+#
+#  ★os_mempool.c は v6.1 のみ（上の「レイアウト差」注記を参照）。
+#  v5.5.4タグ（ASP3_BT_IDF_V554=ON）では bt/porting/mem/ に存在せず，かつ
+#  当該 blob は hal とバイト同一＝hal 同様 blob 同梱で不要と予測される。
+#  実測で os_memblock_*／os_mempool_* が未解決になったら，v5.5.4 側の
+#  実体 `components/bt/host/nimble/nimble/porting/nimble/src/os_mempool.c`
+#  を積むこと（旧レイアウト）。
+#
+if(NOT ASP3_BT_IDF_V554)
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${IDF}/components/bt/porting/mem/os_mempool.c
+    )
+endif()
 
 #  pmu_init.c/ocode_init.c/rtc_clk.c 内の REGI2C_WRITE_MASK/READ_MASK・
 #  regi2c_ctrl_write_reg* を «ROM 直呼び»（esp_rom_regi2c_*，ロック無し）へ
