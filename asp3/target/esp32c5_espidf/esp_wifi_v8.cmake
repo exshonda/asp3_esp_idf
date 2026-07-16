@@ -102,8 +102,8 @@ list(APPEND ASP3_COMPILE_OPTIONS
 #  ------------------------------------------------------------------
 #
 list(APPEND ASP3_INCLUDE_DIRS
-    ${ESP_HAL_DIR}/components/esp_coex/include
-    ${ESP_HAL_DIR}/components/esp_wifi/wifi_apps/roaming_app/include
+    ${ESP_SUP_DIR}/components/esp_coex/include
+    ${ESP_SUP_DIR}/components/esp_wifi/wifi_apps/roaming_app/include
 )
 
 #
@@ -121,60 +121,60 @@ list(APPEND ASP3_INCLUDE_DIRS
 #
 list(APPEND ASP3_INCLUDE_DIRS
     #  esp_cpu.h（esp_system/include/esp_private/startup_internal.h経由）
-    ${ESP_HAL_DIR}/components/esp_hw_support/include
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c5/include
+    ${ESP_SUP_DIR}/components/esp_hw_support/include
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/include
     #  esp_hw_log.h（rtc_clk.c経由．C6固有のrtc_clk.c採用に伴う追加）
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/include
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/include
     #  esp_private/esp_wifi_private.h・esp_wifi_types_generic.h等
-    ${ESP_HAL_DIR}/components/esp_wifi/include
+    ${ESP_SUP_DIR}/components/esp_wifi/include
     #  esp_heap_caps.h（mbedtls/port/esp_mem.c等）
-    ${ESP_HAL_DIR}/components/heap/include
+    ${ESP_SUP_DIR}/components/heap/include
     #  esp_efuse.h（mbedtls/port/psa_driver/esp_mac/*.c）
-    ${ESP_HAL_DIR}/components/efuse/include
-    ${ESP_HAL_DIR}/components/efuse/esp32c5/include
+    ${ESP_SUP_DIR}/components/efuse/include
+    ${ESP_SUP_DIR}/components/efuse/esp32c5/include
     #  esp_event.h（esp_wifi/src/wifi_init.c）
-    ${ESP_HAL_DIR}/components/esp_event/include
+    ${ESP_SUP_DIR}/components/esp_event/include
     #  esp_log.h（efuse/mbedtls/wpa_supplicantの多くが依存）
-    ${ESP_HAL_DIR}/components/log/include
+    ${ESP_SUP_DIR}/components/log/include
     #  riscv/csr.h（esp_cpu.hの内部依存）
-    ${ESP_HAL_DIR}/components/riscv/include
+    ${ESP_SUP_DIR}/components/riscv/include
     #  hal/hmac_types.h（mbedtls psa_driver/esp_mac）
-    ${ESP_HAL_DIR}/components/esp_hal_security/include
+    ${ESP_SUP_HAL_security}/include
     #  esp_hmac.h（mbedtls psa_driver/esp_mac）
-    ${ESP_HAL_DIR}/components/esp_security/include
+    ${ESP_SUP_DIR}/components/esp_security/include
     #  hal/adc_types.h（esp_hw_support/include/esp_private/adc_share_hw_ctrl.h経由）
-    ${ESP_HAL_DIR}/components/esp_hal_ana_conv/include
+    ${ESP_SUP_HAL_ana_conv}/include
     #  hal/gpio_types.h・soc/gpio_num.h（esp_hw_support/esp_sleep.h経由）
-    ${ESP_HAL_DIR}/components/esp_hal_gpio/include
-    ${ESP_HAL_DIR}/components/esp_hal_gpio/esp32c5/include
+    ${ESP_SUP_HAL_gpio}/include
+    ${ESP_SUP_HAL_gpio}/esp32c5/include
     #  esp32c5/rom/ets_sys.h（wpa_supplicant/port/eloop.c）
-    ${ESP_HAL_DIR}/components/esp_rom/esp32c5/include/esp32c5
+    ${ESP_SUP_DIR}/components/esp_rom/esp32c5/include/esp32c5
     #  esp_pm.h（esp_wifi/src/wifi_init.c）
-    ${ESP_HAL_DIR}/components/esp_pm/include
+    ${ESP_SUP_DIR}/components/esp_pm/include
     #  esp_phy_init.h（esp_wifi/src/wifi_init.c）
-    ${ESP_HAL_DIR}/components/esp_phy/include
+    ${ESP_SUP_DIR}/components/esp_phy/include
     #  hal/clk_gate_ll.h（esp_hw_support/periph_ctrl.c．§6参照）
-    ${ESP_HAL_DIR}/components/esp_hal_clock/esp32c5/include
-    ${ESP_HAL_DIR}/components/esp_hal_clock/include
+    ${ESP_SUP_HAL_clock}/esp32c5/include
+    ${ESP_SUP_HAL_clock}/include
     #  hal/pau_types.h（esp_hw_support/include/esp_private/esp_regdma.h経由）・
     #  hal/pmu_hal.h（esp_hw_support/include/esp_private/esp_pmu.h経由）．
     #  C6以降の新コンポーネント＝C3のesp_wifi.cmakeには無い追加分
-    ${ESP_HAL_DIR}/components/esp_hal_pmu/include
-    ${ESP_HAL_DIR}/components/esp_hal_pmu/esp32c5/include
+    ${ESP_SUP_HAL_pmu}/include
+    ${ESP_SUP_HAL_pmu}/esp32c5/include
     #  pmu_param.h（esp_pmu.h経由．PMU＝C6以降の新サブシステム）
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c5/private_include
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/private_include
     #  C5固有の追加インクルードパス（§6の追加ソース，C6の一覧には
     #  無い依存）：
     #  esp_rom_caps.h（esp_hw_support/esp_clk.c経由．C5固有のROM機能
     #  ケーパビリティ定義．C6も同名ファイルを持つがC6のビルドでは
     #  esp_clk.cを採用していないため今まで顕在化しなかった）
-    ${ESP_HAL_DIR}/components/esp_rom/esp32c5
+    ${ESP_SUP_DIR}/components/esp_rom/esp32c5
     #  hal/rtc_timer_hal.h（esp_hw_support/port/esp32c5/rtc_time.c経由）
-    ${ESP_HAL_DIR}/components/esp_hal_rtc_timer/include
-    ${ESP_HAL_DIR}/components/esp_hal_rtc_timer/esp32c5/include
+    ${ESP_SUP_HAL_rtc_timer}/include
+    ${ESP_SUP_HAL_rtc_timer}/esp32c5/include
     #  hal/timg_ll.h（同じくrtc_time.c経由．MWDTのLLレイヤ）
-    ${ESP_HAL_DIR}/components/esp_hal_timg/esp32c5/include
-    ${ESP_HAL_DIR}/components/esp_hal_timg/include
+    ${ESP_SUP_HAL_timg}/esp32c5/include
+    ${ESP_SUP_HAL_timg}/include
 )
 
 #
@@ -259,13 +259,13 @@ list(APPEND ASP3_COMPILE_DEFS
 list(APPEND ASP3_INCLUDE_DIRS
     #  phy_init_data.h／phy_init_deps.h（esp32c5向けデフォルトPHY
     #  初期化データ配列＋PHY_INIT_MODEM_CLOCK_REQUIRED_BITS）
-    ${ESP_HAL_DIR}/components/esp_phy/esp32c5/include
+    ${ESP_SUP_DIR}/components/esp_phy/esp32c5/include
 )
 
 list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-    ${ESP_HAL_DIR}/components/esp_phy/src/phy_init.c
-    ${ESP_HAL_DIR}/components/esp_phy/src/phy_common.c
-    ${ESP_HAL_DIR}/components/esp_phy/esp32c5/phy_init_data.c
+    ${ESP_SUP_DIR}/components/esp_phy/src/phy_init.c
+    ${ESP_SUP_DIR}/components/esp_phy/src/phy_common.c
+    ${ESP_SUP_DIR}/components/esp_phy/esp32c5/phy_init_data.c
 )
 
 #
@@ -346,7 +346,7 @@ if(ASP3_WIFI_OSI_HAS_DISABLE_AC_AX)
 endif()
 
 #
-#  ★HAL依存撤去（段階2a）：Wi-Fi経路のヘッダ供給をesp-idf submoduleへ
+#  ★HAL依存撤去：Wi-Fi経路をesp-idf供給にするために追加で要る配線
 #  （.steering/20260716-c3c5c6-esp-idf-supply-migration）。
 #
 #  動機＝ABI整合：blobは自身がビルドされたヘッダのmd5を埋込む
@@ -355,69 +355,43 @@ endif()
 #     esp_wifi_types_generic.h hal=6773bf5 / 要求=dae1625
 #     esp_wifi_driver.h        hal=50fc486 / 要求=2331a76
 #  （wifi_os_adapter.h と esp_wifi_types_native.h のみ一致）。
-#  ＝現状はhalヘッダ＋v5.5.4タグblobの混成でありscan/W1は通るものの
-#  潜在的なABI skewが残る。esp-idf側へ寄せることでblobと版一致させる。
+#  ＝hal構成はhalヘッダ＋v5.5.4タグblobの混成でありscan/W1は通るものの
+#  潜在的なABI skewが残っていた。esp-idf供給でblobと版一致する。
 #
-#  段階2aの範囲＝Wi-Fi直結の3コンポーネント（esp_wifi/esp_phy/esp_coex）のみ。
-#  PREPENDでhal側（§1で既にASP3_INCLUDE_DIRSへ入っている）より前に置き，
-#  同名ヘッダだけをesp-idf供給へ差し替える（未提供のヘッダはhalへ
-#  フォールバック＝段階的移行）。
+#  ★前ラウンド（WIP option `ASP3_WIFI_INC_IDF`）が「残り壁」として
+#  記録していた3件の**実測による決着**（うち2件は引き継ぎ記述が誤り）：
+#    (3) `wifi_nan_sync_config_t`→`wifi_nan_config_t` 改名
+#        ⇒ **消滅**。ヘッダだけ移してソースをhalに残す構成が原因だった。
+#        wifi_init.c もesp-idf供給に揃えれば改名は両側一致する。
+#        ＝「ヘッダとソースは揃えて移す」原則の実例。
+#    (4) `adc2_cal_include()` が C5 に実装が無く「空スタブが要る」
+#        ⇒ **誤り／対処不要**。当該APIは
+#        `esp_private/adc_share_hw_ctrl.h:149-163` で
+#        `#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32C3` の
+#        時だけ関数宣言され，**それ以外のチップ（C5含む）では
+#        `#define adc2_cal_include()` ＝空マクロ**に展開される（実測）。
+#        C5に `adc2_init_cal.c` が無いのは «正常»。
+#    (5) `esp_netif.h` … ヘッダパス追加のみで足りる（`esp_netif_*` の
+#        呼出しは0件＝実測）⇒ 下で `esp_netif/include` を追加。
 #
-#  ★★既定OFF＝**未完（WIP）**。ONにすると現状ビルドが«通らない»。
-#  実測で潰した壁と，残り壁（次ラウンドの作業項目）：
-#    済 (1) esp_wifi_types_generic.h -> `esp_interface.h`欠落
-#           （halに当該ファイル自体が無い）⇒ esp_hw_support/include をAPPENDで解決。
-#    済 (2) esp_private/wifi.h -> `freertos/FreeRTOS.h`欠落
-#           （hal版はOS非依存の`platform/os.h`＝NuttX向けにFreeRTOS依存を
-#           剥がしてある）⇒ 既存BT用FreeRTOSスタブ再利用で解決。
-#    残 (3) hal版wifi_init.c(716)が`wifi_nan_sync_config_t`を使うが，esp-idf版
-#           ヘッダでは`wifi_nan_config_t`へ«改名»されている
-#           （hal=wifi_nan_sync_config_t/CONFIG_ESP_WIFI_NAN_SYNC_ENABLE，
-#            esp-idf v5.5.4=wifi_nan_config_t/CONFIG_ESP_WIFI_NAN_ENABLE）。
-#           ⇒ 正攻法は**wifi_init.cもesp-idf供給へ移す**こと（ヘッダだけ
-#           移してソースをhalのまま残すのが不整合の元）。ただし
-#    残 (4) esp-idf版wifi_init.c(500)は`adc2_cal_include()`を«無条件»で呼ぶ
-#           （hal版は`#ifndef __NuttX__`で除外）。C5には
-#           esp_hw_support/port/esp32c5/adc2_init_cal.c が«無い»
-#           （実測：存在するのはesp32c3/esp32s2のみ）⇒ 空スタブが要る。
-#    残 (5) esp-idf版wifi_init.cは`esp_netif.h`をincludeする（ただし
-#           esp_netif_*の呼出しは«0件»＝実測．ヘッダパス追加だけで足りる見込み）。
-#  ＝ABI整合上は寄せる価値があるが，一里塚1/W1は既定(OFF)で実機達成済みの
-#  ため，段階2aは次ラウンドへ送る。根拠は
-#  .steering/20260716-c3c5c6-esp-idf-supply-migration/ に記録。
-#  reversible: 既定OFF＝従来のhalヘッダ（W1実機実証済みの構成）。
-#
-option(ASP3_WIFI_INC_IDF "WIP/EXPERIMENTAL: supply Wi-Fi path headers (esp_wifi/esp_phy/esp_coex) from esp-idf submodule instead of hal (HAL removal stage 2a). Default OFF: ON does NOT build yet - see walls (3)(4)(5) above" OFF)
-if(ASP3_WIFI_INC_IDF AND NOT ASP3_WIFI_BLOB_HAL)
-    list(PREPEND ASP3_INCLUDE_DIRS
-        ${IDF_V554}/components/esp_wifi/include
-        ${IDF_V554}/components/esp_wifi/include/local
-        ${IDF_V554}/components/esp_wifi/wifi_apps/roaming_app/include
-        ${IDF_V554}/components/esp_phy/include
-        ${IDF_V554}/components/esp_phy/${WIFI_CHIP_SERIES}/include
-        ${IDF_V554}/components/esp_coex/include
-    )
-    #  esp-idf版esp_wifi_types_generic.hが#include "esp_interface.h"する。
-    #  このヘッダはhalには«存在しない»（esp-idf固有．実測：
-    #  find hal/components -name esp_interface.h ＝0件）ため，esp_hw_support/
-    #  include をAPPENDで«後ろ»に足す（PREPENDにするとhalのesp_hw_support
-    #  ヘッダ群を広範にシャドウして段階2aの範囲を超えるため）。
-    #  ＝docs/blob-unify-v554.md §12でC5/C6 BT側が踏んだ壁と同一。
+if(ASP3_ESPIDF_SUPPLY)
+    #  esp-idf版 esp_wifi/src/wifi_init.c が `#include "esp_netif.h"` する
+    #  （呼出しは0件＝型宣言のためだけ．実測）。
     list(APPEND ASP3_INCLUDE_DIRS
-        ${IDF_V554}/components/esp_hw_support/include
+        ${ESP_SUP_DIR}/components/esp_netif/include
     )
-    #  esp-idf版esp_private/wifi.h・esp_wifi_private.hは
-    #  `#include "freertos/FreeRTOS.h"`／`freertos/queue.h`する（hal版は
+    #  esp-idf版 esp_private/wifi.h・esp_wifi_private.h は
+    #  `#include "freertos/FreeRTOS.h"`／`freertos/queue.h` する（hal版は
     #  OS非依存の`platform/os.h`＝esp-hal-3rdpartyがNuttX向けにFreeRTOS
     #  依存を剥がしているための差）。ASP3はFreeRTOSを«使わない»ので，
     #  既存のBTコントローラ用FreeRTOS互換スタブ（C3の bt/stub/include，
     #  実体はesp_shimへ委譲）を再利用する。C5のesp_bt.cmakeが既に同じ
-    #  ディレクトリを再利用しており（§166），チップ非依存。
+    #  ディレクトリを再利用しており，チップ非依存。
     #  実測：esp-idf esp_wifi/include配下でfreertosを要求するのは上記2本
     #  のみ，必要な型は`QueueHandle_t`1つだけ。
-    #  APPEND（＝halより«後ろ»）にするのは，同ディレクトリに同居する
-    #  bt_nimble_config.h／esp_partition.hでhal側を意図せずシャドウしない
-    #  ため（WiFi単体ビルドではこの2つはどこからもincludeされない）。
+    #  APPEND（＝後ろ）にするのは，同ディレクトリに同居する
+    #  bt_nimble_config.h／esp_partition.hで意図せずシャドウしないため
+    #  （WiFi単体ビルドではこの2つはどこからもincludeされない）。
     list(APPEND ASP3_INCLUDE_DIRS
         ${C3_TARGETDIR}/bt/stub/include
     )
@@ -446,7 +420,7 @@ list(APPEND ASP3_LINK_LIBS
 #  WiFi/PHY/coexistが要求するセット．-Wl,-Tで個別に追加する
 #  （ASP3_LDSCRIPTは単一メインリンカスクリプト用のためここでは使わない）．
 #
-set(ESP_ROM_LD_DIR ${ESP_HAL_DIR}/components/esp_rom/${WIFI_CHIP_SERIES}/ld)
+set(ESP_ROM_LD_DIR ${ESP_SUP_DIR}/components/esp_rom/${WIFI_CHIP_SERIES}/ld)
 set(ESP_WIFI_ROM_LD_FILES
     ${ESP_ROM_LD_DIR}/${WIFI_CHIP_SERIES}.rom.ld
     ${ESP_ROM_LD_DIR}/${WIFI_CHIP_SERIES}.rom.api.ld
@@ -459,7 +433,7 @@ set(ESP_WIFI_ROM_LD_FILES
     #  最適版は別途newlib実体が必要だが本用途はリンク解決が目的）
     ${ESP_ROM_LD_DIR}/${WIFI_CHIP_SERIES}.rom.libc-suboptimal_for_misaligned_mem.ld
     ${ESP_ROM_LD_DIR}/${WIFI_CHIP_SERIES}.rom.version.ld
-    ${ESP_HAL_DIR}/components/riscv/ld/rom.api.ld
+    ${ESP_SUP_DIR}/components/riscv/ld/rom.api.ld
     #  net80211/pp/phy/systimer/coexistのROM常駐部分のシンボル解決に
     #  必要．C6の実機リンクで未定義参照として発覚したファイル群
     #  （C3のWi-Fi ROM ld一覧には無い＝C6以降のROMはこれらの関数
@@ -492,28 +466,182 @@ endforeach()
 #  3. ESP-IDFのmbedTLS（Wireless.mk 96-185行目）
 #  ------------------------------------------------------------------
 #
-set(MBEDTLS_DIR ${ESP_HAL_DIR}/components/mbedtls/mbedtls)
+#
+#  ★供給元による**構造差**（実測．evidence-c5-02）：
+#    hal      = mbedtls **4.0.0**（tf-psa-crypto分離＝暗号本体が
+#               tf-psa-crypto/{core,drivers/builtin/src}/ へ移動．
+#               `library/` にはTLS層のみ33本．**library/common.h は無い**）
+#    esp-idf  = mbedtls **3.6.5**（classic＝`library/` に暗号もTLSも一括108本．
+#               tf-psa-crypto ディレクトリ自体が存在しない）
+#  ＝v5.5.4への統一は mbedtls の**版ダウン**（4.0.0→3.6.5）を伴う。
+#  configはESP-IDF本来の port（`mbedtls/esp_config.h`）へ寄せ，
+#  halのNuttXシムconfig（`hal/nuttx/include/mbedtls`）は捨てる
+#  （esp-idfに存在しない＝S3(LX6)段階3が確立した型と同一）。
+#
+set(MBEDTLS_DIR ${ESP_SUP_DIR}/components/mbedtls/mbedtls)
 
 list(APPEND ASP3_INCLUDE_DIRS
-    ${MBEDTLS_DIR}/library
-    ${ESP_HAL_DIR}/components/mbedtls/port/include
-    ${ESP_HAL_DIR}/components/mbedtls/port/include/aes
-    ${ESP_HAL_DIR}/components/mbedtls/port/psa_driver/include
-    ${MBEDTLS_DIR}/tf-psa-crypto/drivers/builtin/include
-    ${MBEDTLS_DIR}/tf-psa-crypto/drivers/builtin/src
-    ${MBEDTLS_DIR}/tf-psa-crypto/core
-    ${ESP_HAL_DIR}/components/esp_rom/include
-    ${ESP_HAL_DIR}/components/esp_system/include
-    ${ESP_HAL_DIR}/components/esp_rom/esp32c5/include
-    ${MBEDTLS_DIR}/tf-psa-crypto/include
-    ${ESP_HAL_DIR}/nuttx/include/mbedtls
+    ${ESP_SUP_DIR}/components/mbedtls/port/include
+    ${ESP_SUP_DIR}/components/mbedtls/port/include/aes
+    ${ESP_SUP_DIR}/components/esp_rom/include
+    ${ESP_SUP_DIR}/components/esp_system/include
+    ${ESP_SUP_DIR}/components/esp_rom/esp32c5/include
     ${MBEDTLS_DIR}/include
 )
 
-list(APPEND ASP3_COMPILE_DEFS
-    MBEDTLS_CONFIG_FILE=<mbedtls/esp_config.h>
-    TF_PSA_CRYPTO_USER_CONFIG_FILE=\"mbedtls/esp_config.h\"
+if(ASP3_ESPIDF_SUPPLY)
+    #
+    #  mbedtls 3.6.5（classic）．ESP-IDF本家の mbedtls コンポーネントは
+    #  `port/include` `mbedtls/include` `mbedtls/library` の3つをPUBLICな
+    #  インクルードとして公開し（esp-idf/components/mbedtls/CMakeLists.txt:30），
+    #  wpa_supplicant は PRIV_REQUIRES mbedtls でそれを受ける（同 :250）。
+    #  ＝`library/` を検索パスに置くのは**本家と同じ**構成。
+    #  これは wpa の `esp_supplicant/src/crypto/{crypto_mbedtls.c,tls_mbedtls.c}`
+    #  が mbedtls 内部ヘッダ（`common.h` / `ssl_misc.h`）を直接includeする
+    #  ため必要（実測：この2本のみ）。
+    #
+    #  ★shadow注意（S3段階3で既出の罠．**版ダウン固有の新規リスク**）：
+    #  3.6.5の `library/common.h` は wpaの `src/utils/common.h` と**同名**。
+    #  mbedtls 4.0.0 には `library/common.h` が存在しないため hal 構成では
+    #  この衝突自体が起きていなかった。
+    #  実測した重なりは **`common.h` ただ1つ**（mbedtlsが公開する
+    #  port/include・mbedtls/include・library の全ヘッダ名 × wpaの
+    #  src/utils・src/crypto の全ヘッダ名で照合）。
+    #  正しい解決先は**wpa側**：本家 esp-idf は wpa_supplicant を
+    #  `PRIV_INCLUDE_DIRS src src/utils …` ＋ `PRIV_REQUIRES mbedtls` で
+    #  登録しており（CMakeLists.txt:246-250），コンポーネント自身の
+    #  include が requirements より**前**に来る＝bare `common.h` は
+    #  `src/utils/common.h` に解決される。実際 `crypto_mbedtls.c` は
+    #  冒頭で既に `utils/common.h` をincludeしており，後続の
+    #  bare `#include "common.h"` は同一ファイルの再includeで
+    #  インクルードガードにより無害（＝wpa側が意図された解決先）。
+    #  ⇒ `library` は §4（wpa）の**後ろ**に置く（下の §4 末尾を参照）。
+    #  `tls_mbedtls.c` が要求する `ssl_misc.h` は library にしか無いため
+    #  順序が後ろでも解決する。
+    #
+    list(APPEND ASP3_COMPILE_DEFS
+        MBEDTLS_CONFIG_FILE=<mbedtls/esp_config.h>
+    )
+else()
+    #  mbedtls 4.0.0（tf-psa-crypto分離）＝従来のhal供給
+    list(APPEND ASP3_INCLUDE_DIRS
+        ${MBEDTLS_DIR}/library
+        ${ESP_SUP_DIR}/components/mbedtls/port/psa_driver/include
+        ${MBEDTLS_DIR}/tf-psa-crypto/drivers/builtin/include
+        ${MBEDTLS_DIR}/tf-psa-crypto/drivers/builtin/src
+        ${MBEDTLS_DIR}/tf-psa-crypto/core
+        ${MBEDTLS_DIR}/tf-psa-crypto/include
+        ${ESP_HAL_DIR}/nuttx/include/mbedtls
+    )
+    list(APPEND ASP3_COMPILE_DEFS
+        MBEDTLS_CONFIG_FILE=<mbedtls/esp_config.h>
+        TF_PSA_CRYPTO_USER_CONFIG_FILE=\"mbedtls/esp_config.h\"
+    )
+endif()
+
+if(ASP3_ESPIDF_SUPPLY)
+
+#
+#  ------------------------------------------------------------------
+#  3-idf. mbedtls 3.6.5（classic）のソース一覧
+#  ------------------------------------------------------------------
+#
+#  hal(4.0.0)の一覧（下の else 節＝tf-psa builtin 44 + core 8 + port 6）を
+#  3.6.5の `library/` 一括レイアウトへ**1:1で写像**したもの。実測による差分：
+#    - `pk_rsa.c`               … 4.0.0のみ（3.6.5では pk_wrap.c に内包）＝除外
+#    - `tf_psa_crypto_config.c` … 4.0.0のみ（tf-psa分離に伴う新設）＝除外
+#    - `tf_psa_crypto_version.c`… 4.0.0のみ ⇒ 3.6.5の `version.c` で代替
+#      （sdkconfig_stub の CONFIG_MBEDTLS_VERSION_C=1 が要求）
+#    - `pk_ecc.c` は3.6.5にも実在＝そのまま採用
+#  上記以外の41本は同名で3.6.5 library/ に実在する（実測）。
+#
+#  3.6.5固有に**追加**が要るもの（実測．4.0.0ではtf-psa core側にあった
+#  ものが3.6.5では別ファイルに分かれている）：
+#    - `psa_crypto_aead.c`   … psa_crypto.c が psa_aead_* を参照
+#    - `entropy_poll.c`      … entropy.c のプラットフォーム・エントロピ源
+#    - `bignum_mod.c` / `bignum_mod_raw.c` … 3.6.5 の bignum_core/ecp が参照
+#
+#  **TLS/x509 は積まない**（hal構成と同じ機能スコープ＝暗号プリミティブのみ）。
+#  wpaの `tls_mbedtls.c` はコンパイルされるが，WPA2-PSK経路では
+#  どこからも呼ばれず `-ffunction-sections + --gc-sections` で脱落する
+#  （hal構成でも同じ＝TLS本体を積まずにリンクが通っている実績がある）。
+#
+set(MBEDTLS_LIB_DIR ${MBEDTLS_DIR}/library)
+list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+    ${MBEDTLS_LIB_DIR}/aes.c
+    ${MBEDTLS_LIB_DIR}/aria.c
+    ${MBEDTLS_LIB_DIR}/bignum_core.c
+    ${MBEDTLS_LIB_DIR}/bignum.c
+    ${MBEDTLS_LIB_DIR}/bignum_mod.c
+    ${MBEDTLS_LIB_DIR}/bignum_mod_raw.c
+    ${MBEDTLS_LIB_DIR}/ccm.c
+    ${MBEDTLS_LIB_DIR}/cipher_wrap.c
+    ${MBEDTLS_LIB_DIR}/cipher.c
+    ${MBEDTLS_LIB_DIR}/cmac.c
+    ${MBEDTLS_LIB_DIR}/constant_time.c
+    ${MBEDTLS_LIB_DIR}/ctr_drbg.c
+    ${MBEDTLS_LIB_DIR}/ecp_curves.c
+    ${MBEDTLS_LIB_DIR}/ecp.c
+    ${MBEDTLS_LIB_DIR}/entropy.c
+    ${MBEDTLS_LIB_DIR}/entropy_poll.c
+    ${MBEDTLS_LIB_DIR}/gcm.c
+    ${MBEDTLS_LIB_DIR}/md.c
+    ${MBEDTLS_LIB_DIR}/pkcs5.c
+    ${MBEDTLS_LIB_DIR}/platform_util.c
+    ${MBEDTLS_LIB_DIR}/platform.c
+    ${MBEDTLS_LIB_DIR}/sha1.c
+    ${MBEDTLS_LIB_DIR}/sha3.c
+    ${MBEDTLS_LIB_DIR}/sha256.c
+    ${MBEDTLS_LIB_DIR}/sha512.c
+    ${MBEDTLS_LIB_DIR}/pk.c
+    ${MBEDTLS_LIB_DIR}/pk_wrap.c
+    ${MBEDTLS_LIB_DIR}/pkparse.c
+    ${MBEDTLS_LIB_DIR}/ecdsa.c
+    ${MBEDTLS_LIB_DIR}/asn1parse.c
+    ${MBEDTLS_LIB_DIR}/asn1write.c
+    ${MBEDTLS_LIB_DIR}/rsa.c
+    ${MBEDTLS_LIB_DIR}/md5.c
+    ${MBEDTLS_LIB_DIR}/oid.c
+    ${MBEDTLS_LIB_DIR}/pem.c
+    ${MBEDTLS_LIB_DIR}/hmac_drbg.c
+    ${MBEDTLS_LIB_DIR}/rsa_alt_helpers.c
+    ${MBEDTLS_LIB_DIR}/ecdh.c
+    ${MBEDTLS_LIB_DIR}/pk_ecc.c
+    ${MBEDTLS_LIB_DIR}/psa_util.c
+    ${MBEDTLS_LIB_DIR}/psa_crypto_ffdh.c
+    ${MBEDTLS_LIB_DIR}/psa_crypto_ecp.c
+    ${MBEDTLS_LIB_DIR}/psa_crypto_rsa.c
+    ${MBEDTLS_LIB_DIR}/psa_crypto_cipher.c
+    ${MBEDTLS_LIB_DIR}/psa_crypto_mac.c
+    ${MBEDTLS_LIB_DIR}/psa_crypto_hash.c
+    ${MBEDTLS_LIB_DIR}/psa_crypto_aead.c
+    #  4.0.0 の tf-psa-crypto/core/ 相当（3.6.5では library/ に同居）
+    ${MBEDTLS_LIB_DIR}/psa_crypto_client.c
+    ${MBEDTLS_LIB_DIR}/psa_crypto_driver_wrappers_no_static.c
+    ${MBEDTLS_LIB_DIR}/psa_crypto_slot_management.c
+    ${MBEDTLS_LIB_DIR}/psa_crypto_storage.c
+    ${MBEDTLS_LIB_DIR}/psa_crypto.c
+    ${MBEDTLS_LIB_DIR}/psa_its_file.c
+    ${MBEDTLS_LIB_DIR}/version.c
 )
+
+# mbedtls port（ESP-IDF本家．hal版のNuttX向けpsa_driver/は3.6.5に存在しない）
+set(MBEDTLS_PORT_DIR ${ESP_SUP_DIR}/components/mbedtls/port)
+list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+    ${MBEDTLS_PORT_DIR}/esp_hardware.c
+    ${MBEDTLS_PORT_DIR}/esp_mem.c
+    ${MBEDTLS_PORT_DIR}/esp_timing.c
+    #  sdkconfig_stub の CONFIG_MBEDTLS_ROM_MD5=1 が MBEDTLS_MD5_ALT を
+    #  立てる（esp_config.h:188）ため md5_alt 実体が要る
+    #  （本家 esp-idf/components/mbedtls/CMakeLists.txt:337-339 と同じ条件）。
+    ${MBEDTLS_PORT_DIR}/md/esp_md.c
+)
+#  ★hal版にあった `-Wl,-u,mbedtls_psa_crypto_init_include_impl` は付けない：
+#  当該シンボルを供給する `port/esp_psa_crypto_init.c` は
+#  **esp-hal-3rdparty独自**（NuttX向け）で esp-idf には存在しない（実測）。
+#  3.6.5 では psa_crypto_init() を呼ぶ側（crypto_mbedtls.c）が直接リンクする。
+
+else() # ASP3_ESPIDF_SUPPLY
 
 # mbedtls builtin（tf-psa-crypto/drivers/builtin/src．Wireless.mk 114-157行目）
 set(MBEDTLS_BUILTIN_DIR ${MBEDTLS_DIR}/tf-psa-crypto/drivers/builtin/src)
@@ -578,7 +706,7 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
 )
 
 # mbedtls port（Wireless.mk 170-186行目）
-set(MBEDTLS_PORT_DIR ${ESP_HAL_DIR}/components/mbedtls/port)
+set(MBEDTLS_PORT_DIR ${ESP_SUP_DIR}/components/mbedtls/port)
 list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     ${MBEDTLS_PORT_DIR}/esp_psa_crypto_init.c
     ${MBEDTLS_PORT_DIR}/esp_hardware.c
@@ -593,12 +721,14 @@ list(APPEND ASP3_LINK_OPTIONS
     -Wl,-u,mbedtls_psa_crypto_init_include_impl
 )
 
+endif() # ASP3_ESPIDF_SUPPLY（mbedtlsソース一覧の供給元分岐）
+
 #
 #  ------------------------------------------------------------------
 #  4. WPA Supplicant（Wireless.mk 187-339行目）
 #  ------------------------------------------------------------------
 #
-set(WPA_SUPPLICANT_DIR ${ESP_HAL_DIR}/components/wpa_supplicant)
+set(WPA_SUPPLICANT_DIR ${ESP_SUP_DIR}/components/wpa_supplicant)
 
 list(APPEND ASP3_COMPILE_DEFS
     __ets__
@@ -629,6 +759,19 @@ list(APPEND ASP3_INCLUDE_DIRS
     ${WPA_SUPPLICANT_DIR}/esp_supplicant/src
     ${WPA_SUPPLICANT_DIR}/port/include
 )
+
+if(ASP3_ESPIDF_SUPPLY)
+    #  ★mbedtls 3.6.5 の `library/` は **wpa の後ろ**に置く（§3の
+    #  shadow注意を参照）：`common.h` が両者に存在し，正しい解決先は
+    #  wpa側（本家 esp-idf のコンポーネント登録順と同一）。
+    #  `library/` 自体は wpa の `crypto_mbedtls.c`（`common.h`）と
+    #  `tls_mbedtls.c`（`ssl_misc.h`）が mbedtls 内部ヘッダを直接
+    #  includeするため必要＝本家も mbedtls コンポーネントの公開
+    #  include に `mbedtls/library` を含めている（CMakeLists.txt:30）。
+    list(APPEND ASP3_INCLUDE_DIRS
+        ${MBEDTLS_DIR}/library
+    )
+endif()
 
 # wpa_supplicant/src/ap（Wireless.mk 233-243行目．7ファイル）
 list(APPEND ASP3_SYSSVC_TARGET_C_FILES
@@ -744,14 +887,14 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
 #   コンパイル済みlibcoexist.aへ完全に閉じている）
 #
 list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-    ${ESP_HAL_DIR}/components/esp_wifi/src/wifi_init.c
-    ${ESP_HAL_DIR}/components/esp_wifi/src/lib_printf.c
-    ${ESP_HAL_DIR}/components/esp_wifi/regulatory/esp_wifi_regulatory.c
+    ${ESP_SUP_DIR}/components/esp_wifi/src/wifi_init.c
+    ${ESP_SUP_DIR}/components/esp_wifi/src/lib_printf.c
+    ${ESP_SUP_DIR}/components/esp_wifi/regulatory/esp_wifi_regulatory.c
     #  esp_phy/src/lib_printf.c（wifi版とは別ファイル．phy_printf/
     #  rtc_printfを提供．libphy.aがphy_printfを直接参照する＝
     #  wait_rfpll_cal_end等）．同名staticのlib_printf()はTU内
     #  linkageのためesp_wifi版と衝突しない．
-    ${ESP_HAL_DIR}/components/esp_phy/src/lib_printf.c
+    ${ESP_SUP_DIR}/components/esp_phy/src/lib_printf.c
 )
 
 #
@@ -773,7 +916,7 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
 #  ------------------------------------------------------------------
 #
 list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-    ${ESP_HAL_DIR}/components/esp_hw_support/periph_ctrl.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/periph_ctrl.c
     #  C6固有：periph_ctrl.cのwifi/bt module enable経路が
     #  modem_clock_module_enable/disable等を直接呼ぶ（新設のmodem_clock
     #  サブシステム）。C3にはSYSTEM_WIFI_CLK_EN_REG直書き＝
@@ -790,20 +933,20 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     #  modem_clock_select_lp_clock_source(PERIPH_WIFI_MODULE, ...)を
     #  明示的に呼ぶ形で行った（esp_perip_clk_init()相当の代替）。
     #  詳細はdocs/wifi-shim-c6.md「実施6」参照。
-    ${ESP_HAL_DIR}/components/esp_hw_support/modem_clock.c
-    ${ESP_HAL_DIR}/components/hal/esp32c5/modem_clock_hal.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/modem_clock.c
+    ${ESP_SUP_DIR}/components/hal/esp32c5/modem_clock_hal.c
     #  rtc_clk_xtal_freq_get()（modem_clock.c経由で参照。--gc-sectionsに
     #  より実際に呼ばれる関数のみリンクされるため，同ファイル内の
     #  他のPLL較正関数群は取り込まれない想定＝安全に全体を採用）
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c5/rtc_clk.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/rtc_clk.c
     #  modem_clock_select_lp_clock_source()がefuse_hal_chip_revision()
     #  を参照する（eco0判定）。efuse_hal.cはefuse_ll.h（static inline
     #  レジスタ直読み）のみに依存する軽量な実ソースのため採用。
     #  チップ非依存の共通実装（efuse_hal_chip_revision本体）＋C6固有の
     #  efuse_hal_get_{major,minor}_chip_version（ともに--gc-sectionsで
     #  実際に呼ばれる関数のみ残る）の2ファイル構成。
-    ${ESP_HAL_DIR}/components/hal/efuse_hal.c
-    ${ESP_HAL_DIR}/components/hal/esp32c5/efuse_hal.c
+    ${ESP_SUP_DIR}/components/hal/efuse_hal.c
+    ${ESP_SUP_DIR}/components/hal/esp32c5/efuse_hal.c
     #  C5固有の追加（C6には無い依存）：C5はsoc_caps.hで
     #  SOC_CLOCK_TREE_MANAGEMENT_SUPPORTED=1・
     #  SOC_CLK_ANA_I2C_MST_DEPENDS_ON_MODEM_APB=1を定義しており
@@ -811,22 +954,22 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     #  ANA_I2C_SRC_CLOCK_ENABLE()・modem_clock.cのmodem_clock_hal_init()が
     #  esp_clk_tree_enable_src()を実際に呼ぶ（実機リンクの未定義参照で
     #  発覚）。esp_hw_support/port/esp32c5/esp_clk_tree.cを採用して解決する。
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c5/esp_clk_tree.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/esp_clk_tree.c
     #  esp_clk_tree.c（チップ依存の周波数選択ロジック）自身が
     #  クロックソース別の実装（xtal32k/lp_slow/rc_fast/lp_fast）を
     #  chip非依存の共通実装（esp_clk_tree_common.c）に委譲し，
     #  CPU/XTAL周波数取得はHAL層（clk_tree_hal.c）のclk_hal_cpu_get_freq_hz
     #  ／clk_hal_xtal_get_freq_mhzに委譲する（実機リンクの未定義参照で
     #  発覚した芋づる式の依存）。
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp_clk_tree_common.c
-    ${ESP_HAL_DIR}/components/esp_hal_clock/esp32c5/clk_tree_hal.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/esp_clk_tree_common.c
+    ${ESP_SUP_HAL_clock}/esp32c5/clk_tree_hal.c
     #  esp_clk_tree_common.cのRTC較正呼出し（rtc_clk_cal／
     #  rtc_clk_freq_cal＝チップ依存のRTC較正シーケンス実体，
     #  esp_hw_support/port/esp32c5/rtc_time.c）・esp_clk_slowclk_cal_set
     #  （チップ非依存のグローバル較正値キャッシュ，esp_hw_support/
     #  esp_clk.c）を解決する（実機リンクの未定義参照で発覚）。
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c5/rtc_time.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/esp_clk.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/rtc_time.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/esp_clk.c
 )
 
 #
@@ -840,7 +983,7 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
 #       esp_event(イベントループ)のNuttX向け薄glue．内部でNuttXの
 #       work queue/semaphoreを呼ぶため，asp3のイベント機構
 #       （set_flg/wai_flg等）へ差し替えるshimが要る．
-#   ${ESP_HAL_DIR}/components/esp_timer/src/ets_timer_legacy.c
+#   ${ESP_SUP_DIR}/components/esp_timer/src/ets_timer_legacy.c
 #       レガシーets_timer API．wifi_init.c等が参照．内部はesp_timer.cの
 #       ラッパのため esp_timer.c 本体（esp_timer/src/esp_timer.c，
 #       esp_timer_impl_systimer.c 等）も合わせて必要になる可能性が高い．

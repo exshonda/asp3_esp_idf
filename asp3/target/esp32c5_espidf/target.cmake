@@ -35,6 +35,72 @@ set(TARGETDIR ${CMAKE_CURRENT_LIST_DIR})
 get_filename_component(ESP_HAL_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../hal ABSOLUTE)
 
 #
+#  ------------------------------------------------------------------
+#  供給元（supply root）の選択＝HAL依存撤去
+#  （.steering/20260716-c3c5c6-esp-idf-supply-migration）
+#  ------------------------------------------------------------------
+#
+#  ASP3_ESPIDF_SUPPLY=ON（既定）＝ESP-IDF submodule（v5.5.4タグ＝
+#  735507283d）から全ESPコンポーネント（ヘッダ・ソース・blob・ROM ld）を
+#  供給する。OFF＝従来のesp-hal-3rdparty（hal submodule）＝可逆fallback。
+#
+#  ★実測に基づく前提（evidence-c5-02）：esp-hal-3rdpartyは
+#  **ESP-IDFの再パッケージ**であり，本ターゲットが参照する75パスのうち
+#  **72パスがesp-idf v5.5.4へ1:1で対応**する（差は下記2点のみ）：
+#    1. halは IDF の単体`hal`コンポーネントを`esp_hal_*`へ**分割**している
+#       （esp_hal_clock/timg/rtc_timer/pmu/gpio/security/ana_conv/usb）。
+#       esp-idf側では全て `components/hal` に集約＝下の ESP_SUP_HAL_* で吸収。
+#    2. mbedtls が **4.0.0(tf-psa-crypto分離) → 3.6.5(classic)** の版差
+#       （esp_wifi_v8.cmake §3で吸収）。
+#  加えて hal の nuttx/（NuttXシムconfig）はesp-idfに存在しない＝
+#  ESP-IDF本来の mbedtls port（esp_config.h）へ寄せる。
+#
+#  ★ヘッダとソースは**必ず揃えて**同じ供給元から取る。片方だけ移すと
+#  esp-hal-3rdpartyのリネーム（実測：`hal/lp_timer_hal.h`→`rtc_timer_hal.h`，
+#  `hal/timer_ll.h`→`timg_ll.h`，`soc/clkout_channel.h`→`hal/clkout_channel.h`）
+#  が未解決参照として噴出する。逆に揃えれば**リネーム問題は消滅する**
+#  （両ツリーの当該ソースは実測でリネーム以外同一）。
+#
+if(NOT DEFINED IDF_V554)
+    #  外部ターゲット規約（PORTING_GUIDE.md §6）に従い CMAKE_CURRENT_LIST_DIR 相対。
+    #  A/B用に -DIDF_V554=<path> で別treeへ差し戻せる（可逆）。
+    get_filename_component(IDF_V554 ${CMAKE_CURRENT_LIST_DIR}/../../../esp-idf ABSOLUTE)
+endif()
+
+option(ASP3_ESPIDF_SUPPLY
+    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (v5.5.4 tag) instead of esp-hal-3rdparty. Default ON = HAL-free. OFF = hal fallback (reversible)"
+    ON)
+
+if(ASP3_ESPIDF_SUPPLY)
+    set(ESP_SUP_DIR ${IDF_V554})
+    #  供給元の版差を共有ソース（C3/C6と共用のshim等）で吸収するための
+    #  ガード。S3(LX6/LX7)の同名ガードと同じ役割・命名。
+    #  既知の版差（実測）：
+    #    esp_event_post() の event_data が hal=`void *` /
+    #    esp-idf v5.5.4=`const void *`（esp_event.h）。
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESPIDF_SUPPLY=1)
+else()
+    set(ESP_SUP_DIR ${ESP_HAL_DIR})
+endif()
+
+#
+#  esp-hal-3rdpartyが分割した`esp_hal_<x>`コンポーネントの供給元別パス。
+#  esp-idfでは全て`components/hal`に集約されている（実測：
+#  esp_hal_*配下から実際にincludeされるヘッダ16本はすべて
+#  esp-idfの components/hal/{include,esp32c5/include} 及び
+#  components/soc/esp32c5/include で解決する）。
+#  いずれの供給元でも `${ESP_SUP_HAL_<x>}/include` と
+#  `${ESP_SUP_HAL_<x>}/esp32c5/include` の2パターンで参照できる形に揃える。
+#
+foreach(_esp_hal_c clock timg rtc_timer pmu gpio security ana_conv usb)
+    if(ASP3_ESPIDF_SUPPLY)
+        set(ESP_SUP_HAL_${_esp_hal_c} ${ESP_SUP_DIR}/components/hal)
+    else()
+        set(ESP_SUP_HAL_${_esp_hal_c} ${ESP_HAL_DIR}/components/esp_hal_${_esp_hal_c})
+    endif()
+endforeach()
+
+#
 #  hal_stub（libc互換ヘッダ．ツールチェーンにnewlib実体が無い環境向け）
 #  はESP32-C3用のものをそのまま再利用する（チップ非依存＝トゥール
 #  チェーンのギャップを埋めるだけの内容）。
@@ -44,23 +110,23 @@ get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf 
 list(APPEND ASP3_INCLUDE_DIRS
     ${C3_TARGETDIR}/hal_stub/include
     ${TARGETDIR}/sdkconfig_stub
-    ${ESP_HAL_DIR}/components/hal/esp32c5/include
-    ${ESP_HAL_DIR}/components/hal/include
-    ${ESP_HAL_DIR}/components/hal/platform_port/include
-    ${ESP_HAL_DIR}/components/esp_hal_usb/esp32c5/include
-    ${ESP_HAL_DIR}/components/esp_hal_usb/include
-    ${ESP_HAL_DIR}/components/soc/esp32c5/include
-    ${ESP_HAL_DIR}/components/soc/esp32c5/register
-    ${ESP_HAL_DIR}/components/soc/include
-    ${ESP_HAL_DIR}/components/esp_common/include
+    ${ESP_SUP_DIR}/components/hal/esp32c5/include
+    ${ESP_SUP_DIR}/components/hal/include
+    ${ESP_SUP_DIR}/components/hal/platform_port/include
+    ${ESP_SUP_HAL_usb}/esp32c5/include
+    ${ESP_SUP_HAL_usb}/include
+    ${ESP_SUP_DIR}/components/soc/esp32c5/include
+    ${ESP_SUP_DIR}/components/soc/esp32c5/register
+    ${ESP_SUP_DIR}/components/soc/include
+    ${ESP_SUP_DIR}/components/esp_common/include
     #  esp_rom_sys.h（esp_rom_set_cpu_ticks_per_us宣言．
     #  target_kernel_impl.cが使用）。C6版のtarget.cmakeはこれを
     #  Wi-Fi限定（esp_wifi.cmake内）でしか積んでおらず，Wi-Fi無し
     #  ビルドでは本来ここが欠落する潜在バグだった（本ポートで気付いた
     #  ため無条件で積む．C5固有の問題ではなくC6にも共通する既存の
     #  ギャップ）。
-    ${ESP_HAL_DIR}/components/esp_rom/include
-    ${ESP_HAL_DIR}/components/esp_rom/esp32c5/include
+    ${ESP_SUP_DIR}/components/esp_rom/include
+    ${ESP_SUP_DIR}/components/esp_rom/esp32c5/include
 )
 
 #
@@ -116,7 +182,7 @@ list(APPEND ASP3_LINK_OPTIONS
     -Wl,--print-memory-usage
     -Wl,--gc-sections
     -Wl,--build-id=none
-    -L${ESP_HAL_DIR}/components/soc/esp32c5/ld
+    -L${ESP_SUP_DIR}/components/soc/esp32c5/ld
 )
 
 set(ASP3_LDSCRIPT ${TARGETDIR}/esp32c5.ld)
@@ -294,8 +360,8 @@ endif()
 #
 if(NOT (ESP32C5_WIFI OR ESP32C5_BT))
     list(APPEND ASP3_LINK_OPTIONS
-        -Wl,-T,${ESP_HAL_DIR}/components/esp_rom/esp32c5/ld/esp32c5.rom.ld
-        -Wl,-T,${ESP_HAL_DIR}/components/esp_rom/esp32c5/ld/esp32c5.rom.api.ld
+        -Wl,-T,${ESP_SUP_DIR}/components/esp_rom/esp32c5/ld/esp32c5.rom.ld
+        -Wl,-T,${ESP_SUP_DIR}/components/esp_rom/esp32c5/ld/esp32c5.rom.api.ld
     )
 endif()
 
