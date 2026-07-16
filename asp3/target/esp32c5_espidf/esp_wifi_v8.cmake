@@ -281,18 +281,45 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
 #
 #  ★v5.5.4統一（docs/blob-unify-v554.md）：WiFi/PHY/coexist blobを
 #  hal（esp-hal-3rdparty submodule，NuttX同期のv8）から実ESP-IDF
-#  v5.5.4（`~/tools/esp-idf`，同じos_adapter v8）へ切替える。
-#  C5はsoc_caps.hでSOC_WIFI_HE_SUPPORT=1のため，wifi_os_adapter.hの
-#  wifi_osi_funcs_t構造体がhal/v5.5.4でバイト非同一（v5.5.4のみ
-#  `_wifi_disable_ac_ax`フィールドを持つ）＝idf_v554_override/の
-#  ヘッダ（v5.5.4からのverbatimコピー）をhalのesp_wifi/includeより
-#  前に置いて当該ヘッダだけをシャドウする（他のヘッダ名は当該
-#  ディレクトリに存在しないためhal側にフォールバックする）。
-#  reversible: ASP3_WIFI_BLOB_HAL=ON でhalへ戻せる（この場合overrideは
-#  無害＝hal自身のwifi_os_adapter.hが先に見つかるようASP3_INCLUDE_DIRSの
-#  並びをスキップする条件分岐にしている）。
+#  v5.5.4（esp-idf submodule＝735507283d，同じos_adapter v8）へ切替える。
+#
+#  ★★訂正（2026-07-16・実測）：旧版はここで idf_v554_override/ の
+#  wifi_os_adapter.h を PREPEND して hal のヘッダをシャドウしていたが，
+#  **その前提は誤り**であり esp_wifi_init が 0x102 を返す原因そのもの
+#  だった。撤去した。根拠（すべて実測）：
+#
+#   (1) blobは自身がビルドされたヘッダのmd5先頭7桁を `g_wifi_osi_funcs_md5`
+#       として埋め込む（hal/components/esp_wifi/test_md5/test_md5.sh）。
+#       実測＝hal blob: 6eaa5ad ／ v5.5.4タグ blob: 6eaa5ad ／
+#       `~/tools/esp-idf`(+1169) blob: 8651e5d。
+#       ヘッダ側md5＝hal: 6eaa5ad ／ v5.5.4タグ: 6eaa5ad ／ +1169: 8651e5d。
+#       ⇒ **halのwifi_os_adapter.hはv5.5.4タグと«バイト同一»**（旧コメントの
+#       「halは古い版でフィールドを欠く」は+1169との比較に基づく誤り）。
+#   (2) 旧override は `~/tools/esp-idf`＝**v5.5.4-1169-gbb2188bf**（release/v5.5
+#       の先端．version.hが5.5.4と表示するため誤認）からのコピーで，
+#       +1169でのみ追加された `_wifi_disable_ac_ax`（#if CONFIG_SOC_WIFI_HE_SUPPORT，
+#       `_magic`の直前）を含む＝`_magic`が4バイト後ろにずれる。
+#   (3) blob側の検査は md5 ではなく**オフセット直読み**（実測：
+#       libnet80211.a(ieee80211_api.o) `wifi_osi_funcs_register`）：
+#         _version は offset 0 で ==8 を要求，`_magic` は
+#         **v5.5.4タグ/hal blob: offset 484** ／ **+1169 blob: offset 488**
+#         を直読みし 0xdeadbeaf でなければ `return 258`(=0x102 INVALID_ARG)。
+#         `esp_wifi_init` はこれをそのまま返す。
+#   (4) override 有効時の実測＝`nm -S g_wifi_osi_funcs`＝size 0x1ec(492)，
+#       0xdeadbeaf は offset **488** ⇒ タグblobが読む484とずれ 0x102。
+#       override 撤去後は size 488／0xdeadbeaf offset **484** でタグblobと一致。
+#
+#  ⇒ hal・v5.5.4タグとも同一ヘッダ内容＝**overrideは不要**。
+#  reversible: ASP3_WIFI_BLOB_HAL=ON でhal blobへ戻せる（ヘッダ内容が
+#  同一なのでosi ABIは不変＝484のまま）。
+#  なお `-DIDF_V554=~/tools/esp-idf`（+1169）へ差し戻す場合のみ osi ABI が
+#  488 になるため，その時は ASP3_WIFI_OSI_HAS_DISABLE_AC_AX=1 が必要
+#  （下のoption）。既定OFF＝v5.5.4タグ／hal の 484。
 #
 option(ASP3_WIFI_BLOB_HAL "Use hal(v8) WiFi/PHY/coexist blob instead of ESP-IDF v5.5.4(v8) unification (reversible fallback)" OFF)
+#  osi ABI差：release/v5.5先端(+1169)のwifi_os_adapter.hのみ`_wifi_disable_ac_ax`
+#  を持ち`_magic`が484→488へずれる。v5.5.4タグ／halは持たない（既定OFF）。
+option(ASP3_WIFI_OSI_HAS_DISABLE_AC_AX "wifi_osi_funcs_t has _wifi_disable_ac_ax (ONLY release/v5.5 HEAD +1169 osi ABI; _magic moves 484->488). Default OFF = v5.5.4 tag / hal ABI" OFF)
 if(NOT DEFINED IDF_V554)
     #  ★esp-idf submodule（v5.5.4タグ＝735507283d）をリポジトリ同梱で参照する
     #  （HAL依存撤去ミッション＝.steering/20260716-c3c5c6-esp-idf-supply-migration）。
@@ -310,13 +337,12 @@ if(ASP3_WIFI_BLOB_HAL)
 else()
     set(ASP3_WIFI_BLOB_SRC ${IDF_V554})
     list(APPEND ASP3_COMPILE_DEFS ASP3_WIFI_BLOB_V554=1)
-    #  wifi_os_adapter.hだけのサロゲート差し替え（他のヘッダはhalの
-    #  ままフォールバック）。PREPENDでhalの${ESP_HAL_DIR}/components/
-    #  esp_wifi/include（§1で既にASP3_INCLUDE_DIRSへ入っている）より
-    #  前に来るようにする。
-    list(PREPEND ASP3_INCLUDE_DIRS
-        ${CMAKE_CURRENT_LIST_DIR}/wifi_v8/idf_v554_override
-    )
+    #  ★wifi_os_adapter.hのシャドウは行わない（上の§訂正を参照）。
+    #  v5.5.4タグblobが読む_magicオフセット484は，halのヘッダ
+    #  （＝v5.5.4タグとバイト同一，md5 6eaa5ad）そのままで一致する。
+endif()
+if(ASP3_WIFI_OSI_HAS_DISABLE_AC_AX)
+    list(APPEND ASP3_COMPILE_DEFS ASP3_WIFI_OSI_HAS_DISABLE_AC_AX=1)
 endif()
 
 list(APPEND ASP3_LINK_OPTIONS

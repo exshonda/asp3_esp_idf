@@ -1076,15 +1076,22 @@ extern uint8_t coex_schm_flexible_period_get(void);
 extern void *coex_schm_get_phase_by_idx(int idx);
 
 /*
- *  v5.5.4統一（docs/blob-unify-v554.md）：wifi_os_adapter.h（v5.5.4版．
- *  idf_v554_override/経由で有効）はC5（soc_caps.hでSOC_WIFI_HE_SUPPORT=1）
- *  向けに`_wifi_disable_ac_ax`フィールドを持つ。実ESP-IDF
- *  （esp_wifi/esp32c5/esp_adapter.c）の実装に倣い「11ac/11axの無効化は
- *  未サポート」＝falseを返す（実ESP-IDF本体と同一の意味論）。
- *  CONFIG_SOC_WIFI_HE_SUPPORTはsdkconfig_stub/sdkconfig.hで既に1に
- *  定義済み（実施11．§1参照）。
+ *  ★訂正（2026-07-16・実測）：`_wifi_disable_ac_ax`フィールドは
+ *  **v5.5.4タグにもhalにも存在しない**（release/v5.5の先端＝+1169版の
+ *  wifi_os_adapter.hのみが持つ）。旧版は`~/tools/esp-idf`（実体は
+ *  v5.5.4-1169-gbb2188bf）のヘッダをoverrideで被せていたため本フィールドを
+ *  埋めており，その結果`_magic`が484→488へずれてv5.5.4タグblobの
+ *  osi登録検査に落ち，esp_wifi_initが0x102を返していた。
+ *  （blob実測：libnet80211.a `wifi_osi_funcs_register`は`_magic`を
+ *   v5.5.4タグ/hal=offset484／+1169=offset488で直読みし，不一致なら
+ *   return 258=0x102。詳細はesp_wifi_v8.cmakeの§訂正コメント。）
+ *  よって既定（v5.5.4タグ／hal）ではこのラッパを«持たない»。
+ *  `-DIDF_V554=~/tools/esp-idf`（+1169 ABI）へ差し戻す時だけ
+ *  -DASP3_WIFI_OSI_HAS_DISABLE_AC_AX=ON で有効化する。
+ *  意味論は実ESP-IDF（esp_wifi/esp32c5/esp_adapter.c）に倣い
+ *  「11ac/11axの無効化は未サポート」＝falseを返す。
  */
-#if CONFIG_SOC_WIFI_HE_SUPPORT && ASP3_WIFI_BLOB_V554
+#if ASP3_WIFI_OSI_HAS_DISABLE_AC_AX
 static bool
 wifi_disable_ac_ax_wrapper(void)
 {
@@ -1217,7 +1224,7 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 	._coex_schm_flexible_period_set = coex_schm_flexible_period_set,
 	._coex_schm_flexible_period_get = coex_schm_flexible_period_get,
 	._coex_schm_get_phase_by_idx = coex_schm_get_phase_by_idx,
-#if CONFIG_SOC_WIFI_HE_SUPPORT && ASP3_WIFI_BLOB_V554
+#if ASP3_WIFI_OSI_HAS_DISABLE_AC_AX
 	._wifi_disable_ac_ax = wifi_disable_ac_ax_wrapper,
 #endif
 	._magic = ESP_WIFI_OS_ADAPTER_MAGIC,
