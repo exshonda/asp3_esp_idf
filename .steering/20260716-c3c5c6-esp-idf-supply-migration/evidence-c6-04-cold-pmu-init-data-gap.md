@@ -336,8 +336,9 @@ USB_UART_HPSYS`）では «前ブートの PLL 設定» を保持する**が、*
 |---|---|
 | **BT warm** | **`0xb1d00008`＝D-1**（#13）＝**非回帰** |
 | **warm の clk 経路** | `0xbb110a01`（既に PLL/160）→ `rtc_clk_cpu_freq_set_config()` は BBPLL を止めず freq 設定のみ＝**実質 no-op** |
-| **hal 参照ビルド** | **未実施**（§6.3）。ただし `ESP32C6_COLD_CPU_PLL` は `(ESP32C6_WIFI OR ESP32C6_BT)` でのみ効き、**OFF で従来と完全に同一** |
-| **素のビルド** | `rtc_clk.c` を積まない＝**対象外**（PHY も使わない） |
+| **hal 参照ビルド**（`ESP32C6_BT_IDF61=OFF`） | **ビルド通過**（7構成スイープ）。**実機非回帰は未実施**（§6.4）。`ESP32C6_COLD_CPU_PLL` は `(ESP32C6_WIFI OR ESP32C6_BT)` ゲート・**OFF で従来と完全に同一**（nm で `esp_shim_cold_cpu_clk_init` が 0 個＝実測） |
+| **素のビルド**（WiFi/BT 両OFF） | **ビルド通過**。nm で `esp_shim_cold_cpu_clk_init` が **0 個**＝ゲートが効いている（`rtc_clk.c` も積まない＝PHY も使わない） |
+| **`ble_host_smoke_c6`**（既定ON の別アプリ） | **ビルド通過**。実機は未実施 |
 
 ---
 
@@ -405,8 +406,8 @@ USB_UART_HPSYS`）では «前ブートの PLL 設定» を保持する**が、*
 
 1. **W1（GOT IP + ping）は未実施**＝lwIP＋認証情報の別ビルドが要る。
    **`wifi_scan` が真cold で 16-20 AP を返す**ところまでは実証済み＝**PHY/RF は通っている**。
-2. **hal 参照ビルド（`ESP32C6_BT_IDF61=OFF`）の非回帰は未実施**（`ESP32C6_COLD_CPU_PLL` は
-   `(WIFI OR BT)` ゲートなので影響し得る）。
+2. **hal 参照ビルド（`ESP32C6_BT_IDF61=OFF`）の «実機» 非回帰は未実施**
+   （ビルドは通過。`ESP32C6_COLD_CPU_PLL` は `(WIFI OR BT)` ゲートなので hal 経路にも効く）。
 3. **evidence-02 の warm アーム非再現**は**機序を得た（§4.6）が実測していない**：
    **「EN/RTS リセット直後に STORE5 を読む」1 run で決着する**（`0xbb110280` なら確定）。
 4. **`ESP32C6_COLD_CPU_PLL` の既定 ON を «全アプリ» で回帰させていない**
