@@ -19,7 +19,7 @@
  *  wifi/esp_shim.c のプリミティブへ委譲）ため，**本家の
  *  components/freertos/config/include/freertos/FreeRTOSConfig.h は使えない**
  *  （Kconfig 生成物と FreeRTOS 実体を前提とする）。C3 の bt/stub/include/
- *  freertos/*.h と同じ「ヘッダ単位のシム」方針でスタブを置く。
+ *  freertos/ 配下と同じ「ヘッダ単位のシム」方針でスタブを置く。
  *
  *  esp_task.h が本ヘッダから実際に要求するのは `configMAX_PRIORITIES`
  *  （ESP_TASK_PRIO_MAX の定義に使用）のみ。esp_task.h は :24 で

@@ -476,6 +476,31 @@ if(ESP32C5_BT_NIMBLE)
     #  LEGACY_VHCI=0）で供給する．SM OFF時のみ SM_LEGACY/SC=0 でble_sm*.cを
     #  near-empty化しtinycrypt/mbedTLSリンクを回避する（C3/C6のD-2aと同じ判断）．
     list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_BT_NIMBLE)
+
+    if(ASP3_BT_IDF_V554)
+        #  ★上のブロックコメントが «もし実機ビルドで hci_log/bt_hci_log.h が
+        #  要求されたら，そのとき C6と同じ -DTRUE=1 -DBT_HCI_LOG_INCLUDED=0 を
+        #  本ブロックへ追加する» と予告していた条件が，供給移行で**現実化した**
+        #  （evidence-c5-05 §4）。当該コメントは「v6.1 の nimble_port.c は
+        #  bt_common.h を #if より前に include するため C6/hal で踏んだ順序バグは
+        #  v6.1 には存在しない」と述べており**それ自体は正しい**が，
+        #  **v5.5.4 タグ版には順序バグが存在する**（実測）：
+        #      :48  #if (BT_HCI_LOG_INCLUDED == TRUE)
+        #      :49  #include "hci_log/bt_hci_log.h"   ← 存在しない
+        #      :51  #include "bt_common.h"            ← TRUE の定義元（**後**）
+        #  ＝TRUE も BT_HCI_LOG_INCLUDED も #if 到達時点で未定義→`0==0`＝真と
+        #  なり fatal error。v6.1 は :24 で esp_nimble_cfg.h を追加 include して
+        #  この穴を塞いでいる（v5.5.4 には該当行が無い）。
+        #  ⇒ C6 の esp_bt.cmake:437-438 と**同一の確立済み対処**を適用し
+        #  `0==1`＝偽へ倒す（後段で bt_common.h が同値へ再定義＝以降無矛盾）。
+        #  v6.1 fallback（OFF）は従来どおり不要なので**ガード内に閉じる**
+        #  ＝可逆性・非回帰を保つ。
+        list(APPEND ASP3_COMPILE_DEFS
+            TRUE=1
+            BT_HCI_LOG_INCLUDED=0
+        )
+    endif()
+
     if(ESP32C5_BT_SM)
         list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_BT_SM)
     else()
@@ -520,9 +545,6 @@ if(ESP32C5_BT_NIMBLE)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
         ${BT_ROOT}/porting/transport/driver/vhci/hci_driver_nimble.c
         ${NIMBLE_ROOT}/transport/esp_ipc/src/hci_esp_ipc.c
-        #  nimble_mem_malloc/calloc/free（ホスト各所が直接呼ぶ．heap_caps_*
-        #  ＝esp_shim_libc.c へ委譲）．実機リンクで未定義参照として発覚し追加．
-        ${BT_ROOT}/host/nimble/port/src/esp_nimble_mem.c
         ${IDF}/components/bt/host/nimble/nimble/porting/nimble/src/nimble_port.c
         ${IDF}/components/bt/host/nimble/nimble/porting/npl/freertos/src/nimble_port_freertos.c
         #  ホストスタック本体（C6のBLE実施02と同一トリム集合．
@@ -577,6 +599,25 @@ if(ESP32C5_BT_NIMBLE)
         ${NIMBLE_ROOT}/host/src/ble_store_util.c
         ${NIMBLE_ROOT}/host/src/ble_uuid.c
     )
+    if(NOT ASP3_BT_IDF_V554)
+        #  ★esp_nimble_mem.c も os_mempool.c と同じく **供給元で要否が変わる**
+        #  （evidence-c5-05 §4．版差）：
+        #    - v6.1/+1169：esp_nimble_mem.h が `nimble_platform_mem_malloc` を
+        #      **`nimble_mem_malloc` へ写像**し，その実体は esp_nimble_mem.c に
+        #      ある（heap_caps_* ＝esp_shim_libc.c へ委譲）＝自前リンクが要る．
+        #    - v5.5.4タグ：**esp_nimble_mem.c 自体が存在しない**．
+        #      esp_nimble_mem.h が `nimble_platform_mem_malloc` を
+        #      **`bt_osi_mem_malloc` へ直接マクロ写像**する（同ヘッダ:61-64．
+        #      「This file should be replaced with bt_osi_mem.h」というコメント
+        #      どおり bt_osi_mem.h へ統合済み）＝実体は既にリンク済みの
+        #      porting/mem/bt_osi_mem.c が供給する＝**自前リンク不要**．
+        #      stock v5.5.4 の bt/CMakeLists.txt も esp_nimble_mem.c を積まない
+        #      （:889 は nvs_port.c のみ）．
+        list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+            ${BT_ROOT}/host/nimble/port/src/esp_nimble_mem.c
+        )
+    endif()
+
     if(ESP32C5_BT_SM)
         #  D-2d：bond store は ble_store_config（PERSIST=0＝RAM，NVS不使用．
         #  ble_store_ram.c は IDF文脈で空＝S3 §5.2 の真因）＋ tinycrypt 必要5ソース
