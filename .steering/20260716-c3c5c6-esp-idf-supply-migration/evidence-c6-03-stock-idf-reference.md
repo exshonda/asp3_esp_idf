@@ -27,7 +27,13 @@ Chip type:  ESP32-C6FH4 (QFN32) (revision v0.2)
 Features:   Wi-Fi 6, BT 5 (LE), IEEE802.15.4, Single Core + LP Core, 160MHz, Embedded Flash 4MB
 BASE MAC:   14:c1:9f:e0:5a:9c
 ```
-⇒ **rev v0.2・内蔵Flash 4MB＝追認**。board C は rev v0.3（evidence-02 §5.5）。
+⇒ **rev v0.2・内蔵Flash 4MB＝追認**。~~board C は rev v0.3（evidence-02 §5.5）。~~
+**★【2026-07-17 訂正】この一文は誤り**：**`14:C1:9F:E0:5A:9C` こそが board C 本体**であり
+（`docs/wifi-shim-c6.md` に同 MAC が8回）、**rev v0.3 という一次情報は存在しない**
+（同 doc に `v0.3` は0件）。**出所＝`evidence-c6-02:195` が «efuse blk_version» を
+«chip revision» と取り違えた**（stock `efuse_hal.h` は両者を別APIとして持つ）。
+∴ **本DUT＝board C＝rev v0.2** であり、**rev 差という交絡は存在しない**。
+詳細＝`evidence-c6-06-w1-and-v554-d2b.md` §2。
 
 ### 2.2 ★tree の同定
 

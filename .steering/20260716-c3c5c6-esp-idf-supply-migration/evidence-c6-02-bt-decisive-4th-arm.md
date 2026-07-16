@@ -4,6 +4,29 @@
 DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`**（hub `1-6` port2・**台帳未知の新個体**＝board C ではない）
 toolchain: `~/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204`（gcc 15.2.0）
 
+
+> ## ★★【2026-07-17 訂正＝board C は «本DUT そのもの»。rev v0.3 は存在しない】
+>
+> **本ラウンド（evidence-c6-06）で一次情報を確認した結果、以下は誤りだった：**
+>
+> | 誤り | 正 |
+> |---|---|
+> | 「本DUT は台帳未知の**新個体**」「**board C＝別個体**」 | **`14:C1:9F:E0:5A:9C` こそが board C 本体**。`docs/wifi-shim-c6.md` に同 MAC が **8回**、他に `docs/ble-c5c6.md`・`docs/load-test-c3c5c6.md`・`docs/c5-toolchain.md`・`docs/blob-unify-v554.md` が独立に「board C＝`14:C1:9F:E0:5A:9C`」と記録 |
+> | 「board C は **rev v0.3**」 | **一次情報が存在しない**（`docs/wifi-shim-c6.md` に `v0.3` の記述は **0件**）。**実測は rev v0.2**（esptool: `ESP32-C6FH4 (QFN32) (revision v0.2)`） |
+>
+> **★誤りの発生源＝2つの別レジスタの取り違え**：`evidence-c6-02:195` は
+> 「§20 コミットが『本board **efuse blk_version**=v0.3>=1』と明記」を根拠に
+> 「board C＝**rev v0.3**」と推論したが、**stock の `hal/efuse_hal.h` は
+> `efuse_hal_chip_revision()` と `efuse_hal_blk_version()` を «別API» として持つ**
+> ＝**eFuse ブロック版数**と**チップ・リビジョン**は別物。
+> ⇒ **rev v0.2/v0.3 仮説は «幻»**（実在しない差を交絡候補にしていた）。
+>
+> **★技術的な含意（むしろ話が良くなる）**：**§10-12 で hal がハングしたのは «この同じボード»**。
+> そして `evidence-c6-05` は **同じボード・同じ warm 条件で hal が D-1 に到達**すると実測した。
+> ⇒ **差はボードではなく «ツリー（コード）» にある**＝**「2026-07-15 以降の tree 変化」が
+> 唯一生き残った説明**（`git log` で追える。ユーザーの物理作業は不要）。
+> **正本＝`evidence-c6-06-w1-and-v554-d2b.md` §2。**
+
 ---
 
 ## 1. 目的（1行）
