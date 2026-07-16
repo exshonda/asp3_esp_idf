@@ -30,6 +30,9 @@
 #include <t_syslog.h>
 #include <string.h>
 #include "kernel_cfg.h"
+#ifdef TOPPERS_C3_COLD_DIAG
+#include <sil.h>				/* sil_wrw_mem（真cold W1 マーカ用） */
+#endif
 
 #include "lwip/opt.h"
 #include "lwip/tcpip.h"
@@ -169,6 +172,46 @@ net_ping_result(int ok)
 #ifdef TOPPERS_ESP32C5_NETSTALL_TRACE
 	netstall_trace_ping_result(ok);
 #endif /* TOPPERS_ESP32C5_NETSTALL_TRACE */
+
+#ifdef TOPPERS_C3_COLD_DIAG
+	/*
+	 *  ------------------------------------------------------------------
+	 *  真cold W1 の物証（既定OFF・非回帰．evidence-c3-02）
+	 *  ------------------------------------------------------------------
+	 *
+	 *  ★C3はUARTブリッジを持たず，**コンソールのopen自体がDUTをリセット
+	 *  する**（＝真coldの観測ができない．memory「CDC HAZARD」）。∴W1
+	 *  （GOT IP + ping）の成否も**RTC STOREマーカ直読み**で判定する。
+	 *
+	 *  STORE割当（★本ラウンドで実測した空き．C3のROM rtc.hは STORE1 を
+	 *  RTC_SLOW_CLK cal・STORE4 を XTAL freq と «宣言» しているが，
+	 *  それらを使うのはESP-IDFの rtc_clk であって **ASP3 Direct Boot では
+	 *  誰も走らせない**。実測：真cold起動後に STORE1/STORE4 とも 0 のまま
+	 *  ＝ROMは書かない（一方 STORE5=0x600080BC は 0x13121312 が入る
+	 *  ＝ROMが上書きする既知事実を独立に再確認）。
+	 *
+	 *    STORE4(0x600080B8) = 取得したIPv4アドレス（0 なら未取得）
+	 *    STORE1(0x60008054) = 0x77 << 24 | ping_ok << 8 | ping_ng
+	 *
+	 *  ★SSID/パスワードは**一切マーカに載せない**（混入0を維持）。
+	 */
+	{
+		static uint32_t	c3_ping_ok = 0U;
+		static uint32_t	c3_ping_ng = 0U;
+
+		if (ok) {
+			c3_ping_ok++;
+		}
+		else {
+			c3_ping_ng++;
+		}
+		sil_wrw_mem((void *)0x600080B8U,
+					ip4_addr_get_u32(netif_ip4_addr(&s_netif)));
+		sil_wrw_mem((void *)0x60008054U,
+					0x77000000U | ((c3_ping_ok & 0xFFU) << 8)
+					| (c3_ping_ng & 0xFFU));
+	}
+#endif /* TOPPERS_C3_COLD_DIAG */
 }
 
 void

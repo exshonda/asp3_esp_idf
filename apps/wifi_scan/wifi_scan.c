@@ -909,6 +909,19 @@ main_task(EXINF exinf)
 #endif /* TOPPERS_ESP32C6_WIFI */
 	syslog(LOG_NOTICE, "wifi_scan: %d APs found (err=%d)",
 		   (int_t)num, (int_t)err);
+#ifdef TOPPERS_C3_COLD_DIAG
+	/*
+	 *  真cold の scan 物証（既定OFF・非回帰．evidence-c3-02）．
+	 *  ★C3はUARTブリッジが無く**コンソールのopenがDUTをリセットする**
+	 *  ため，真coldのscan結果はコンソールでは観測できない＝RTC STORE
+	 *  マーカへ出す（判定はconsole非依存＝esptool read-mem 直読み）。
+	 *    STORE4(0x600080B8) = 0x5CA0_0000 | (err&0xFF)<<8 | (AP件数&0xFF)
+	 *  ★SSIDは載せない（認証情報・環境情報の混入0を維持）。
+	 *  ★本アプリはC3/C5/C6共用のため必ずガード内に置く。
+	 */
+	(*(volatile uint32_t *)0x600080B8U) =
+		0x5CA00000U | (((uint32_t)err & 0xFFU) << 8) | ((uint32_t)num & 0xFFU);
+#endif /* TOPPERS_C3_COLD_DIAG */
 	for (i = 0; i < num; i++) {
 		syslog(LOG_NOTICE, "  [%d] %s (rssi=%d ch=%d)",
 			   (int_t)i, (const char *)recs[i].ssid,

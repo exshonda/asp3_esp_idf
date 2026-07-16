@@ -34,6 +34,50 @@
  */
 extern void esp_rom_set_cpu_ticks_per_us(uint32_t ticks_per_us);
 
+#ifdef TOPPERS_C3_COLD_DIAG
+#include "target_timer.h"		/* esp32c3_systimer_read / systimer_ll_* */
+/*
+ *  ------------------------------------------------------------------
+ *  真cold クロック監査（既定OFF・非回帰）
+ *  ------------------------------------------------------------------
+ *
+ *  evidence-c3-01 §7.2 で**実機前に事前登録した**測定をそのまま実装する
+ *  （予測を後から書き換えない）。C3はUARTブリッジを持たず，コンソールの
+ *  open自体がDUTをリセットするため，**判定は全てRTC STOREマーカ直読み**
+ *  （console非依存）で行う。
+ *
+ *  ★STORE割当（C3のROM rtc.hが各STOREに用途を宣言している点に注意：
+ *    STORE0=Reserved / STORE1=RTC_SLOW_CLK cal / STORE2,3=Boot time /
+ *    STORE4=XTAL freq / STORE5=APB freq / STORE6,7=FAST_RTC entry,CRC）。
+ *    **STORE0 だけが「Reserved」＝唯一ROM側の用途宣言が無い**ので，
+ *    最重要の測定（OPTIONS0）をそこに置く。他はC3の過去ラウンドで
+ *    読み書きの実績があるものを使い，**生存は実測で確認する**
+ *    （STORE5=0x600080BC は usb-reset 時にROMが上書き＝使わない）。
+ */
+#define C3_DIAG_OPTIONS0    0x60008050U  /* STORE0: OPTIONS0 latch（最重要） */
+#define C3_DIAG_PCCR        0x60008058U  /* STORE2: PCCRデルタ＝CPU_MHz*1000 */
+#define C3_DIAG_CLKCFG      0x6000805CU  /* STORE3: クロックmux読戻し */
+#define C3_DIAG_SYSTIM      0x600080C0U  /* STORE6: SYSTIMERデルタ（健全性） */
+#define C3_DIAG_STAGE       0x600080C4U  /* STORE7: 到達段 0xC3D000nn */
+
+#define C3_RTC_CNTL_OPTIONS0_REG    0x60008000U
+
+/*
+ *  CPUサイクルカウンタ（C3は SOC_CPU_HAS_CSR_PC=1 ＝標準の mcycle では
+ *  なくEspressif独自のPCCR＝CSR 0x7e2．ESP-IDFの rv_utils_get_cycle_count()
+ *  と同一．PCER/PCMRを明示的に有効化しているコードはESP-IDF内に無く，
+ *  リセット既定で歩進する＝もし歩進しなければデルタ0として観測される）
+ */
+Inline uint32_t
+c3_diag_read_pccr(void)
+{
+	uint32_t v;
+
+	__asm__ volatile ("csrr %0, 0x7e2" : "=r" (v));
+	return(v);
+}
+#endif /* TOPPERS_C3_COLD_DIAG */
+
 /*
  *  エラー時の処理
  */
@@ -62,6 +106,24 @@ esp32c3_disable_mwdt(uint32_t timg_base)
 void
 hardware_init_hook(void)
 {
+#ifdef TOPPERS_C3_COLD_DIAG
+	/*
+	 *  ★事前登録した測定（evidence-c3-01 §7.2）：
+	 *  **ASP3が何かを書く «前» に** RTC_CNTL_OPTIONS0_REG を latch する。
+	 *  これがcold/warmで異なれば「BBPLLの電源状態がwarm残留に依存」＝
+	 *  C6型（PCR SOC_CLK_SEL がwarm保持・POR既定復帰）と同じ構造になる。
+	 *
+	 *  予測（85%）＝**cold・warm とも bit10/8/6 = 0**
+	 *  （BBPLL_FORCE_PD=b10 / BBPLL_I2C_FORCE_PD=b8 / BB_I2C_FORCE_PD=b6．
+	 *   いずれもレジスタ既定 1'b0＝「強制電源断しない」＝BBPLLは既定で有効）。
+	 *  ★本フックは .data 初期化より «前» に走るため，初期化子つきstaticを
+	 *  一切使わない（即値とMMIOのみ）。
+	 */
+	sil_wrw_mem((void *)C3_DIAG_OPTIONS0,
+				sil_rew_mem((void *)C3_RTC_CNTL_OPTIONS0_REG));
+	sil_wrw_mem((void *)C3_DIAG_STAGE, 0xC3D00001U);
+#endif /* TOPPERS_C3_COLD_DIAG */
+
 	/*
 	 *  ウォッチドッグタイマの無効化
 	 *  （MWDT0/1・RTC WDT・スーパーWDT．リセット後デフォルトで有効）
@@ -163,6 +225,20 @@ hardware_init_hook(void)
 	 */
 	esp_rom_set_cpu_ticks_per_us(160U);
 
+#ifdef TOPPERS_C3_COLD_DIAG
+	/*
+	 *  クロックmuxの読戻し（上の切替が実際に効いたか）．
+	 *  [23:16]=SYSCLK_CONF下位8bit（SOC_CLK_SEL）／[7:0]=CPU_PER_CONF下位8bit．
+	 *  ★ここへ到達している時点で «PLL切替後もCPUが生きている» ＝
+	 *    BBPLLがロックして使えるクロックを出していることの機能的な証拠
+	 *    （ロックしていなければクロックが止まりここに来られない）。
+	 */
+	sil_wrw_mem((void *)C3_DIAG_CLKCFG,
+				((sil_rew_mem((void *)ESP32C3_SYSTEM_SYSCLK_CONF) & 0xFFU) << 16)
+				| (sil_rew_mem((void *)ESP32C3_SYSTEM_CPU_PER_CONF) & 0xFFU));
+	sil_wrw_mem((void *)C3_DIAG_STAGE, 0xC3D00002U);
+#endif /* TOPPERS_C3_COLD_DIAG */
+
 #ifdef TOPPERS_ESP32C3_WIFI
 	/*
 	 *  Wi-Fi/BTモデムクロックの全面有効化
@@ -183,6 +259,44 @@ hardware_init_hook(void)
 void
 software_init_hook(void)
 {
+#ifdef TOPPERS_C3_COLD_DIAG
+	/*
+	 *  ★機能側の対照（evidence-c3-01 §7.2 で事前登録）：
+	 *  「OPTIONS0 の bit=0 ⇒ 真coldで動く」は**含意として不健全**
+	 *  （0は «強制電源断されていない» までしか示さず，BBPLLが480MHzで
+	 *   ロックしていることは示さない）。∴**実周波数を別に測る**。
+	 *
+	 *  SYSTIMER（XTAL由来＝16MHz・**PLL非依存**）を基準に，PCCR（CPUサイクル）
+	 *  のデルタを 16000 tick（＝1ms）の窓で測る ⇒ **PCCRデルタ＝CPU_MHz×1000**：
+	 *      160000 → 160MHz（BBPLL 480M＝期待値）
+	 *      106670 → 106.67MHz（BBPLLが実は320M＝SYSTEM_PLL_FREQ_SELが0側）
+	 *       20000 →  20MHz（PLL切替が効いていない＝XTAL/2のまま）
+	 *           0 → PCCRが歩進しない（測定系の異常＝値を信用しない）
+	 *  ★本フックは .data 初期化の «後»（start.S）なので通常のCコードでよい。
+	 *  ★SYSTIMERのクロックゲート/リセットはリセット既定で解除済み
+	 *    （target_timer.c の target_hrt_initialize のコメント＝実績ある前提）。
+	 *    counter有効化は冪等なので後段の target_hrt_initialize と競合しない。
+	 */
+	{
+		uint64_t t0, t1;
+		uint32_t c0, c1;
+
+		sil_wrw_mem((void *)C3_DIAG_STAGE, 0xC3D00003U);
+
+		systimer_ll_enable_counter(&SYSTIMER, 0U, true);
+
+		t0 = esp32c3_systimer_read();
+		c0 = c3_diag_read_pccr();
+		while ((esp32c3_systimer_read() - t0) < 16000U) ;
+		t1 = esp32c3_systimer_read();
+		c1 = c3_diag_read_pccr();
+
+		sil_wrw_mem((void *)C3_DIAG_PCCR, c1 - c0);
+		sil_wrw_mem((void *)C3_DIAG_SYSTIM, (uint32_t)(t1 - t0));
+		sil_wrw_mem((void *)C3_DIAG_STAGE, 0xC3D00004U);
+	}
+#endif /* TOPPERS_C3_COLD_DIAG */
+
 	/* Initialize sio for fput */
 #ifdef TOPPERS_OMIT_TECS
 	sio_initialize(0);
