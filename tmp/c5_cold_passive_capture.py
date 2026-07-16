@@ -1,5 +1,27 @@
 #!/usr/bin/env python3
-"""Passive (no-reset) console capture for the ESP32-C5 native USB-Serial-JTAG.
+"""Passive console capture for the ESP32-C5.
+
+★★2026-07-17 WARNING — "passive" does NOT mean "no reset" (evidence-c5-05 §13):
+  Opening the CP2102N (UART0) port REBOOTS the DUT. The bridge's DTR/RTS drive EN,
+  and the kernel raises them on open regardless of the dtr/rts=False set below
+  (they only take effect after the port is already open). Proven by a controlled
+  A/B: with a bond established, opening this capture for 4 s made the next
+  reconnect fail, and the capture itself recorded the reboot in the act:
+      ESP-ROM:esp32c5-eco2-20250121
+      rst:0x1 (POWERON),boot:0x18 (SPI_FAST_FLASH_BOOT)
+  This silently destroyed a whole round of conclusions (the "bond reuse bug" in
+  §11 was purely this artifact - the reset wiped the RAM-backed bond store).
+
+  RULES:
+   1. Open the capture ONCE, BEFORE the state you care about starts, and hold it
+      open for the whole measurement. Never open/close it midway through a test
+      that depends on device state (bonds, counters, RAM contents).
+   2. `rst:0x1 (POWERON)` here does NOT prove a true power cycle - this open
+      produces the identical signature. The ONLY proof of a true cold boot is
+      `uhubctl -l 1-6 -p 3-4 -a off` + reading back that the device disappeared
+      from /dev/serial/by-id.
+   3. The same applies to the USB-JTAG console, which resets with a different
+      signature (rst:0x15 USB_UART_HPSYS).
 
 Why this exists (evidence-c5-05 §5):
   tmp/rts_boot_capture.py pulses RTS to force a reset. That is exactly wrong for

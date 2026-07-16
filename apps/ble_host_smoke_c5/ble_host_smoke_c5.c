@@ -137,6 +137,71 @@ extern volatile uint32_t esp_shim_int_count[];
 
 #define BLE_SYNC_MARK_VAL	0x5ADE51C0UL
 
+#if defined(TOPPERS_ESP32C5_BT_SM) && defined(TOPPERS_C5_LTK_DIAG)
+/*
+ *  ★判別計装（既定OFF＝未定義時は完全に非回帰．evidence-05 §12）：
+ *  «bond は在る(our=1)のに再接続が Authentication Failure(0x05) で落ちる» の真因判別．
+ *  submodule(esp-idf) は編集できない（CLAUDE.md 禁則）ため，
+ *  ble_store_config_init() が張った ble_hs_cfg.store_read_cb を «app 層で包む»＝
+ *  NimBLE が LTK 照合に使う «キー» と «rc» を非侵襲に覗ける唯一の合法な窓．
+ *    STORE9 ＝ 直近の store_read(OUR_SEC)：
+ *              0x5A<<24 | count:4 | addr_type:4 | rc:8 | peer_addr[0]:8
+ *    STORE8 ＝ 保存済 our_sec[0] の素性：
+ *              0x57<<24 | type:4 | addr[0]:8 | addr[5]:8 | (ediv!=0)<<1 | (rand!=0)
+ *  ★LP_AON への無条件ミラーを主判定にする（C5 は syslog バースト欠落で
+ *  «変化の瞬間の1行» が消える＝§11.6-3 の教訓）．
+ */
+static int (*g_orig_store_read)(int, const union ble_store_key *,
+								union ble_store_value *);
+volatile uint32_t	g_ltk_read_count;
+
+static int
+ltk_diag_store_read(int obj_type, const union ble_store_key *key,
+					union ble_store_value *value)
+{
+	int	rc = g_orig_store_read(obj_type, key, value);
+
+	if (obj_type == BLE_STORE_OBJ_TYPE_OUR_SEC) {
+		g_ltk_read_count++;
+		sil_wrw_mem((void *) LP_AON_STORE9,
+					0x5A000000UL
+					| ((g_ltk_read_count & 0xFUL) << 20)
+					| (((uint32_t) key->sec.peer_addr.type & 0xFUL) << 16)
+					| (((uint32_t) rc & 0xFFUL) << 8)
+					| ((uint32_t) key->sec.peer_addr.val[0]));
+		syslog(LOG_NOTICE,
+			   "ble_host_smoke_c5: LTKDIAG read OUR_SEC n=%d type=%d addr0=0x%02x rc=%d",
+			   (int_t) g_ltk_read_count, (int_t) key->sec.peer_addr.type,
+			   (int_t) key->sec.peer_addr.val[0], (int_t) rc);
+	}
+	return rc;
+}
+
+/*  保存済 our_sec[0] の素性を STORE8 へ（1秒ループから呼ぶ）  */
+static void
+ltk_diag_dump_stored(void)
+{
+	union ble_store_key		k;
+	union ble_store_value	v;
+
+	memset(&k, 0, sizeof(k));
+	k.sec.peer_addr = *BLE_ADDR_ANY;
+	k.sec.idx = 0;
+	if (g_orig_store_read(BLE_STORE_OBJ_TYPE_OUR_SEC, &k, &v) == 0) {
+		sil_wrw_mem((void *) LP_AON_STORE8,
+					0x57000000UL
+					| (((uint32_t) v.sec.peer_addr.type & 0xFUL) << 20)
+					| (((uint32_t) v.sec.peer_addr.val[0]) << 12)
+					| (((uint32_t) v.sec.peer_addr.val[5]) << 4)
+					| ((v.sec.ediv != 0U) ? 0x2UL : 0UL)
+					| ((v.sec.rand_num != 0U) ? 0x1UL : 0UL));
+	}
+	else {
+		sil_wrw_mem((void *) LP_AON_STORE8, 0x57FF0000UL);	/* 保存無し */
+	}
+}
+#endif /* TOPPERS_C5_LTK_DIAG */
+
 /*
  *  ble_hs sync 到達マーカ（グローバルとLP_AON STORE0の両方へ記録）．
  */
@@ -516,6 +581,35 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 			   "ble_host_smoke_c5: GAP CONNECT status=%d handle=%d",
 			   (int_t) event->connect.status,
 			   (int_t) event->connect.conn_handle);
+#if defined(TOPPERS_ESP32C5_BT_SM) && defined(TOPPERS_C5_LTK_DIAG)
+		/*  ★H1 判定：device が «実際に受け取った» peer アドレスの種別と値．
+		    type=0(public) なら RPA ではない＝H1（RPA/IRK 解決失敗）は成立しない．
+		    type=1(random) かつ val[5] の上位2bit=0b01 なら RPA＝H1 生存．  */
+		if (event->connect.status == 0) {
+			struct ble_gap_conn_desc	d;
+
+			if (ble_gap_conn_find(event->connect.conn_handle, &d) == 0) {
+				syslog(LOG_NOTICE,
+					   "ble_host_smoke_c5: LTKDIAG conn id_addr type=%d [0]=0x%02x [5]=0x%02x",
+					   (int_t) d.peer_id_addr.type,
+					   (int_t) d.peer_id_addr.val[0],
+					   (int_t) d.peer_id_addr.val[5]);
+				syslog(LOG_NOTICE,
+					   "ble_host_smoke_c5: LTKDIAG conn ota_addr type=%d [0]=0x%02x [5]=0x%02x",
+					   (int_t) d.peer_ota_addr.type,
+					   (int_t) d.peer_ota_addr.val[0],
+					   (int_t) d.peer_ota_addr.val[5]);
+				/*  STORE5 を転用（write マーカは本ラウンドでは使わない）：
+				    0x1D<<24 | id_type:4 | id[0]:8 | ota_type:4 | ota[0]:8  */
+				sil_wrw_mem((void *) LP_AON_STORE5,
+							0x1D000000UL
+							| (((uint32_t) d.peer_id_addr.type & 0xFUL) << 20)
+							| (((uint32_t) d.peer_id_addr.val[0]) << 12)
+							| (((uint32_t) d.peer_ota_addr.type & 0xFUL) << 8)
+							| ((uint32_t) d.peer_ota_addr.val[0] >> 4));
+			}
+		}
+#endif
 		if (event->connect.status != 0) {
 			g_adv_active = 0U;
 			start_advertising();
@@ -801,6 +895,13 @@ main_task(EXINF exinf)
 	 *  ble_store_read=ENOTSUP で即失敗．S3 §5）．Just Works / SC．
 	 */
 	ble_store_config_init();
+#ifdef TOPPERS_C5_LTK_DIAG
+	/*  ★ble_store_config_init() が store_read_cb を張った «後» に包む（順序必須）  */
+	g_orig_store_read = ble_hs_cfg.store_read_cb;
+	ble_hs_cfg.store_read_cb = ltk_diag_store_read;
+	sil_wrw_mem((void *) LP_AON_STORE9, 0x5A000000UL);	/* 既知値へ初期化 */
+	sil_wrw_mem((void *) LP_AON_STORE8, 0x57FF0000UL);
+#endif
 	ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
 	ble_hs_cfg.sm_bonding = 1;
 	ble_hs_cfg.sm_mitm = 0;
@@ -897,6 +998,9 @@ main_task(EXINF exinf)
 				last_peer = peer_cnt;
 			}
 		}
+#endif
+#if defined(TOPPERS_ESP32C5_BT_SM) && defined(TOPPERS_C5_LTK_DIAG)
+		ltk_diag_dump_stored();		/* 保存済 our_sec[0] の素性を STORE8 へ */
 #endif
 #ifdef TOPPERS_ESP32C5_BT_RXTRACE
 		/*  RXTRACE の粗タイマ（1s毎）．enc 到着→ETIMEOUT の経過秒測定用．  */
