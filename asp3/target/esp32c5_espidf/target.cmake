@@ -185,7 +185,31 @@ list(APPEND ASP3_LINK_OPTIONS
     -L${ESP_SUP_DIR}/components/soc/esp32c5/ld
 )
 
-set(ASP3_LDSCRIPT ${TARGETDIR}/esp32c5.ld)
+#
+#  ブート方式（既定＝Direct Boot．evidence-c5-03参照）
+#
+#  OFF（既定）＝Direct Boot XIP：ROMがflashをセルフマップしてASP3の
+#               エントリへ直行する（2nd-stage bootloader無し）。
+#               scan 20AP・W1（GOT IP＋ping×30）を実機達成済みの構成。
+#  ON          ＝seam：実ESP-IDF v5.5.4 の C5用 2nd-stage bootloader を
+#               経由してASP3自前エントリへ入る（FreeRTOS非リンクのまま）。
+#               ★C5のbootloaderオフセットは 0x2000（0x0ではない．
+#               Kconfig.projbuild:11「default 0x2000 if IDF_TARGET_ESP32P4
+#               || IDF_TARGET_ESP32C5 || IDF_TARGET_ESP32H4」＝先頭2セクタは
+#               key manager用に予約）。ptable@0x8000／app@0x10000。
+#
+#  可逆：ON/OFFの切替はld・app_desc・イメージ生成だけに閉じており，
+#  カーネル／arch／チップ依存部／Wi-Fi供給には一切触れない。
+#
+option(ASP3_SEAM_BOOT
+    "Boot via the real ESP-IDF v5.5.4 2nd-stage bootloader (seam) instead of ASP3's Direct Boot. Default OFF = Direct Boot (the only configuration with scan/W1 hardware evidence)"
+    OFF)
+
+if(ASP3_SEAM_BOOT)
+    set(ASP3_LDSCRIPT ${TARGETDIR}/esp32c5_seam.ld)
+else()
+    set(ASP3_LDSCRIPT ${TARGETDIR}/esp32c5.ld)
+endif()
 
 #
 #  ターゲット依存部のソース
@@ -195,6 +219,29 @@ list(APPEND ASP3_TARGET_C_FILES
     ${TARGETDIR}/target_timer.c
     ${TARGETDIR}/flash_header.S
 )
+
+#
+#  seam では esp_app_desc（segment #0先頭）が要る．Direct Boot では
+#  未参照＝リンクされない（非回帰）．理由は seam_appdesc.c の冒頭コメント．
+#
+if(ASP3_SEAM_BOOT)
+    list(APPEND ASP3_TARGET_C_FILES
+        ${TARGETDIR}/seam_appdesc.c
+    )
+    #
+    #  ★-u が必須：ASP3_TARGET_C_FILES は静的ライブラリ（libasp3.a）へ
+    #  入るため，どこからも参照されない app_desc は**アーカイブメンバごと
+    #  ロードされない**（ldスクリプトの KEEP はロード済みセクションの
+    #  gc を止めるだけで，未ロードのメンバは救えない）。実測：-u 無しでは
+    #  nm に asp3_seam_app_desc が現れず，.flash.appdesc の先頭が rodata に
+    #  なって elf2image が
+    #    「Contents of segment at SHA256 digest offset 0xb0 are not zero」
+    #  で停止した（0xb0 = ファイル先頭0x20 + app_elf_sha256 offset 144）。
+    #
+    list(APPEND ASP3_LINK_OPTIONS
+        -Wl,-u,asp3_seam_app_desc
+    )
+endif()
 
 #
 #  チップ依存部のインクルード（submodule外．docs/c5-port-design.md §2.2）
