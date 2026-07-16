@@ -56,9 +56,26 @@ get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf 
 #  LEGACY/SC未定義（本ビルドでは常に0）によりコンパイル対象外の
 #  死コード（mbedtls/tinycrypt鍵合意）——実働に影響しない．
 #
-option(ASP3_BT_IDF_V554 "Use ESP-IDF v5.5.4 BT controller/phy/coexist tree instead of v6.1 (default ON=blob統一. v5.5.4 blob=v6.1バイト同一・C5でcold full-BLE adv実証. OFFでv6.1へ可逆)" ON)
+#  ★★evidence-c5-05 §2 による上記コメントの訂正（md5実測）：
+#  「v5.5.4 blob＝v6.1 blob バイト完全一致」は**誤り**であった。当時
+#  「v5.5.4」として測っていた `~/tools/esp-idf` は **`v5.5.4-1169-gbb2188bf`
+#  （release/v5.5 の先端）＝タグではない**。実測すると：
+#      libble_app/libphy/libbtbb : +1169 ≡ **v6.1**（3/4一致）
+#      真の v5.5.4 タグ(submodule) : 4/4 とも +1169/v6.1 と**別物**
+#      真の v5.5.4 タグ ≡ **hal**（4/4 バイト一致）
+#  ∴ 「WiFi・BT 双方 v5.5.4＝統一完了」という記録は**成立していなかった**
+#  （WiFi=submodule＝真のv5.5.4／BT=+1169≡v6.1）。下の submodule 供給への
+#  移行によって**初めて実際に統一される**。
+#
+#  ★供給移行（.steering/20260716-c3c5c6-esp-idf-supply-migration）：
+#  ON（既定）は **esp-idf submodule（真の v5.5.4 タグ＝735507283d）**を指す
+#  ＝WiFi（ESP_SUP_DIR）と同一ツリー・外部絶対パス非依存。
+#  OFF は従来どおり外部 v6.1 ツリー＝可逆 fallback。
+#
+option(ASP3_BT_IDF_V554 "Use the esp-idf submodule (true v5.5.4 tag) BT controller/phy/coexist tree instead of external v6.1. Default ON = supply unified with WiFi (ESP_SUP_DIR). OFF = external v6.1 fallback (reversible)" ON)
 if(ASP3_BT_IDF_V554)
-    set(IDF /home/honda/tools/esp-idf)
+    #  submodule（ESP_SUP_DIR と同一ツリー）。外部絶対パスを撤去。
+    set(IDF ${IDF_V554})
 else()
     set(IDF /home/honda/tools/esp-idf-v6.1)
 endif()
@@ -187,47 +204,54 @@ list(APPEND ASP3_INCLUDE_DIRS
     ${IDF}/components/bt/controller/${BT_CHIP_SERIES}
     ${IDF}/components/bt/host/nimble/port/include
     ${IDF}/components/bt/host/nimble/nimble/porting/nimble/include
-    ${ESP_HAL_DIR}/components/esp_hw_support/include
-    ${ESP_HAL_DIR}/components/esp_hw_support/include/soc
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c5/include
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c5/private_include
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/include
-    ${ESP_HAL_DIR}/components/esp_system/include
+    #  ★供給移行（evidence-c5-05）：以下は全て ESP_SUP_DIR（既定＝esp-idf
+    #  submodule）から取る。**ヘッダとソースを揃えて同じ供給元から取る**
+    #  （evidence-02 §1.2 の一般則）。hal 混成のままだと hal の
+    #  esp_modem_clock.h が要求する `shared_periph_module_t` を
+    #  esp-idf の soc/periph_defs.h が持たず未定義型エラーになる（§1.2）。
+    ${ESP_SUP_DIR}/components/esp_hw_support/include
+    ${ESP_SUP_DIR}/components/esp_hw_support/include/soc
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/include
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/private_include
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/include
+    ${ESP_SUP_DIR}/components/esp_system/include
     #  esp_private/wifi.h（phy_init.cが要求．BTもWi-Fiと同じPHY実
     #  ソースを使うため必要．esp_wifi.cmakeはIDF側を使うが，esp_private/
     #  wifi.hはESP-IDF公開APIヘッダのためIDF/hal双方に存在．IDFを優先）
     ${IDF}/components/esp_wifi/include
     ${IDF}/components/esp_phy/include
     ${IDF}/components/esp_phy/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/esp_pm/include
-    ${ESP_HAL_DIR}/components/esp_timer/include
+    ${ESP_SUP_DIR}/components/esp_pm/include
+    ${ESP_SUP_DIR}/components/esp_timer/include
     ${IDF}/components/esp_coex/include
-    ${ESP_HAL_DIR}/components/esp_rom/include
-    ${ESP_HAL_DIR}/components/esp_rom/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/esp_rom/${BT_CHIP_SERIES}/include/${BT_CHIP_SERIES}
-    ${ESP_HAL_DIR}/components/esp_rom/${BT_CHIP_SERIES}
-    ${ESP_HAL_DIR}/components/heap/include
-    ${ESP_HAL_DIR}/components/log/include
-    ${ESP_HAL_DIR}/components/riscv/include
-    ${ESP_HAL_DIR}/components/esp_hal_gpio/include
-    ${ESP_HAL_DIR}/components/esp_hal_gpio/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/esp_hal_clock/include
-    ${ESP_HAL_DIR}/components/esp_hal_clock/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/efuse/include
-    ${ESP_HAL_DIR}/components/efuse/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/esp_event/include
+    ${ESP_SUP_DIR}/components/esp_rom/include
+    ${ESP_SUP_DIR}/components/esp_rom/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_DIR}/components/esp_rom/${BT_CHIP_SERIES}/include/${BT_CHIP_SERIES}
+    ${ESP_SUP_DIR}/components/esp_rom/${BT_CHIP_SERIES}
+    ${ESP_SUP_DIR}/components/heap/include
+    ${ESP_SUP_DIR}/components/log/include
+    ${ESP_SUP_DIR}/components/riscv/include
+    ${ESP_SUP_HAL_gpio}/include
+    ${ESP_SUP_HAL_gpio}/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_HAL_clock}/include
+    ${ESP_SUP_HAL_clock}/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_DIR}/components/efuse/include
+    ${ESP_SUP_DIR}/components/efuse/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_DIR}/components/esp_event/include
     #  hal/pmu_ll.h・hal/pmu_hal.h（wifi/esp_shim.cのesp_shim_modem_icg_init
     #  が要求．esp_wifi.cmakeにも同じ2行がある＝WiFi/BT共有ファイルの
     #  依存としてBT側でも要る）
-    ${ESP_HAL_DIR}/components/esp_hal_pmu/include
-    ${ESP_HAL_DIR}/components/esp_hal_pmu/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/private_include
-    #  hal/rtc_timer_hal.h（rtc_time.cが要求）
-    ${ESP_HAL_DIR}/components/esp_hal_rtc_timer/include
-    ${ESP_HAL_DIR}/components/esp_hal_rtc_timer/${BT_CHIP_SERIES}/include
-    #  hal/timg_ll.h（rtc_time.cが要求）
-    ${ESP_HAL_DIR}/components/esp_hal_timg/include
-    ${ESP_HAL_DIR}/components/esp_hal_timg/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_HAL_pmu}/include
+    ${ESP_SUP_HAL_pmu}/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/private_include
+    #  hal/rtc_timer_hal.h（hal供給時）／hal/lp_timer_hal.h（esp-idf供給時）．
+    #  rtc_time.cが要求．**ソースも同じ供給元から取る**ので名前差は消える
+    #  （evidence-02 §1.2）．
+    ${ESP_SUP_HAL_rtc_timer}/include
+    ${ESP_SUP_HAL_rtc_timer}/${BT_CHIP_SERIES}/include
+    #  hal/timg_ll.h（hal）／hal/timer_ll.h（esp-idf）．同上．
+    ${ESP_SUP_HAL_timg}/include
+    ${ESP_SUP_HAL_timg}/${BT_CHIP_SERIES}/include
     #  esp_wifi.cmake §1bと同じ理由で必要になったパス
     #  （modem/i2c_ana_mst_reg.h・regi2c_impl.h等，IDFのsocレイアウト
     #  でのみ解決されるヘッダ．hal socより後に置く）
@@ -259,19 +283,24 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     ${IDF}/components/bt/porting/npl/freertos/src/npl_os_freertos.c
     ${IDF}/components/bt/porting/mem/os_msys_init.c
     ${IDF}/components/bt/porting/mem/bt_osi_mem.c
-    #  ★C6のBLE実施01の教訓（「os_mbuf.c/os_mempool.cは自前で持たない
-    #  ＝libble_app.aが自分のos_mbuf.c.oを同梱」）はC5では成立しない
-    #  ことが実機リンクで判明：C5のv6.1 blob（libble_app.a）はos_
-    #  memblock_get/put/from・os_mempool_init/clear/unregister/
-    #  flags_set等が未解決のまま（plain名で参照）で残り，リンクエラーに
-    #  なった．IDF v6.1のos_mempool.cを自前でリンクして解決する
-    #  （os_mbuf.cはosi_coex経由では未参照のため引き続き含めない．
-    #  多重定義が出れば除去する）．
-    ${IDF}/components/bt/porting/mem/os_mempool.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c5/esp_clk_tree.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp_clk_tree_common.c
-    ${ESP_HAL_DIR}/components/esp_hal_clock/esp32c5/clk_tree_hal.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c5/rtc_time.c
+    #  ★os_mempool.c は **blob 世代によって要否が逆転する**（evidence-c5-05 §4．
+    #  nm で実測）．「C6のBLE実施01の教訓はC5では成立しない」という従来の
+    #  記述は **v6.1(+1169) blob に限った話**だった：
+    #    - v6.1/+1169 blob (c2785c98)：os_mempool.c.o を**同梱せず**，
+    #      os_memblock_get 等を **plain名で未解決参照**→自前リンクが要る．
+    #    - v5.5.4タグ blob (015db3db)：**os_mempool.c.o を同梱**し，
+    #      内部で `r_os_memblock_get` 等（ROM側）を参照→**自前リンクは不要**
+    #      （自前で持つと多重定義）．＝C6のBLE実施01の教訓がそのまま該当．
+    #  stock の v5.5.4 も同じ判断をしている：bt/CMakeLists.txt の
+    #  CONFIG_BT_LE_CONTROLLER_NPL_OS_PORTING_SUPPORT ブロック（:693-697）は
+    #  os_mempool.c を**コンパイルしない**（:908 の os_mempool.c は
+    #  `if(NOT ..._NPL_OS_PORTING_SUPPORT)` 側＝C5は非該当）．
+    #  ⇒ 供給元に応じて切替える（＝「揃えて取る」の一例）．
+    #  ★ヘッダと**揃えて**同じ供給元から取る（evidence-02 §1.2）．
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/esp_clk_tree.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/esp_clk_tree_common.c
+    ${ESP_SUP_HAL_clock}/esp32c5/clk_tree_hal.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/rtc_time.c
     ${IDF}/components/bt/porting/transport/src/hci_transport.c
     #  hci_driver_standard.c と hci_driver_nimble.c（D-2a節）は共に
     #  hci_driver_vhci_opsを定義するため二者択一（同時リンク不可）．
@@ -294,14 +323,24 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     #  (ESP32C5_WIFI)ブロック内にありBTからは見えないため．chip依存の
     #  実ソースはhal側を使う——PHY/coexとは異なりmodem_clockはeco2非互換
     #  の対象外＝hal版で問題ない．esp_wifi.cmake §6のソース一覧と同一）
-    ${ESP_HAL_DIR}/components/esp_hw_support/modem_clock.c
-    ${ESP_HAL_DIR}/components/hal/${BT_CHIP_SERIES}/modem_clock_hal.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/periph_ctrl.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/esp_clk.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_clk.c
-    ${ESP_HAL_DIR}/components/hal/efuse_hal.c
-    ${ESP_HAL_DIR}/components/hal/${BT_CHIP_SERIES}/efuse_hal.c
+    #  ★modem_clock.c／periph_ctrl.c は §1.2 の版差の当事者
+    #  （`shared_periph_module_t` vs `periph_module_t`）＝**ヘッダと同じ
+    #  供給元から取らねばならない**．esp_wifi_v8.cmake §6 と同一の写像．
+    ${ESP_SUP_DIR}/components/esp_hw_support/modem_clock.c
+    ${ESP_SUP_DIR}/components/hal/${BT_CHIP_SERIES}/modem_clock_hal.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/periph_ctrl.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/esp_clk.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_clk.c
+    ${ESP_SUP_DIR}/components/hal/efuse_hal.c
+    ${ESP_SUP_DIR}/components/hal/${BT_CHIP_SERIES}/efuse_hal.c
 )
+
+if(NOT ASP3_BT_IDF_V554)
+    #  v6.1(+1169) blob のみ os_mempool.c を自前で要求する（上記コメント参照）．
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${IDF}/components/bt/porting/mem/os_mempool.c
+    )
+endif()
 
 if(NOT ESP32C5_BT_NIMBLE)
     #  ★D-1＝controller-onlyスモークテスト（NimBLEホスト無し）限定．
