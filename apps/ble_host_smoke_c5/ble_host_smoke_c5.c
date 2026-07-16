@@ -1,11 +1,13 @@
 /*
- *  ★D-2c準備（GAP CONNECT/DISCONNECTマーカ＋ble_svc_gap/gatt_init呼出し
- *  部分）はビルド未検証（IDF v6.1環境（`/home/honda/tools/esp-idf-v6.1`）
- *  が本開発環境に存在しないため）．C6での同種変更はビルド検証済み
- *  （docs/ble-c5c6-plan.md「8. D-2c準備の横展開」節）．C5移植は静的整合のみで，
- *  実機・ビルドとも未検証．次回IDF v6.1環境で最初にビルドすること．
+ *  NimBLE host スモークテスト（ESP32-C5．Phase D-2a/D-2b/D-2c/D-2d）
  *
- *  NimBLE host スモークテスト（ESP32-C5．Phase D-2a／BLE実施05）
+ *  ★2026-07-17（evidence-c5-05 §7-8）：BT供給を esp-idf submodule（真の v5.5.4
+ *  タグ）へ移行した構成（ASP3_BT_IDF_V554=ON）で D-1／D-2a／D-2b を真cold実機達成
+ *  したのを受け，C3 apps/ble_host_smoke（2026-07-15 に全4特性を OTA フル実証済＝«正»）
+ *  から **自前GATTサービス 0xABF0（0xABF1 READ／0xABF2 NOTIFY／0xABF3 WRITE／
+ *  0xABF4 READ_ENC）を逐語転写**して D-2c/D-2d に対応させた．
+ *  旧ヘッダにあった「D-2c準備はビルド未検証（IDF v6.1環境が無い）」という但し書きは
+ *  **解消済**＝本ファイルは submodule 供給でビルド・実機とも検証された．
  *
  *  apps/ble_host_smoke_c6（C6のD-2a/D-2b）をC5向けに転写した版．
  *  apps/bt_smoke_c5（D-1．BLE実施03/04で達成）で確立したBLEコントローラ
@@ -49,6 +51,10 @@
 #include "host/ble_gap.h"
 #include "host/ble_hs_id.h"
 #include "host/ble_hs_adv.h"
+/*  D-2c/D-2d：自前GATTサービス（0xABF0）用（C3 ble_host_smoke.c と同一）  */
+#include "host/ble_gatt.h"
+#include "host/ble_uuid.h"
+#include "os/os_mbuf.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
@@ -90,7 +96,17 @@ extern volatile uint32_t esp_shim_int_count[];
 #define LP_AON_STORE2		0x600B1008UL	/* adv-return (rc) マーカ */
 #define LP_AON_STORE3		0x600B100CUL	/* ble_hs reset reason/count */
 #define LP_AON_STORE4		0x600B1010UL	/* 割込みレート：CPU線1累積ミラー */
-#define LP_AON_STORE5		0x600B1014UL	/* 割込みレート：CPU線2累積ミラー */
+/*
+ *  ★D-2c：STORE5 を «線2累積ミラー» から «write特性(0xABF3) 受信マーカ» へ転用．
+ *  C5 の LP_AON STORE は 0-9 のみ実在し全て使用中のため，C3 が D-2c で採った
+ *  「storm probe を無効化して reg を接続観測へ明け渡す」判断（C3 の 0xC0/0xB8）を
+ *  そのまま踏襲する．妥当性＝storm 非発生は evidence-05 §4.3/§4.4 で
+ *  line1=0 line2=0 を live 実測済＝線2ミラーの情報価値は尽きている．
+ *  report_intr_rate() は両線ともコンソールへ出し続けるので観測能力は落ちない．
+ *  値：0x7717<write_count:8><先頭バイト:8>（C3 BLE_WRITE_MARK_ADDR と同一形式）．
+ */
+#define LP_AON_STORE5		0x600B1014UL	/* D-2c：write特性 受信マーカ */
+#define BLE_WRITE_MARK_ADDR	((void *) LP_AON_STORE5)
 /*
  *  ★ビルド未検証（ファイル冒頭コメント参照）．
  *  D-2c準備（C3 wip 8476b55の横展開，docs/ble-c5c6-plan.md「8. D-2c
@@ -137,9 +153,24 @@ volatile uint32_t	g_gap_event_count;
 volatile uint8_t	g_own_addr_type;
 volatile int32_t	g_reset_reason = 0x7fffffff;
 volatile uint32_t	g_reset_count;
-#ifdef TOPPERS_ESP32C5_BT_SM
-/*  ★D-2d（SM）：接続ハンドルと slave Security Request 計時（S3/C3 D-2d 移植）．  */
+
+/*
+ *  ★D-2c：自前GATTサービス（0xABF0）用グローバル（C3 ble_host_smoke.c 逐語転写）．
+ *  g_conn_handle は notify_tick が «SM非依存で» 必要なため，SM の ifdef から
+ *  出して無条件化する（SM=OFF ビルドの非回帰を壊さないこと）．
+ */
 volatile uint16_t	g_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+volatile uint8_t	g_notify_enabled;		/* CCCD notifyビット */
+static uint16_t		g_notify_val_handle;	/* notify特性のvalue handle */
+volatile uint32_t	g_notify_counter;		/* notify値（32bit LE） */
+volatile uint32_t	g_notify_sent;			/* notify送出成功数 */
+volatile uint32_t	g_notify_fail;			/* notify送出失敗数 */
+volatile int32_t	g_notify_last_rc;		/* 直近notifyのrc */
+volatile uint32_t	g_write_count;			/* write特性の受信回数（putカウンタ） */
+volatile uint32_t	g_write_last;			/* 直近writeの先頭バイト＋長さ */
+
+#ifdef TOPPERS_ESP32C5_BT_SM
+/*  ★D-2d（SM）：slave Security Request 計時（S3/C3 D-2d 移植）．  */
 volatile uint32_t	g_conn_secs;
 volatile uint8_t	g_sec_initiated;
 extern void			ble_store_config_init(void);
@@ -148,6 +179,198 @@ extern void			ble_store_config_init(void);
 #define BLE_DEVICE_NAME		"ASP3-C5-BLE"
 
 static int gap_event_cb(struct ble_gap_event *event, void *arg);
+
+/*
+ *  ★D-2c/D-2d：自前GATTサービス（C3 apps/ble_host_smoke/ble_host_smoke.c:206-313 の
+ *  逐語転写．C3 は 2026-07-15 に全4特性を OTA フル実証済＝«正» として写す）．
+ *    service 0xABF0（PRIMARY）
+ *      chr 0xABF1  READ            固定値 "BT4-OK"（42 54 34 2d 4f 4b）
+ *      chr 0xABF2  READ | NOTIFY   32bit LE カウンタ（subscribe中のみ周期送出）
+ *      chr 0xABF3  WRITE           受信値をログ＋RTCマーカ＋putカウンタ
+ *      chr 0xABF4  READ | READ_ENC D-2d本体（bond/LTK暗号確立後にのみ読める）
+ */
+static int
+gatt_read_access(uint16_t conn_handle, uint16_t attr_handle,
+				 struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+	static const char	val[] = "BT4-OK";
+
+	(void) conn_handle;
+	(void) attr_handle;
+	(void) arg;
+	if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+		return (os_mbuf_append(ctxt->om, val, sizeof(val) - 1) == 0
+				? 0 : BLE_ATT_ERR_INSUFFICIENT_RES);
+	}
+	return BLE_ATT_ERR_UNLIKELY;
+}
+
+/*  notify特性（0xABF2）のREAD：現在のカウンタ値（notifyペイロードと同形式）  */
+static int
+gatt_notify_access(uint16_t conn_handle, uint16_t attr_handle,
+				   struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+	uint32_t	v = g_notify_counter;
+	uint8_t		buf[4];
+
+	(void) conn_handle;
+	(void) attr_handle;
+	(void) arg;
+	if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+		buf[0] = (uint8_t) (v & 0xffU);
+		buf[1] = (uint8_t) ((v >> 8) & 0xffU);
+		buf[2] = (uint8_t) ((v >> 16) & 0xffU);
+		buf[3] = (uint8_t) ((v >> 24) & 0xffU);
+		return (os_mbuf_append(ctxt->om, buf, sizeof(buf)) == 0
+				? 0 : BLE_ATT_ERR_INSUFFICIENT_RES);
+	}
+	return BLE_ATT_ERR_UNLIKELY;
+}
+
+/*  write特性（0xABF3）：受信データをログ＋RTCマーカ＋putカウンタ加算  */
+static int
+gatt_write_access(uint16_t conn_handle, uint16_t attr_handle,
+				  struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+	uint16_t	len;
+	uint8_t		first = 0U;
+
+	(void) conn_handle;
+	(void) attr_handle;
+	(void) arg;
+	if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+		len = OS_MBUF_PKTLEN(ctxt->om);
+		if (len > 0U) {
+			(void) os_mbuf_copydata(ctxt->om, 0, 1, &first);
+		}
+		g_write_count++;
+		g_write_last = ((uint32_t) len << 8) | (uint32_t) first;
+		sil_wrw_mem(BLE_WRITE_MARK_ADDR,
+					0x77170000UL
+					| ((g_write_count & 0xffUL) << 8)
+					| ((uint32_t) first & 0xffUL));
+		syslog(LOG_NOTICE,
+			   "ble_host_smoke_c5: GATT WRITE len=%d first=0x%02x count=%d",
+			   (int_t) len, (int_t) first, (int_t) g_write_count);
+		return 0;
+	}
+	return BLE_ATT_ERR_UNLIKELY;
+}
+
+static const struct ble_gatt_chr_def custom_chrs[] = {
+	{
+		.uuid = BLE_UUID16_DECLARE(0xABF1),
+		.access_cb = gatt_read_access,
+		.flags = BLE_GATT_CHR_F_READ,
+	},
+	{
+		.uuid = BLE_UUID16_DECLARE(0xABF2),
+		.access_cb = gatt_notify_access,
+		.val_handle = &g_notify_val_handle,
+		.flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+	},
+	{
+		.uuid = BLE_UUID16_DECLARE(0xABF3),
+		.access_cb = gatt_write_access,
+		.flags = BLE_GATT_CHR_F_WRITE,
+	},
+#ifdef TOPPERS_ESP32C5_BT_SM
+	/*  D-2d：暗号必須 READ 特性（0xABF4）．未ペアの central がこれを READ すると
+	    NimBLE が insufficient-authentication を返し，central が pairing/bonding を
+	    «決定論的に» 開始する＝bond を強制トリガする入口（暗号確立後は "BT4-OK" を返す）．
+	    ★これが読めた事実が «bond/LTK 暗号が end-to-end で実効» の物証になる．  */
+	{
+		.uuid = BLE_UUID16_DECLARE(0xABF4),
+		.access_cb = gatt_read_access,
+		.flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC,
+	},
+#endif
+	{ 0 }	/* 終端 */
+};
+
+static const struct ble_gatt_svc_def custom_svcs[] = {
+	{
+		.type = BLE_GATT_SVC_TYPE_PRIMARY,
+		.uuid = BLE_UUID16_DECLARE(0xABF0),
+		.characteristics = custom_chrs,
+	},
+	{ 0 }	/* 終端 */
+};
+
+#ifdef TOPPERS_C5_GATTS_REGDIAG
+/*
+ *  ★判別計装（既定OFF＝未定義時は完全に非回帰）．C3 の TOPPERS_C3_GATTS_REGDIAG
+ *  を C5 へ転写．«0xABF0 が central から見えない» とき，それが
+ *    (a) central 側の GATT キャッシュ        なのか
+ *    (b) デバイス側の svc 登録失敗（ble_gatts_start が定義ごと弾いた）なのか
+ *  を «憶測でなく» 非依存に決定する（C3 は実測 0x5eed8309＝f=1/svc=3/chr=9 と
+ *  add_svcs rc=0 で (a) と確定した＝この手が唯一の決定打だった）．
+ *    STORE8（CONN・main_task start でクリア済・接続まで不変）へ：
+ *      0x5EED<f><svc:4><chr:8>
+ *        f  bit15 = OP_SVC で UUID==0xABF0 が来た（=自前サービス登録成立）
+ *        svc = 登録された service 数（GAP/GATT/0xABF0 で 3 が期待値）
+ *        chr = 登録された chr 総数（0xABF0 分は SM=ON で 4）
+ */
+static void
+gatts_regdiag_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
+{
+	static uint8_t	n_svc = 0U;
+	static uint8_t	n_chr = 0U;
+	static uint8_t	saw_abf0 = 0U;
+
+	(void) arg;
+	if (ctxt->op == BLE_GATT_REGISTER_OP_SVC) {
+		n_svc++;
+		if (ble_uuid_u16(ctxt->svc.svc_def->uuid) == 0xABF0) {
+			saw_abf0 = 1U;
+		}
+	}
+	else if (ctxt->op == BLE_GATT_REGISTER_OP_CHR) {
+		n_chr++;
+	}
+	sil_wrw_mem((void *) LP_AON_STORE8,
+				0x5EED0000UL | ((uint32_t) saw_abf0 << 15)
+				| (((uint32_t) n_svc & 0xFUL) << 8)
+				| ((uint32_t) n_chr & 0xFFUL));
+}
+#endif /* TOPPERS_C5_GATTS_REGDIAG */
+
+/*  subscribe中なら1回notifyを送る（1秒周期ループから呼ぶ．C3 notify_tick 逐語転写）  */
+static void
+notify_tick(void)
+{
+	struct os_mbuf	*om;
+	uint32_t		v;
+	uint8_t			buf[4];
+	int				rc;
+
+	if (g_notify_enabled == 0U || g_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+		return;
+	}
+	v = ++g_notify_counter;
+	buf[0] = (uint8_t) (v & 0xffU);
+	buf[1] = (uint8_t) ((v >> 8) & 0xffU);
+	buf[2] = (uint8_t) ((v >> 16) & 0xffU);
+	buf[3] = (uint8_t) ((v >> 24) & 0xffU);
+	om = ble_hs_mbuf_from_flat(buf, sizeof(buf));
+	if (om == NULL) {
+		g_notify_fail++;
+		g_notify_last_rc = -1;
+		syslog(LOG_ERROR, "ble_host_smoke_c5: notify mbuf alloc fail (v=%u)",
+			   (uint_t) v);
+		return;
+	}
+	rc = ble_gatts_notify_custom(g_conn_handle, g_notify_val_handle, om);
+	if (rc == 0) {
+		g_notify_sent++;
+	}
+	else {
+		g_notify_fail++;
+		g_notify_last_rc = rc;
+		syslog(LOG_ERROR, "ble_host_smoke_c5: notify rc=%d (v=%u)",
+			   (int_t) rc, (uint_t) v);
+	}
+}
 
 static void
 report_intr_trace(void)
@@ -212,7 +435,9 @@ storm_monitor_task(EXINF exinf)
 
 	for (;;) {
 		sil_wrw_mem((void *) LP_AON_STORE4, esp_shim_int_count[1]);
-		sil_wrw_mem((void *) LP_AON_STORE5, esp_shim_int_count[2]);
+		/*  ★D-2c：STORE5 は write マーカへ転用したのでミラーしない
+		    （線2の storm 非発生は §4.3/§4.4 で live 実測済＝情報価値は尽きている．
+		    report_intr_rate() は両線ともコンソールへ出し続ける）．  */
 		(void) tslp_tsk(200000);	/* 200ms */
 	}
 }
@@ -295,20 +520,22 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 			g_adv_active = 0U;
 			start_advertising();
 		}
-#ifdef TOPPERS_ESP32C5_BT_SM
 		else {
-			/*  D-2d：接続ハンドル記録＋接続5秒後 SecReq のための計時開始  */
+			/*  D-2c：接続ハンドルを記録（notify_tick が SM 非依存で使う）  */
 			g_conn_handle = event->connect.conn_handle;
+#ifdef TOPPERS_ESP32C5_BT_SM
+			/*  D-2d：接続5秒後 SecReq のための計時開始  */
 			g_conn_secs = 0U;
 			g_sec_initiated = 0U;
-		}
 #endif
+		}
 		break;
 	case BLE_GAP_EVENT_DISCONNECT:
 		g_gap_disc_count++;
 		g_adv_active = 0U;
+		g_conn_handle = BLE_HS_CONN_HANDLE_NONE;	/* D-2c */
+		g_notify_enabled = 0U;						/* D-2c */
 #ifdef TOPPERS_ESP32C5_BT_SM
-		g_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 		g_sec_initiated = 0U;
 #endif
 		/*  ★ビルド未検証（同上）  */
@@ -377,6 +604,22 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 		g_adv_active = 0U;
 		syslog(LOG_NOTICE, "ble_host_smoke_c5: GAP ADV_COMPLETE reason=%d",
 			   (int_t) event->adv_complete.reason);
+		break;
+	case BLE_GAP_EVENT_SUBSCRIBE:
+		/*  D-2c：0xABF2 の CCCD 変化を追跡（attr_handle==val_handle）．
+		    cur_notify をそのまま反映（on/off両対応）．C3 と同一．  */
+		syslog(LOG_NOTICE,
+			   "ble_host_smoke_c5: GAP SUBSCRIBE attr=%d cur_notify=%d reason=%d",
+			   (int_t) event->subscribe.attr_handle,
+			   (int_t) event->subscribe.cur_notify,
+			   (int_t) event->subscribe.reason);
+		if (event->subscribe.attr_handle == g_notify_val_handle) {
+			g_notify_enabled = (uint8_t) event->subscribe.cur_notify;
+		}
+		break;
+	case BLE_GAP_EVENT_MTU:
+		syslog(LOG_NOTICE, "ble_host_smoke_c5: GAP MTU value=%d",
+			   (int_t) event->mtu.value);
 		break;
 	default:
 		break;
@@ -517,10 +760,37 @@ main_task(EXINF exinf)
 	ble_svc_gap_init();
 	ble_svc_gatt_init();
 	{
-		int	rc_name = ble_svc_gap_device_name_set(BLE_DEVICE_NAME);
-		if (rc_name != 0) {
+		int	rc;
+
+		/*
+		 *  ★D-2c/D-2d：自前サービス 0xABF0（0xABF1 READ／0xABF2 NOTIFY／
+		 *  0xABF3 WRITE／SM=ON なら 0xABF4 READ_ENC）を登録．count_cfg で
+		 *  ATT属性数を予約→add_svcs でキューへ積む（実登録は
+		 *  ble_hs_start→ble_gatts_start）．C3 ble_host_smoke.c:878-884 と同一．
+		 */
+		rc = ble_gatts_count_cfg(custom_svcs);
+		if (rc == 0) {
+			rc = ble_gatts_add_svcs(custom_svcs);
+		}
+		if (rc != 0) {
+			syslog(LOG_ERROR, "ble_host_smoke_c5: gatts svc reg rc=%d", (int_t) rc);
+		}
+		else {
+			syslog(LOG_NOTICE, "ble_host_smoke_c5: gatts svc 0xABF0 queued (rc=0)");
+		}
+#ifdef TOPPERS_C5_GATTS_REGDIAG
+		/*  判別計装（既定OFF）：count_cfg→add_svcs の rc（キュー時点の受理可否）を
+		    STORE9（DISC・接続前は0）へ．0xADD5<rc16>．rc=0=キュー受理．  */
+		sil_wrw_mem((void *) LP_AON_STORE9,
+					0xADD50000UL | ((uint32_t) rc & 0xFFFFUL));
+		/*  登録結果そのものは gatts_regdiag_cb が STORE8 へ書く  */
+		ble_hs_cfg.gatts_register_cb = gatts_regdiag_cb;
+#endif
+
+		rc = ble_svc_gap_device_name_set(BLE_DEVICE_NAME);
+		if (rc != 0) {
 			syslog(LOG_ERROR, "ble_host_smoke_c5: gap_device_name_set rc=%d",
-				   (int_t) rc_name);
+				   (int_t) rc);
 		}
 	}
 
@@ -572,14 +842,21 @@ main_task(EXINF exinf)
 	report_intr_rate();
 
 	syslog(LOG_NOTICE, "ble_host_smoke_c5: done (host task continues in background)");
-#ifdef TOPPERS_ESP32C5_BT_SM
 	/*
-	 *  ★D-2d：定常ループ（1秒周期）．接続5秒後に slave Security Request を
-	 *  送って bond をトリガする（bt5_security_tick）．main_task を返さず保持＝
-	 *  adv/接続/pairing を無期限に続ける（実機で bond を追試できる本番形）．
+	 *  ★定常ループ（1秒周期）．main_task を返さず保持＝adv/接続/notify/pairing を
+	 *  無期限に続ける（実機で D-2c/D-2d を追試できる本番形）．
+	 *    - notify_tick（D-2c）：SM 非依存＝無条件に回す．
+	 *    - bt5_security_tick（D-2d）：接続5秒後に slave Security Request を送って
+	 *      bond をトリガする（SM=ON のときのみ）．
+	 *  ★SM=OFF ビルドでも main_task が返らなくなる点が従来との差だが，
+	 *  SM=OFF は既定ではない（ESP32C5_BT_SM は既定ON）．D-2a/D-2b の判定は
+	 *  ループ突入前に済んでいる（milestone/adv_rc は上で出力済み）ので非回帰．
 	 */
 	for (;;) {
+		notify_tick();
+#ifdef TOPPERS_ESP32C5_BT_SM
 		bt5_security_tick();
+#endif
 #ifdef TOPPERS_ESP32C5_BT_RXTRACE
 		/*  RXTRACE の粗タイマ（1s毎）．enc 到着→ETIMEOUT の経過秒測定用．  */
 		{
@@ -604,5 +881,4 @@ main_task(EXINF exinf)
 #endif
 		(void) tslp_tsk(1000000);	/* 1s */
 	}
-#endif
 }

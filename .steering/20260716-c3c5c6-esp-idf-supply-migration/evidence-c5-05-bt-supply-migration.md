@@ -438,9 +438,177 @@ connect＋`ServicesResolved` まで到達している（§4.4）＝ATT サーバ
 - 電源は `sudo uhubctl -l 1-6 -p 3-4` のみ・毎サイクル **S3-B 在席確認**・書込前 **MAC 照合**。
 
 ### 7.6 LP_AON STORE の割当（C5 は **STORE0-9 のみ実在**＝全8+2 が使用中）
+<!-- ↓§8 は測定後に追記。§7 は測定前に commit 8312122 で固定済み・以降無改変 -->
+
 
 新規に要るのは **write マーカ（`0xABF3`）**。C3 は D-2c で「storm probe を無効化して 2reg を接続観測へ
 明け渡す」ことで解決した。**C5 も同じ判断**を採る：`storm_monitor_task` の **STORE5（線2累積ミラー）を
 write マーカへ転用**する（STORE4＝線1ミラーは残す）。妥当性＝**storm 非発生は §4.3/§4.4 で
 `line1=0 line2=0` を live 実測済＝線2 ミラーの情報価値は既に尽きている**。`report_intr_rate()` は
 両線ともコンソールへ出し続けるので観測能力は落ちない。
+
+---
+
+## 8. D-2c/D-2d 実機測定（2026-07-17）— **★D-2c・D-2d とも達成。予測は概ね的中**
+
+測定条件は §7.5 の約束どおり：BT 供給＝`ASP3_BT_IDF_V554=ON`（真の v5.5.4 タグ submodule）のまま、
+**全アーム UART0 採取で `rst:0x1 (POWERON)` を確認**、電源は `-l 1-6 -p 3-4` のみ・毎サイクル S3-B 在席確認・
+書込前 MAC 照合（`d0:cf:13:f0:a7:44`）。
+
+### 8.1 実装＝C3 からの逐語転写（新規設計なし）
+
+`apps/ble_host_smoke_c5/ble_host_smoke_c5.c` へ C3 `ble_host_smoke.c:206-313` を転写：
+`gatt_read_access`／`gatt_notify_access`／`gatt_write_access`／`custom_chrs[]`／`custom_svcs[]`／
+`notify_tick()`／`BLE_GAP_EVENT_SUBSCRIBE`・`_MTU` 処理／`ble_gatts_count_cfg`＋`ble_gatts_add_svcs`。
+`TOPPERS_C5_GATTS_REGDIAG`（C3 の判別計装・**既定 OFF**）も併せて転写した。
+
+### 8.2 予測の答合せ（§7）
+
+| 予測 | 結果 |
+|---|---|
+| **B1** cmake 変更不要 | **的中**。app ソース追加のみ。cmake は 1 行も触っていない |
+| **B2** 壁 0〜2 件 | **的中（下限）＝壁 0 件**。configure rc=0／build rc=0 が**一発**（C6 §15 と同型） |
+| **B3** `g_conn_handle` の ifdef 無条件化が要る | **的中**。SM 配下から出した。**SM=OFF ビルドの非回帰も実測**（8.5） |
+| **C1** READ/NOTIFY/WRITE 3方向とも通る | **的中**（8.3） |
+| **C2** `0xABF0` は BlueZ から可視 | **的中**（8.3）。C3 の「不可視」は再発せず |
+| **D1** `0xABF4` は bond 後に通る | **的中**（8.4） |
+| **D2** 未ペア READ が pairing を起動 | **的中**（8.4） |
+
+### 8.3 ★D-2c＝READ／NOTIFY／WRITE の3方向が実際に流れた
+
+**キャッシュ罠の手当**：本 app は特性を変更したため、**毎試行 `remove` してフレッシュ discovery**
+（§7.2 の手順化どおり）。`remove` 直後の再探索で `0xABF0`〜`0xABF4` が**全て再列挙**された
+（`service000e` ＝ `0000abf0-…`、`char000f/0011/0014/0016` ＝ `abf1/abf2/abf3/abf4`、
+`0xABF2` の CCCD `desc0013` ＝ `00002902` も出る）。⇒ **C2 的中・キャッシュ問題は発生せず**。
+
+ホスト側（BlueZ／D-Bus 直叩き）と**デバイス側 UART0 の突合せ**：
+
+```
+[D-2c] ABF1 0xABF1 READ -> 42 54 34 2d 4f 4b  (b'BT4-OK')        ← 固定値 read
+[D-2c] ABF2 0xABF2 READ -> 00 00 00 00                            ← カウンタ現在値
+       ABF2 NOTIFY -> 01 00 00 00 / 02 00 00 00 … 09 00 00 00     ← 8s で 9 通知（≒1/s）
+[D-2c] ABF3 WRITE 0x5a 0x01 -> ok
+```
+```
+（デバイス側 UART0・同一セッション live）
+ble_host_smoke_c5: GAP CONNECT status=0 handle=0
+ble_host_smoke_c5: GAP MTU value=256
+ble_host_smoke_c5: GAP SUBSCRIBE attr=18 cur_notify=1 reason=1    ← 0xABF2 の val_handle(0x12)
+ble_host_smoke_c5: GATT WRITE len=2 first=0x5a count=1            ← ★書いた値と完全一致
+```
+
+**独立物証（RTC マーカ・コンソール非依存）**：**cold boot 直後に「1接続＋1回だけ write」**という
+統制条件で採取（`esptool --before usb-reset --after no-reset read-mem`）：
+
+```
+0x600B1014 (STORE5) = 0x7717015a   ← ★write マーカ：count=1・先頭バイト=0x5a（予測どおり）
+0x600B1020 (STORE8) = 0x604e0001   ← CONNECT status=0 count=1
+0x600B1010 (STORE4) = 0x00000000   ← 線1ミラー＝0（コンソールの line1=0 と整合＝正常値）
+```
+⇒ §7.6 の **STORE5 転用は妥当**（app 自身のコメントが「STORE5 の reset 生存は未確認」と
+留保していた点も、本ラウンドで**実測により解消**）。
+
+### 8.4 ★D-2d＝`0xABF4` 暗号必須 READ が bond 後に通った（**フレッシュ 2/2**）
+
+**★「古い bond の再利用」を排除**（§7.4）：毎試行 **`remove`（forget）** してから接続し、
+リンク開始時点で **`paired=0 bonded=0`** を実測してから測った。
+
+```
+（trial 1・trial 2 とも同一）
+connected=1 resolved=1 paired=0 bonded=0                     ← ★フレッシュ（古いbondではない）
+[D-2d] 0xABF4 を UNPAIRED のまま READ
+  → 値が返らない（BlueZ が pairing を開始）                   ← D2 的中：暗号ゲートが効いている
+（デバイス側 UART0）
+  ble_host_smoke_c5: GAP PAIRING_COMPLETE status=0            ← SMP 成功
+  ble_host_smoke_c5: GAP ENC_CHANGE status=0                  ← 暗号確立
+  bond settled: paired=1 bonded=1
+[D-2d] bond 確立後に 0xABF4 を再 READ
+  ABF4 0xABF4 READ -> 42 54 34 2d 4f 4b  (b'BT4-OK')          ← ★D-2d 達成
+[D-2c control] ABF1 0xABF1 READ -> 42 54 34 2d 4f 4b          ← 同一リンクで平文readも健全
+```
+
+**A/B が揃っている**＝同一特性が **未ペアでは返らず／bond+暗号後には返る** ⇒
+**bond/LTK 暗号が end-to-end で実効**であることの物証（C3 と同じ判定基準）。
+RTC マーカ側も `0x600B1018 (STORE6) = 0x5de00000` ＝ `0x5DE0` タグ＋**status=0**（ENC_CHANGE 成功）
+でコンソールと一致（C5 は STORE6 が ENC/PAIRING 共用の last-wins。本ラウンドは
+PAIRING_COMPLETE → ENC_CHANGE の順に発火したため **ENC 側が残る**＝app コメントの
+想定順序とは逆だが、どちらも status=0 で成功）。
+
+**★正直な限定**：`PAIRING_COMPLETE status=0` と同時に出る `bonds our=0 peer=0` は **0 のまま**。
+C3 の判定基準（`status=0 かつ our_sec>=1`）のうち **our_sec>=1 は満たしていない**。
+`ble_store_util_count` を PAIRING_COMPLETE の瞬間に読む timing の問題か、`ble_store_config`
+（PERSIST=0＝RAM）の数え方かは**未確定**。ただし**機能的な証明は独立に立っている**
+（未ペアで弾かれ、bond 後に READ_ENC が実データを返した＝NimBLE が暗号リンクでしか許可しない経路）。
+⇒ **「暗号が実効」は証明済み／「bond が device 側 store に登録され再接続で再利用される」は未検証**。
+
+### 8.5 非回帰の実測（§7.5 の約束）
+
+| ビルド | 結果 | hal 参照 | 備考 |
+|---|---|---|---|
+| `c5_ble_d2cd`（SM=ON 既定・本番） | build rc=0 | **0** | 外部 `~/tools/esp-idf` 参照も **0** |
+| `c5_ble_smoff`（`ESP32C5_BT_SM=OFF`） | build rc=0 | **0** | **`0xABF4` の UUID が ELF から消える**＝SM ゲート完全 |
+| `c5_ble_regdiag`（`TOPPERS_C5_GATTS_REGDIAG`） | build rc=0 | **0** | `gatts_regdiag_cb` 実リンク＝判別計装は**いつでも使える** |
+| `c5_btsmoke_uart`（D-1） | build rc=0 | **0** | D-1 非回帰 |
+
+**★静的 tripwire（nm のシンボル数で判断しない＝rigor 標準）**：ELF のバイト直読みで
+GATT テーブルの**中身**まで確認した（`custom_chrs` @0x420621e8）：
+
+| chr | UUID リテラル | flags | access_cb |
+|---|---|---|---|
+| `0xABF1` | `1000f1ab` | `0x0002` READ | `gatt_read_access` |
+| `0xABF2` | `1000f2ab` | `0x0012` READ\|NOTIFY（+val_handle） | `gatt_notify_access` |
+| `0xABF3` | `1000f3ab` | `0x0008` WRITE | `gatt_write_access` |
+| `0xABF4` | `1000f4ab` | **`0x0202` READ\|READ_ENC** | `gatt_read_access` |
+| svc | `1000f0ab`＝`0xABF0` PRIMARY | → `custom_chrs` | |
+
+（`notify_tick`／`os_mbuf_append` が nm に出ないのは **inline 化**と NimBLE の
+**`r_os_mbuf_append` リネーム**が理由＝逆アセンブルで `jal <ble_gatts_notify_custom>` の実在を確認済。
+**シンボル不在を「機能不在」と誤読しない**）。
+
+### 8.6 ★方法論：ハーネスを先に疑って正解だった（rigor 標準の実例）
+
+D-2d は**最初 2 回失敗した**が、**どちらも DUT ではなくハーネスが原因**だった：
+
+1. **`bluetoothctl` へのパイプ入力は競合する**。agent の
+   `Accept pairing (yes/no):` プロンプトと service-discovery の出力バーストが
+   **後続コマンドを黙って食う**（`menu gatt` が消え、以降 全 GATT コマンドが
+   `Invalid command in menu main` になった）。`--- ラベル ---` の echo すら
+   bluetoothctl へのコマンドとして解釈された。
+2. **D-Bus 直叩きへ移行したが agent 未登録**だったため BlueZ が pairing を認可できず
+   `0xABF4` が NoReply。**この時点で「デバイスが SM を通せない」と誤断する誘惑があった**が、
+   直前の bluetoothctl 実行が `Bonded: yes/Paired: yes` に到達していた実測があったため
+   **ハーネス側を疑って正解**（HANDOFF §5-7「ログが途中で切れたら DUT より先にハーネスを疑え」の同型）。
+   → 自動承認 agent（`NoInputNoOutput`）を Python で登録して解決＝**無人で決定論的**に。
+3. 残る `NoReply` は **BlueZ が pairing 中に元の ReadValue を自動リトライしない**ため。
+   **bond 確立を待って再 READ すれば返る**（8.4）＝これも DUT の問題ではない。
+
+**★もう一つの自己訂正**：`STORE5=0` を見て一度「write マーカが動いていない」と疑い、
+さらに「`--before usb-reset` が app を再起動してマーカを消しているのでは」と仮説を立てたが、
+**device を `remove` して2連続 read しても `STORE8` が保持された**ことで**その仮説は反証**
+（＝`usb-reset` は ROM download モードに留め、app は走らない＝マーカは凍結される）。
+真相は「**長時間セッション中に app が一度再起動しており**（`STORE8` の connect count が
+~7 回接続したのに **1** だった）、その後の trial は `0xABF3` write をしないスクリプトだった」。
+**cold boot 直後に 1接続＋1write だけを行う統制条件**で測り直したら `0x7717015a` が出た（8.3）。
+⇒ **憶測で結論を書かず、統制した再測定で決着させた**。何が app を再起動したかは**未特定**（非ブロッキング）。
+
+---
+
+## 9. 結論（D-2c/D-2d）
+
+- **C5 は D-2c／D-2d とも実機達成**。`ASP3_BT_IDF_V554=ON`（**真の v5.5.4 タグ submodule 供給**）のまま、
+  **真の cold（`rst:0x1 POWERON`）**で
+  **`0xABF1` READ="BT4-OK"／`0xABF2` NOTIFY（LEカウンタ）／`0xABF3` WRITE（デバイス側 `first=0x5a` 一致）／
+  `0xABF4` 暗号必須 READ（フレッシュ bond 後に "BT4-OK"、未ペアでは弾かれる）**を OTA 実証。
+- **hal 参照 0・外部 esp-idf 参照 0** を全ビルドで維持（D-1/W2 の構成を壊していない）。
+- ∴ **C5 の BLE は C3 と同水準（connect＋bond/暗号＋フル GATT）に到達**。
+  §6.2-2 の申し送り「D-2c/D-2d 未達」は**解消**。
+
+### 9.1 残課題・申し送り
+
+1. **`bonds our=0 peer=0` の未確定**（8.4）。「暗号が実効」は証明済みだが
+   **「device 側 bond store への登録＋再接続での LTK 再利用」は未検証**。
+   検証するなら：bond 確立 → **切断 → 再接続（re-pair せず）→ `0xABF4` が読めるか**。
+2. **長時間 OTA セッション中の app 再起動**（8.6）＝原因未特定・非ブロッキング。
+3. C3 / C6 への供給移行の横展開は依然未着手（HANDOFF §4-3）。
+4. **`bluetoothctl` パイプ駆動は使わない**こと（8.6-1）。本ラウンドの
+   D-Bus スクリプト（agent 登録込み）が再利用可能な正しい型。
