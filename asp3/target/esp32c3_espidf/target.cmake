@@ -67,31 +67,20 @@ if(NOT DEFINED IDF_V554)
 endif()
 
 #
-#  ★BT（ESP32C3_BT=ON）だけは既定 OFF（＝hal供給を維持）＝C6 と同じ判断。
+#  ★2026-07-17：BT も esp-idf 供給へ移行したため **BT 例外は撤去**した。
 #
-#  理由（実測．evidence-c3-01 §5）：
-#   1. C3 BLE の実機エビデンス（D-1/D-2a/D-2b/D-2c/D-2d＝bond+暗号+
-#      フルGATTまで到達）は **すべて hal 基盤**で得られている。
-#   2. 基盤だけ esp-idf へ移すと **供給元の混成**が生じ，実測で
-#      `shared_periph_module_t`／`soc_root_clk_circuit_t` が未定義になって
-#      破綻する（hal の esp_hw_support ヘッダが esp-idf の soc/ 定義を見るため）。
-#      hal内・esp-idf内はそれぞれ整合しており，**壊れているのは «混ぜたこと»
-#      そのもの**（HANDOFF §4-3-5 が予告した罠＝C6 evidence-c6-01 §4-7 と同型）。
-#   3. BT を移すなら esp_bt.cmake の ESP_HAL_DIR 群も同時に移す必要があり，
-#      それは本ラウンドのスコープ外（BT供給移行＝別ラウンド．§4 の申し送り参照）。
+#  以前は「`ESP32C3_BT=ON` のときだけ既定 OFF」としていた。理由は
+#  **基盤だけ esp-idf へ移すと供給元の «混成» が生じて破綻する**
+#  （実測＝`shared_periph_module_t`／`soc_root_clk_circuit_t` 未定義）
+#  ことにあり，当時は `esp_bt.cmake` の `ESP_HAL_DIR` 35箇所が未移行だった。
+#  ⇒ 本ラウンドで **C5（`esp_bt.cmake` の `ESP_HAL_DIR`＝0箇所）の型を転写**して
+#     BT ツリーごと移行したので，**混成そのものが起きなくなった**＝例外が不要になった。
+#  ⇒ 供給元の食い違いは `esp_bt.cmake` 側で **FATAL_ERROR** として構造的に禁止する
+#     （`ASP3_BT_IDF_V554` は本 option に追従する）。
 #
-#  ⇒ WiFi／素のビルドは ON（HAL-free），BT は OFF（検証済み構成を維持）。
-#     ユーザーが明示的に -DASP3_ESPIDF_SUPPLY=ON を渡せばBTでも試せる（可逆）。
-#
-if(ESP32C3_BT)
-    set(_asp3_espidf_supply_default OFF)
-else()
-    set(_asp3_espidf_supply_default ON)
-endif()
-
 option(ASP3_ESPIDF_SUPPLY
-    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (v5.5.4 tag) instead of esp-hal-3rdparty. Default ON = HAL-free (WiFi / plain builds). Default OFF for ESP32C3_BT=ON: the C3 BLE hardware evidence (D-1..D-2d) exists only for the all-hal configuration, and mixing an esp-idf base with hal's esp_hw_support breaks (shared_periph_module_t). Reversible either way"
-    ${_asp3_espidf_supply_default})
+    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (true v5.5.4 tag) instead of esp-hal-3rdparty. Default ON = HAL-free (WiFi / BT / plain builds). OFF = hal fallback (reversible). ASP3_BT_IDF_V554 follows this so the base and the BT tree never mix"
+    ON)
 
 if(ASP3_ESPIDF_SUPPLY)
     set(ESP_SUP_DIR ${IDF_V554})

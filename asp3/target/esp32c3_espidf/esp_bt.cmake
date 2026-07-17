@@ -48,8 +48,11 @@ set(BT_TARGETDIR ${TARGETDIR}/bt)
 #  ★既定OFF（hal）を維持——実機bondがv5.5.4で通るまでデフォルトは切替えない．
 #  可逆：-DASP3_BT_IDF_V554=OFF でhalへ完全復帰．
 #
-option(ASP3_BT_IDF_V554 "ESP32-C3: use ESP-IDF v5.5.4 BT controller(bt.c)/phy/blobs instead of hal (default OFF=hal. NimBLE host stays on hal; VHCI is the ABI boundary. Reversible)" OFF)
-
+#  ★2026-07-17：`option(ASP3_BT_IDF_V554 … OFF)` の宣言はここから
+#  **下の供給移行ブロックへ移した**（既定を `ASP3_ESPIDF_SUPPLY` に追従させ，
+#  供給元の混成を FATAL_ERROR で禁止するため）。**ここで宣言すると，先に
+#  cache へ OFF が焼かれて追従ロジックが効かない**（実測：本移行中に踏んだ）。
+#
 #
 #  ------------------------------------------------------------------
 #  ★2026-07-17 provenance訂正（evidence-c3-01 §4）：上のブロックの
@@ -93,6 +96,53 @@ option(ASP3_BT_IDF_V554 "ESP32-C3: use ESP-IDF v5.5.4 BT controller(bt.c)/phy/bl
 #
 set(ASP3_BT_IDF_V554_DIR ${IDF_V554}
     CACHE STRING "ESP-IDF tree supplying the C3 BT controller/phy/blobs when ASP3_BT_IDF_V554=ON. Default = repo submodule esp-idf/ (the TRUE v5.5.4 tag, 735507283d). Override for A/B, e.g. -DASP3_BT_IDF_V554_DIR=/path/to/esp-idf-v6.1")
+
+#
+#  ------------------------------------------------------------------
+#  ★BT供給移行（2026-07-17．C5 esp_bt.cmake の型を転写＝新規設計ではない）
+#  ------------------------------------------------------------------
+#
+#  C5 は `esp_bt.cmake` の `ESP_HAL_DIR` を **0箇所**にして hal 参照 0 を達成した
+#  （実測）。C3 も同じ構造（35箇所）だったので同じ写像を当てた：
+#    - **BTツリー**（blob・ROM ld・bt/* ヘッダ・controller bt.c・NimBLE）＝`${BT_IDF}`
+#    - **基盤コンポーネント**（esp_hw_support/esp_rom/heap/log/riscv/efuse/…）＝`${ESP_SUP_DIR}`
+#    - **hal が分割した `esp_hal_<x>`** ＝ `${ESP_SUP_HAL_<x>}`（esp-idf では `components/hal` に集約）
+#
+#  ★**移行前は «BTツリー自体» が混成していた**（実測）：
+#    `bt/include/...` は `${BT_IDF}` から採るのに，`bt/common/`・`bt/porting/` は
+#    `${ESP_HAL_DIR}` 固定だった ⇒ `ASP3_BT_IDF_V554=ON` にすると
+#    **esp_bt.h だけ v5.5.4・porting は hal** という**版の混成**が起きていた。
+#    C5 は `bt/*` を全て同一ツリーから採る。本移行でそれに揃えた。
+#
+#  ★**供給元の «混成» を構造的に禁止する**（HANDOFF §4-3-5／C6 evidence-c6-01 §4-7）：
+#  hal 内・esp-idf 内はそれぞれ整合しているが，**混ぜると壊れる**
+#  （実測＝`shared_periph_module_t`／`soc_root_clk_circuit_t` 未定義）。
+#  ∴ `ASP3_BT_IDF_V554`（BTツリー）は **`ASP3_ESPIDF_SUPPLY`（基盤）に追従**させ，
+#  食い違う指定は **FATAL_ERROR で即座に落とす**（＝「混ぜた」ことに起因する
+#  難解なコンパイルエラーを，設定段階の明示的なエラーに置き換える）。
+#
+if(NOT DEFINED ASP3_BT_IDF_V554)
+    set(_asp3_bt_v554_default ${ASP3_ESPIDF_SUPPLY})
+else()
+    set(_asp3_bt_v554_default ${ASP3_BT_IDF_V554})
+endif()
+option(ASP3_BT_IDF_V554
+    "Supply the C3 BT tree (controller bt.c / phy / blobs / ROM ld / NimBLE) from the esp-idf submodule (TRUE v5.5.4 tag) instead of esp-hal-3rdparty. Defaults to ASP3_ESPIDF_SUPPLY so the base and the BT tree never mix. Reversible"
+    ${_asp3_bt_v554_default})
+
+if(ASP3_BT_IDF_V554 AND NOT ASP3_ESPIDF_SUPPLY)
+    message(FATAL_ERROR
+        "ASP3_BT_IDF_V554=ON requires ASP3_ESPIDF_SUPPLY=ON: the BT tree (esp-idf) and the "
+        "base components (hal) would come from different supplies. That mixture is known to "
+        "break (measured: shared_periph_module_t / soc_root_clk_circuit_t undefined) because "
+        "hal and esp-idf are each self-consistent but not interchangeable per-component. "
+        "Use -DASP3_ESPIDF_SUPPLY=ON (both esp-idf) or -DASP3_BT_IDF_V554=OFF (both hal).")
+endif()
+if(ASP3_ESPIDF_SUPPLY AND NOT ASP3_BT_IDF_V554)
+    message(FATAL_ERROR
+        "ASP3_ESPIDF_SUPPLY=ON with ASP3_BT_IDF_V554=OFF mixes an esp-idf base with a hal BT "
+        "tree; see above. Use -DASP3_ESPIDF_SUPPLY=OFF (both hal) for the hal fallback.")
+endif()
 
 if(ASP3_BT_IDF_V554)
     if(NOT EXISTS ${ASP3_BT_IDF_V554_DIR}/components/bt/controller/${BT_CHIP_SERIES}/bt.c)
@@ -167,35 +217,35 @@ list(APPEND ASP3_INCLUDE_DIRS
     ${BT_TARGETDIR}/stub/include
     ${TARGETDIR}/wifi
     ${BT_IDF}/components/bt/include/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/bt/common/include
-    ${ESP_HAL_DIR}/components/bt/common/ble_log/include
-    ${ESP_HAL_DIR}/components/bt/porting/include
-    ${ESP_HAL_DIR}/components/bt/porting/include/os
-    ${ESP_HAL_DIR}/components/esp_hw_support/include
-    ${ESP_HAL_DIR}/components/esp_hw_support/include/soc
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c3/include
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c3/private_include
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/include
-    ${ESP_HAL_DIR}/components/esp_system/include
+    ${BT_IDF}/components/bt/common/include
+    ${BT_IDF}/components/bt/common/ble_log/include
+    ${BT_IDF}/components/bt/porting/include
+    ${BT_IDF}/components/bt/porting/include/os
+    ${ESP_SUP_DIR}/components/esp_hw_support/include
+    ${ESP_SUP_DIR}/components/esp_hw_support/include/soc
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c3/include
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c3/private_include
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/include
+    ${ESP_SUP_DIR}/components/esp_system/include
     ${BT_IDF}/components/esp_wifi/include
     ${BT_IDF}/components/esp_phy/include
     ${BT_IDF}/components/esp_phy/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/esp_pm/include
-    ${ESP_HAL_DIR}/components/esp_timer/include
+    ${ESP_SUP_DIR}/components/esp_pm/include
+    ${ESP_SUP_DIR}/components/esp_timer/include
     ${BT_IDF}/components/esp_coex/include
-    ${ESP_HAL_DIR}/components/esp_rom/include
-    ${ESP_HAL_DIR}/components/esp_rom/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/esp_rom/${BT_CHIP_SERIES}/include/${BT_CHIP_SERIES}
-    ${ESP_HAL_DIR}/components/esp_rom/${BT_CHIP_SERIES}
-    ${ESP_HAL_DIR}/components/heap/include
-    ${ESP_HAL_DIR}/components/log/include
-    ${ESP_HAL_DIR}/components/riscv/include
-    ${ESP_HAL_DIR}/components/esp_hal_gpio/include
-    ${ESP_HAL_DIR}/components/esp_hal_gpio/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/esp_hal_clock/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/efuse/include
-    ${ESP_HAL_DIR}/components/efuse/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/esp_event/include
+    ${ESP_SUP_DIR}/components/esp_rom/include
+    ${ESP_SUP_DIR}/components/esp_rom/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_DIR}/components/esp_rom/${BT_CHIP_SERIES}/include/${BT_CHIP_SERIES}
+    ${ESP_SUP_DIR}/components/esp_rom/${BT_CHIP_SERIES}
+    ${ESP_SUP_DIR}/components/heap/include
+    ${ESP_SUP_DIR}/components/log/include
+    ${ESP_SUP_DIR}/components/riscv/include
+    ${ESP_SUP_HAL_gpio}/include
+    ${ESP_SUP_HAL_gpio}/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_HAL_clock}/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_DIR}/components/efuse/include
+    ${ESP_SUP_DIR}/components/efuse/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_DIR}/components/esp_event/include
 )
 
 if(ASP3_BT_IDF_V554)
@@ -231,9 +281,9 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     ${BT_IDF}/components/esp_phy/src/phy_common.c
     ${BT_IDF}/components/esp_phy/${BT_CHIP_SERIES}/phy_init_data.c
     ${BT_IDF}/components/esp_phy/src/lib_printf.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/periph_ctrl.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/esp_clk.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_clk.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/periph_ctrl.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/esp_clk.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_clk.c
     #  Wi-Fiと共有のcoexアダプタ（docs/wifi-shim.md．ダミーno-opテーブル
      #  登録＝ROM側coexist_funcs NULL回避）．BT単体でも要求される．
     ${TARGETDIR}/wifi/esp_coex_adapter.c
@@ -277,7 +327,7 @@ list(APPEND ASP3_LINK_LIBS
 #  4. ROM関数ld（esp_wifi.cmakeと同じ理由．BT固有分を追加）
 #  ------------------------------------------------------------------
 #
-set(BT_ROM_LD_DIR ${ESP_HAL_DIR}/components/esp_rom/${BT_CHIP_SERIES}/ld)
+set(BT_ROM_LD_DIR ${BT_IDF}/components/esp_rom/${BT_CHIP_SERIES}/ld)
 set(ESP_BT_ROM_LD_FILES
     ${BT_ROM_LD_DIR}/${BT_CHIP_SERIES}.rom.ld
     ${BT_ROM_LD_DIR}/${BT_CHIP_SERIES}.rom.api.ld
@@ -286,7 +336,7 @@ set(ESP_BT_ROM_LD_FILES
     ${BT_ROM_LD_DIR}/${BT_CHIP_SERIES}.rom.newlib.ld
     ${BT_ROM_LD_DIR}/${BT_CHIP_SERIES}.rom.libc-suboptimal_for_misaligned_mem.ld
     ${BT_ROM_LD_DIR}/${BT_CHIP_SERIES}.rom.version.ld
-    ${ESP_HAL_DIR}/components/riscv/ld/rom.api.ld
+    ${BT_IDF}/components/riscv/ld/rom.api.ld
     #  BT固有（実機rev v0.4＝ECO3以降．Phase A実機結果参照）．
     #  eco7版が正しい可能性あり＝実機で未解決ならここを見直す。
     ${BT_ROM_LD_DIR}/${BT_CHIP_SERIES}.rom.eco3_bt_funcs.ld
@@ -325,10 +375,10 @@ endif()
 
 if(ESP32C3_BT_NIMBLE)
 
-    set(NIMBLE_ROOT ${ESP_HAL_DIR}/components/bt/host/nimble/nimble/nimble)
-    set(NIMBLE_PORTING ${ESP_HAL_DIR}/components/bt/host/nimble/nimble/porting)
-    set(BT_ROOT ${ESP_HAL_DIR}/components/bt)
-    set(TINYCRYPT_ROOT ${ESP_HAL_DIR}/components/bt/host/nimble/nimble/ext/tinycrypt)
+    set(NIMBLE_ROOT ${BT_IDF}/components/bt/host/nimble/nimble/nimble)
+    set(NIMBLE_PORTING ${BT_IDF}/components/bt/host/nimble/nimble/porting)
+    set(BT_ROOT ${BT_IDF}/components/bt)
+    set(TINYCRYPT_ROOT ${BT_IDF}/components/bt/host/nimble/nimble/ext/tinycrypt)
 
     #  ---- D-2d：SMP（ペアリング／ボンディング）有効化 ----
     #  S3 BT-5（.steering/20260710-ble-bt5-security-notify）を «正» として
