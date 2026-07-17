@@ -67,20 +67,37 @@ if(NOT DEFINED IDF_V554)
 endif()
 
 #
-#  ★2026-07-17：BT も esp-idf 供給へ移行したため **BT 例外は撤去**した。
+#  ★BT（`ESP32C3_BT=ON`）だけ既定 OFF（＝hal 供給）＝**実機実測に基づく判断**。
 #
-#  以前は「`ESP32C3_BT=ON` のときだけ既定 OFF」としていた。理由は
-#  **基盤だけ esp-idf へ移すと供給元の «混成» が生じて破綻する**
-#  （実測＝`shared_periph_module_t`／`soc_root_clk_circuit_t` 未定義）
-#  ことにあり，当時は `esp_bt.cmake` の `ESP_HAL_DIR` 35箇所が未移行だった。
-#  ⇒ 本ラウンドで **C5（`esp_bt.cmake` の `ESP_HAL_DIR`＝0箇所）の型を転写**して
-#     BT ツリーごと移行したので，**混成そのものが起きなくなった**＝例外が不要になった。
-#  ⇒ 供給元の食い違いは `esp_bt.cmake` 側で **FATAL_ERROR** として構造的に禁止する
-#     （`ASP3_BT_IDF_V554` は本 option に追従する）。
+#  経緯（重要．根拠が2回入れ替わっている）：
+#   1. 当初は「基盤だけ esp-idf へ移すと供給元の «混成» が生じて破綻する」
+#      （実測＝`shared_periph_module_t`／`soc_root_clk_circuit_t` 未定義）
+#      という**ビルド上の理由**で例外を置いた（evidence-c3-01 §5-3）。
+#   2. evidence-c3-03 で **C5（`esp_bt.cmake` の `ESP_HAL_DIR`＝0箇所）の型を転写**し
+#      BT ツリーごと移行 ⇒ **混成が消滅＝ビルド上の理由は解消**した
+#      （`-DASP3_ESPIDF_SUPPLY=ON` で BT/BLE とも **hal 参照 0** でビルド成立）。
+#   3. **しかし実機 A/B（evidence-c3-03 §5）で «機能» の理由が新たに出た**：
+#      **真cold・同一 central・同一手順で bond が
+#        A: esp-idf 供給（真の v5.5.4 タグ）＝**失敗 2/2**（`AuthenticationCanceled`）
+#        B: hal 供給                        ＝**成功 2/2**（`Pairing successful`）**
+#      ＝**帰属は «供給»**（対照 B が同条件で成功しているので central/ハーネスの問題ではない）。
 #
+#  ⇒ **既定は «実機で bond が通る構成»（hal）を維持する**。
+#     `-DASP3_ESPIDF_SUPPLY=ON` で **hal 参照 0 の BT ビルドは可能**（adv/D-2b までは
+#     真cold で成立＝§5）。**bond が要らない用途なら選べる**＝可逆。
+#
+#  ★これは「ビルドが通ること」と「機能すること」が別だという実例であり，
+#    **hal 参照 0 を «達成した» ことと，それを «既定にしてよい» ことは別**である。
+#
+if(ESP32C3_BT)
+    set(_asp3_espidf_supply_default OFF)
+else()
+    set(_asp3_espidf_supply_default ON)
+endif()
+
 option(ASP3_ESPIDF_SUPPLY
-    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (true v5.5.4 tag) instead of esp-hal-3rdparty. Default ON = HAL-free (WiFi / BT / plain builds). OFF = hal fallback (reversible). ASP3_BT_IDF_V554 follows this so the base and the BT tree never mix"
-    ON)
+    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (true v5.5.4 tag) instead of esp-hal-3rdparty. Default ON = HAL-free (WiFi / plain). Default OFF for ESP32C3_BT=ON because bond FAILS 2/2 on the esp-idf BT supply while hal succeeds 2/2 under an identical true-cold A/B (evidence-c3-03 §5); the esp-idf BT build itself is HAL-free and reaches adv/D-2b, so -DASP3_ESPIDF_SUPPLY=ON is available when bond is not required. ASP3_BT_IDF_V554 follows this so the base and the BT tree never mix"
+    ${_asp3_espidf_supply_default})
 
 if(ASP3_ESPIDF_SUPPLY)
     set(ESP_SUP_DIR ${IDF_V554})
