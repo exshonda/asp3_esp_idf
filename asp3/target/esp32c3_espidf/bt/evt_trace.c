@@ -130,6 +130,102 @@ evt_trace_fast_dump(void)
 }
 #endif /* TOPPERS_C3_EVT_FAST_MAP */
 
+#ifdef TOPPERS_C3_EVT_FAST_MAP
+/*
+ *  ------------------------------------------------------------------
+ *  ★TX 側の計装（evidence-c3-05）＝「沈黙」か「誤答」かを分ける
+ *  ------------------------------------------------------------------
+ *
+ *  evidence-c3-04 の残＝**本計装は RX しか数えていない**ので
+ *  「ペリフェラルが応答しない」のか「誤った応答を返す」のか区別できなかった。
+ *
+ *  ★wrap 対象＝`ble_transport_to_ll_acl_impl(struct os_mbuf *om)`。
+ *  ★★**`ble_transport_to_ll_acl` を wrap しても «無言で効かない»**（本ラウンドで実測）：
+ *  そちらは transport.h の薄いシムで，`ble_hs_tx_data` は逆アセンブル上
+ *  **直接 `ble_transport_to_ll_acl_impl` へ j している**＝当該名の未定義参照が
+ *  存在せず `--wrap` が噛まない。**wrap が効かないと TX=0 になり «ペリフェラルは沈黙»
+ *  と読めてしまう＝捏造**。∴ **wrap は必ず «実際に噛んだか» を逆アセンブルで確認する**。
+ *  **選定理由（実測）**：host→controller の ACL 送出の chokepoint で，
+ *  **両ツリーで «同一シグネチャ»**（`ble_hs.c:880` の `ble_hs_tx_data()` から
+ *  クロスTU 呼出し＝`--wrap` が効く．両ツリーとも同じ行）。
+ *
+ *  ★★他の候補を «実測で» 却下した：
+ *   - `ble_sm_rx`：**関数ポインタ（`chan->rx_fn`）経由で呼ばれる**⇒`--wrap` 不可。
+ *   - `ble_l2cap_rx`：**両ツリーでシグネチャが違う**
+ *       hal    ＝ `(struct ble_hs_conn *conn, struct hci_data_hdr *hci_hdr, struct os_mbuf **om, …)`
+ *       esp-idf＝ `(uint16_t conn_handle, uint8_t pb, struct os_mbuf *om)`
+ *     ⇒ 引数から om を取り出す位置が違う（片方は二重ポインタ）＝**共通の parser を書けない**。
+ *     （既存 wrap は 5 引数＝hal 用に書かれている。RISC-V では a0-a2 がそのまま
+ *      素通しされるので **«数える» 用途では両ツリーで正しく動く**が，
+ *      **引数の «解釈» は esp-idf 側で無意味**＝だから RX の opcode 解析には使わない。）
+ *
+ *  ★om のレイアウト（両ツリー共通．`ble_hs_tx_data` は完全な ACL パケットを渡す
+ *    ＝同関数内の HCI ログが `data[0]=0x02`(ACL) を付けて om 全体をコピーしている）：
+ *      [0:1] handle+flags ／ [2:3] ACL len ／ [4:5] L2CAP len ／ [6:7] **CID** ／ [8] **payload 先頭**
+ *    ⇒ CID==0x0006 が SMP。`om_data` は **両ツリーとも os_mbuf の第1フィールド**（実測）。
+ */
+#define TX_FAST_BASE	((volatile uint32_t *) 0x50000160UL)
+
+volatile uint32_t	g_tx_total;		/* ble_transport_to_ll_acl 呼出し総数 */
+volatile uint32_t	g_tx_smp;		/* うち CID==6（SMP）             */
+volatile uint32_t	g_tx_att;		/* うち CID==4（ATT）             */
+volatile uint32_t	g_tx_seq_n;		/* 記録済み SMP opcode 数（最大12） */
+volatile uint8_t	g_tx_seq[12];	/* 送出した SMP opcode の順        */
+
+static void
+tx_trace_fast_dump(void)
+{
+	volatile uint32_t	*f = TX_FAST_BASE;
+	uint32_t			i;
+
+	f[0] = 0x5C3E0002U;
+	f[1] = g_tx_total;
+	f[2] = g_tx_smp;
+	f[3] = g_tx_att;
+	for (i = 0U; i < 3U; i++) {
+		f[4U + i] = ((uint32_t) g_tx_seq[i * 4U + 0U])
+				  | ((uint32_t) g_tx_seq[i * 4U + 1U] << 8)
+				  | ((uint32_t) g_tx_seq[i * 4U + 2U] << 16)
+				  | ((uint32_t) g_tx_seq[i * 4U + 3U] << 24);
+	}
+}
+
+extern int __real_ble_transport_to_ll_acl_impl(void *om);
+
+int
+__wrap_ble_transport_to_ll_acl_impl(void *om)
+{
+	if (om != (void *) 0) {
+		/*  om_data＝os_mbuf の第1フィールド（両ツリー実測）  */
+		const uint8_t	*d = *(const uint8_t **) om;
+
+		g_tx_total++;
+		if (d != (const uint8_t *) 0) {
+			uint16_t	cid = (uint16_t) (d[6] | ((uint16_t) d[7] << 8));
+
+			if (cid == 0x0006U) {			/* SMP */
+				g_tx_smp++;
+				if (g_tx_seq_n < 12U) {
+					g_tx_seq[g_tx_seq_n] = d[8];	/* SMP opcode */
+					g_tx_seq_n++;
+				}
+			}
+			else if (cid == 0x0004U) {		/* ATT */
+				g_tx_att++;
+			}
+		}
+		/*  ★ACL TX は «毎パケット» だが pairing 中は十数回なので dump してよい。
+		    それでも hot path 化を避けるため SMP/ATT のときだけ dump する
+		    （evidence-c3-04 §5.1＝hot path で 20 語 dump したら hal でも bond が
+		     落ちた＝計装が侵襲的になった，の再発防止）。  */
+		if (g_tx_smp != 0U || g_tx_att != 0U) {
+			tx_trace_fast_dump();
+		}
+	}
+	return __real_ble_transport_to_ll_acl_impl(om);
+}
+#endif /* TOPPERS_C3_EVT_FAST_MAP */
+
 static void
 evt_trace_pack(void)
 {
@@ -182,6 +278,13 @@ esp_evt_trace_reset(void)
 	g_evt_cmd_status = 0U;
 	g_evt_le_other = 0U;
 	g_evt_seq_n = 0U;
+#ifdef TOPPERS_C3_EVT_FAST_MAP
+	g_tx_total = 0U;
+	g_tx_smp = 0U;
+	g_tx_att = 0U;
+	g_tx_seq_n = 0U;
+	tx_trace_fast_dump();
+#endif
 	evt_trace_pack();
 }
 

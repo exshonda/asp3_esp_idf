@@ -649,6 +649,10 @@ if(ESP32C3_BT_NIMBLE)
             -Wl,--wrap=ble_mqueue_put
             -Wl,--wrap=ble_mqueue_get
             -Wl,--wrap=ble_l2cap_rx
+            #  ★TX側（evidence-c3-05）＝「沈黙」か「誤答」かの判別。
+            #  ble_transport_to_ll_acl は **両ツリーで同一シグネチャ**
+            #  （ble_hs.c:880 の ble_hs_tx_data からクロスTU 呼出し）。
+            -Wl,--wrap=ble_transport_to_ll_acl_impl
         )
         list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_BT_EVT_TRACE)
     endif()
