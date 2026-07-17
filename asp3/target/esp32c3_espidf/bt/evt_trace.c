@@ -326,13 +326,18 @@ __wrap_ble_hs_hci_evt_process(void *ev)
 		else if (code == 0x0FU) {		/* Command Status */
 			g_evt_cmd_status++;
 		}
-		else if (code == 0x3EU && p[2] == 0x01U) {	/* LE Connection Complete */
+		else if (code == 0x3EU && (p[2] == 0x01U || p[2] == 0x0AU)) {
+			/*  LE Connection Complete (0x01) *or* LE Enhanced Connection
+			    Complete (0x0A).  ★実測(rc-c3 C0/2026-07-18)：esp-idf v5.5.4 の
+			    C3 controller は «Enhanced»(0x0A) を出す＝旧条件 0x01 のみでは
+			    over-determined 0 になる（seq に 0xea を観測・app CONN=1 と乖離）。
+			    C5-10 §7.6 の «Enc Change v2» と同型の «新コード盲»．  */
 			g_evt_conn_cmpl++;
 		}
 		else if (code == 0x3EU && p[2] != 0x05U) {	/* その他 LE Meta */
 			g_evt_le_other++;
 		}
-		if (code == 0x08U) {			/* Encryption Change */
+		if (code == 0x08U || code == 0x59U) {	/* Encryption Change (0x08) or v2 (0x59) */
 			g_evt_enc_chg++;
 			g_evt_enc_status = p[2];	/* status バイト */
 			g_evt_enc_hrt = fch_hrt();	/* Enc Change 到着時刻 */
