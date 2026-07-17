@@ -1,0 +1,155 @@
+# evidence-c5-10 — E-RX：C5 × Android の失敗時に «SMP PDU はそもそも流れているか»（測るだけ・修正はしない）
+
+**作成**: 2026-07-17 ／ **担当**: E-RX 専任エージェント
+**ミッション**: Phase 1 E-RX（`PLAN-next-phase.md`）＝**bond 失敗時の SMP 往復の可視化**。
+**修正は書かない。** 他エージェントの evidence/review/PLAN は**読むだけ**。
+
+---
+
+## 1. Step 1：計器の同定（★実測・憶測なし）
+
+### 1.1 `ESP32C5_BT_RXTRACE` の実体（既定 OFF）
+
+**実装**: `asp3/target/esp32c5_espidf/bt/rx_trace.c`（本リポジトリ側＝submodule ではない）
+**配線**: `asp3/target/esp32c5_espidf/esp_bt.cmake:505-516`（拡張前）
+
+| wrap 対象 | 呼出し元（クロスTUか） | 数えるもの |
+|---|---|---|
+| `ble_hs_hci_evt_process` | `ble_hs.c`（クロスTU） | 全 HCI EVT。`0x08`=Encryption Change で enc ゲートを立てる |
+| `ble_sm_enc_change_rx` | `ble_hs_hci_evt.c` のテーブル（クロスTU・関数ポインタ） | SM 層への Enc Change dispatch |
+| `ble_mqueue_put` | `ble_hs.c:849`＝`ble_hs_rx_data`（クロスTU） | controller→host ACL が rx_q へ届いた数 |
+| `ble_sm_tx` | ★下記 1.3 | 我々の SM の SMP 送出（**盲点あり**） |
+| `ble_transport_to_ll_acl_impl` | `ble_hs.c:880` の `ble_transport_to_ll_acl` は `transport/monitor.h:57-59` の **inline** で `_impl` を呼ぶ＝各呼出し元 TU から `_impl` への undefined 参照（クロスTU） | host→controller ACL |
+
+**記録先＝STORE3（`0x600B100C`）**：`[31:28]enc_chg [27:24]sm_enc_rx [23:16]put [15:8]sm_tx [7:0]to_ll`。
+★**put/sm_tx/to_ll は «enc_chg!=0 でゲートした暗号後デルタ»**（`rx_trace_pack()`：`base = enc_chg!=0`、
+base=0 なら 3 フィールドとも 0）。
+
+**C3 の前例との関係**：C3 は `evt_trace.c`（RX 側のみ）。C5 の rx_trace.c はその改良版（双方向）で、
+**D-2d（`docs/bt-shim.md:2646-2678`）で実際に非0 を返した実績がある**
+（`enc_chg=1・sm_enc_rx=1・put=1・sm_tx=0・to_ll=1`）＝put/to_ll/evt_process/enc_change_rx の
+4 wrap は**歴史的に較正済み（非0 を出したことがある）**。
+
+### 1.2 ★そのままでは E-RX に使えない理由（本ラウンドの拡張の根拠）
+
+**現病態は «暗号前»**：`ENC=0x5de00007`＝`ble_sm_connection_broken()`＝HCI Encryption Change は
+**来ない**⇒ `enc_chg==0` ⇒ **STORE3 の put/sm_tx/to_ll フィールドは構造的に常に 0**。
+⇒ **「0 を読んだ」が «計器のゲートが閉じている» と «本当に流れていない» を区別できない
+＝ over-determined**（C5 `0x5DC0`・C6 `0xABF3` と同じ型）。**D-2d の問い（暗号後）用の計器であり、
+E-RX の問い（暗号前）には «そのままでは» 盲**。
+
+### 1.3 ★★発見：`--wrap=ble_sm_tx` は «ble_sm.c 内部の 9 呼出し点に噛まない»（現行バグではなく計器の盲点・潜在）
+
+GNU ld の `--wrap` は **undefined 参照のみ**を差し替える。`ble_sm_tx` は `ble_sm.c` で定義され、
+**同一 TU 内から 9 箇所**（`ble_sm.c:945`[Pairing Failed]・`:1908`・`:2175`[Pairing Response 系]・
+`:2358-2498`[鍵配布 `ble_sm_key_exch_exec`]・`:3384`）で呼ばれる＝**これらは wrap されない**。
+噛むのは **クロスTU の 6 箇所のみ**（`ble_sm_lgcy.c:151,215`・`ble_sm_sc.c:408,485,652,839`）。
+
+⇒ **含意（過去記録への影響・事実と推測を分けて書く）**：
+- **事実**：D-2d の決定的マーカ「`sm_tx=0`」が測っていたのは «クロスTU 6 箇所» のみで、
+  **鍵配布（`ble_sm.c:2358-2498`）はもともと観測不能**だった。
+- **事実**：D-2d の結論（PVCY=0 が真因）は `gcc -E` での実効値確認＋PVCY 有効化で bond 成立、
+  という**独立証拠で確定しており、揺らがない**。
+- **推測**：`sm_tx=0` の読みは「たまたま正しい向きを指した over-determined な 0」だった可能性が高い。
+- **本ラウンドの設計への反映**：我々の SMP 送出は SM 層でなく
+  **`ble_transport_to_ll_acl_impl`（全 host TX の漏斗・クロスTU 実証済）で L2CAP CID を覗いて数える**。
+
+### 1.4 拡張（E-RX 計器）＝«暗号前» の SMP 生カウンタ・タグ付き
+
+**変更ファイル（全列挙・submodule は 1 行も触っていない）**：
+
+| ファイル | 変更 |
+|---|---|
+| `asp3/target/esp32c5_espidf/bt/rx_trace.c` | E-RX セクション追加：SMP(CID=0x0006) 判定 `erx_acl_is_smp_first()`（`os_mbuf_copydata` 8B・passive）、カウンタ 3 本、`erx_pack()`→STORE4、新 wrap `__wrap_ble_l2cap_rx` |
+| `asp3/target/esp32c5_espidf/esp_bt.cmake` | RXTRACE ブロックへ `-Wl,--wrap=ble_l2cap_rx` 追加＋**RXTRACE×PEND_DIAG 同時 ON を FATAL**（STORE4 二重書込み防止） |
+| `apps/ble_host_smoke_c5/ble_host_smoke_c5.c` | `storm_monitor_task` の STORE4 旧ミラー（`int_count[1]`＝常に 0 と実測済）を RXTRACE=ON 時に停止＝**1 レジスタ 1 書き手** |
+
+**覗きの根拠（v5.5.4 submodule ソースで確認・読んだだけ）**：
+- `ble_mqueue_put` 時点の om は **HCI ACL ヘッダ付き**（strip は後段 `ble_hs_hci_evt_acl_process`＝
+  `ble_hs_hci_evt.c:1943` の `data_hdr_strip`）。RX first PB=2（`BLE_HCI_PB_FIRST_FLUSH`、
+  `hci_common.h:2842-2844`）。CID＝byte6|7。
+- `ble_transport_to_ll_acl_impl` 時点の om は **HCI ACL ヘッダ付き**（`ble_hs_hci.c:829-859`
+  `ble_hs_hci_acl_hdr_prepend` が先に付ける）。TX first PB=0。CID＝byte6|7。
+- `ble_l2cap_rx(uint16_t conn_handle, uint8_t pb, struct os_mbuf *om)`（この v5.5.4 tree の
+  シグネチャ・`ble_l2cap.c:348`）＝HCI ヘッダ strip 済・CID＝byte2|3（pb=2 のときのみ L2CAP ヘッダ）。
+  呼出し元 `ble_hs_hci_evt.c:1968`＝**クロスTU＝wrap 可（逆asmで確認する・§3）**。
+- 継続フラグメント（PB=1）は CID を持たない＝数えない＝**カウント単位は «L2CAP PDU 数»**
+  （SMP PDU は SC Public Key 含め first に L2CAP ヘッダが乗る）。
+
+**記録先＝STORE4（`0x600B1010`）**：
+```
+STORE4 = 0xE2 << 24 | smp_rx_put(8) << 16 | smp_rx_l2(8) << 8 | smp_tx_ll(8)   （各飽和 255）
+```
+- **タグ `0xE2`**＝E-RX（E1 の `0xE1` と判別可能）。**全 wrap から無条件書込み**＝
+  HCI evt が 1 個でも流れれば立つ＝**«wrap が噛んで走った» ことの生存証明**（0x00000000 と判別）。
+- **STORE4 選定の判断（ミッション要求の明記）**：E1 計器（PEND_DIAG）は `evidence-c5-09` で
+  **完結済（used=0 で①死亡）＝上書きしてよい**。同乗は 32bit に収まらないため**上書きを選択**。
+  本ビルドは `ESP32C5_BT_PEND_DIAG=OFF`＋cmake FATAL で二重書込みを機械的に排除。
+  STORE6 は ENC と共用＝触らない。STORE0/2/5/8/9＝証拠、1＝RTC cal 予約、7＝bt_shim 予約。
+- **hot path 負荷**：per-ACL で 8B の `os_mbuf_copydata`＋比較＋LP_AON 書込み 2 本
+  （STORE3 既存＋STORE4）。dump なし。20語 dump 事故（evidence-c3-04）とは 2 桁違う軽さ——
+  ただし**「軽いはず」は主張しない。C0（§4）で検定する**。
+
+### 1.5 判定表（読み方・測定前に固定）
+
+| smp_rx_put | smp_rx_l2 | smp_tx_ll | 意味 |
+|---|---|---|---|
+| 0 | 0 | 0（タグあり） | **SMP が電波上に無い**（ただし §2 の R0 の限界を参照） |
+| >0 | 0 | — | **rx_q に入ったが host タスクが降ろしていない**＝RX 配送の内側（eventq/OSAL） |
+| >0 | >0 | 0 | **受けて dispatch したが我々は 1 個も SMP を出していない**＝SM 実行 or TX 経路 |
+| >0 | >0 | >0 | **双方向に流れている**＝カウント値で «どの段で止まったか» を BlueZ 成功プロファイルと比較 |
+
+---
+
+## 2. Step 2：事前登録（★測定前に commit・以後書き換えない）
+
+### 2.1 分岐と確率（PLAN の 3 分岐＋排他的に細分）
+
+前提条件：タグ `0xE2` が読めること（読めなければ**測定不成立＝結果を語らない**）。
+
+| # | 実測パターン | PLAN 分岐 | 登録確率 | 嫌疑（外れた時の意味も含む） |
+|---|---|---|---|---|
+| **R0** | put=0 ∧ l2=0 ∧ txll=0 | (b) の変種 | **15%** | **SMP 以前に切断**（LL/GAP 層 or Android が SMP 前に降りた）。★この 0 は «計器が盲» と区別が要る＝**C0 較正（BlueZ で 3 カウンタ非0）が成立して初めて「流れていない」と言える**。較正が立たなければ**判定不能と書く** |
+| **R1** | put>0 ∧ l2=0 | **(c) 来たが処理していない** | **8%** | **RX 配送の内側（shim/OSAL の eventq drain）**。★iPhone/BlueZ が通る事実と整合させるには「Android 特有の PDU パターン（連発・フラグメント）でのみ露呈」が必要＝それも記録する |
+| **R2** | put>0 ∧ l2>0 ∧ txll=0 | **(a) 送っていない** | **12%** | **SM が応答を生成しない or L2CAP→transport 間の TX 経路**。同じく Android 特異性の説明が必要 |
+| **R3** | put>0 ∧ l2>0 ∧ txll>0 | (a)(b)(c) の**どれでもない**＝**双方向に流れて途中で死ぬ** | **60%** | **SMP 手順の «段» で死ぬ**（feature 交渉・crypto 値・我々の Pairing Failed 送出等）。カウント値と BlueZ プロファイルの比較で段を局在化。**«即» エラー＋DISC reason=0x13（Android が切った）と最も整合**（待ちの署名なしで能動的に降りるのは、拒絶 PDU を見た側の挙動） |
+| **R4** | txll>0 ∧ put=0 | (b) 送ったが応答が来ない | **5%** | 我々が先に送った（app の 5s Security Request）のに peer の SMP が 1 個も来ない＝RX 配送 or 無線側。«即» エラーとは整合しにくい＝低確率 |
+
+**R3 の副予測**：txll==1（Pairing Response のみで peer が降りる）＝20%／txll≥2（もっと進む）＝40%。
+
+**★「iPhone/BlueZ は通るのに Android は落ちる」への自問（各分岐）**：R1/R2 は
+「配送機構の全損」では既知（成功セルの存在）と矛盾する＝**成立するなら «Android 特有の負荷・
+パターン依存» の形のみ**。R3 は Android 固有の feature 交渉（CTKD/LinkKey bit・IO caps・MITM 等）
+が最も自然に説明する。R0/R4 は «即» の観測と噛み合いが悪い＝低確率。
+
+### 2.2 計器そのものの事前予測
+
+| # | 予測 | 登録値 |
+|---|---|---|
+| **P_C0** | 計装込みビルドで C5 × BlueZ が bond する（＝計装は非破壊） | **80%** |
+| **P_TAG** | タグ `0xE2` が読める（wrap 生存） | **90%** |
+| **P_CAL** | BlueZ 成功セルで **3 カウンタすべて非0**（＝陽性対照成立） | **85%** |
+| **P_BASE** | 失敗セルで STORE6/8/9 が既知ベースライン（`0x5de00007`・CONN ok・DISC 0x13）と一致（＝計装が病態を変えない） | **85%** |
+
+**★E1 の教訓の適用（P_USED 70% を外した前例）**：カウンタごとに「較正が立たなかったらその
+カウンタの 0 は語らない」を個別に適用する（3 本まとめて生死判定しない）。
+
+### 2.3 射程（超えて書かない）
+
+- 語れるのは **軸 A（C5 × Android が bond に到達しない）のみ**。軸 B/C へ外挿しない。
+- 本計器は **SMP の «個数» のみ**。中身（opcode・reason）・時刻は持たない＝
+  「誰が・なぜ切るか」に**個数だけで答えられない場合は «答えられない» と書く**。
+
+---
+
+## 3. 計器の検定（ビルド・逆アセンブル）＝測定前・§2 は書き換えていない
+
+（ビルド後に記入）
+
+## 4. C0（BlueZ・健全セル）
+
+（実測後に記入）
+
+## 5. 失敗セル（C5 × Android・ユーザー実施）
+
+（実測後に記入）

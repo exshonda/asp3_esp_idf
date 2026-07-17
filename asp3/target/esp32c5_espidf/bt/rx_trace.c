@@ -61,6 +61,81 @@ volatile uint32_t	g_rx_toll_at_enc;	/* 同 to_ll 基点                  */
 volatile uint32_t	g_rx_tick;			/* app 1s カウンタ                */
 volatile uint32_t	g_rx_enc_tick;		/* Enc Change 到着時の tick        */
 
+/*
+ *  （E-RX／evidence-c5-10）«暗号前» の SMP PDU 往復可視化（生カウンタ・タグ付き）
+ *
+ *  背景：上の STORE3 パックは put/sm_tx/to_ll を «enc_chg!=0 でゲート» した
+ *  暗号後デルタで記録する（D-2d の問い＝暗号後の鍵配布用）。C5×Android の
+ *  現病態は ENC_CHANGE 自体が status=7(ENOTCONN)＝暗号が成立しないため、
+ *  ゲートが開かず STORE3 の 3 フィールドは常に 0 ＝「計器が見えていない 0」
+ *  と「本当に流れていない 0」を区別できない（over-determined）。
+ *  ⇒ 本セクションは «SMP(L2CAP CID=0x0006) だけ» を «ブート起点の生カウンタ» で
+ *  数え、タグ 0xE2 付きで STORE4 へミラーする。
+ *
+ *  ★ble_sm_tx の --wrap は «ble_sm.c 内部の 9 呼出し点には噛まない»
+ *  （同一TU参照は undefined にならず --wrap 対象外＝GNU ld の仕様。
+ *   Pairing Response／Pairing Failed／鍵配布 ble_sm_key_exch_exec が全部これ）。
+ *  ⇒ 我々の SMP 送出は SM 層でなく «トランスポート層»
+ *  （__wrap_ble_transport_to_ll_acl_impl＝全 host TX の漏斗・クロスTU実証済）で
+ *  L2CAP CID を覗いて数える＝SM 内のどこから出た SMP でも必ず通る。
+ *
+ *  覗き方（passive・8バイト copy のみ・hot path に dump は置かない）：
+ *    - mqueue_put／to_ll_impl 時点の om は HCI ACL ヘッダ(4B)つき
+ *      （RX は ble_hs_hci_evt_acl_process が «後で» strip する／TX は
+ *       ble_hs_hci_acl_hdr_prepend が «先に» 付ける＝v5.5.4 ソースで確認）。
+ *      PB フラグ＝byte1[5:4]（RX first=2=BLE_HCI_PB_FIRST_FLUSH／
+ *      TX first=0=BLE_HCI_PB_FIRST_NON_FLUSH）。first のみ L2CAP ヘッダが
+ *      byte4.. に続き CID＝byte6|byte7<<8。SMP＝CID 0x0006。
+ *      継続フラグメント(PB=1)は CID を持たないので数えない＝«L2CAP PDU 数» を数える。
+ *    - ble_l2cap_rx(conn_handle, pb, om) は HCI ヘッダ strip 済＝CID は byte2|byte3<<8。
+ *      クロスTU（ble_hs_hci_evt.c:1968 → ble_l2cap.c:348）＝--wrap 有効（要逆asm確認）。
+ *    - os_mbuf_copydata で読む（mbuf チェーン跨ぎ安全・消費しない）。
+ *
+ *  STORE4（0x600B1010）レイアウト（各バイト飽和255）：
+ *    [31:24] タグ 0xE2（＝E-RX 実験。無条件書込み＝«wrap が1回でも走った» 証明。
+ *            E1 の 0xE1 と判別可能。STORE4 の前用途 E1 計器は evidence-c5-09 で
+ *            完結済＝上書きしてよい。PEND_DIAG と RXTRACE の同時 ON は禁止）
+ *    [23:16] smp_rx_put  ＝ 対向の SMP が host rx_q に届いた数（ble_mqueue_put）
+ *    [15: 8] smp_rx_l2   ＝ 対向の SMP が host タスクで dispatch された数（ble_l2cap_rx）
+ *    [ 7: 0] smp_tx_ll   ＝ 我々の SMP が controller へ渡った数（to_ll_acl_impl）
+ */
+volatile uint32_t	g_erx_smp_put;		/* RX：SMP(CID=6) が rx_q へ届いた数   */
+volatile uint32_t	g_erx_smp_l2;		/* RX：SMP が l2cap dispatch された数  */
+volatile uint32_t	g_erx_smp_txll;		/* TX：SMP が controller へ渡った数    */
+
+#define ERX_RTC			((volatile uint32_t *) 0x600B1010UL)	/* C5 LP_AON STORE4 */
+
+extern int os_mbuf_copydata(const void *om, int off, int len, void *dst);
+
+static void
+erx_pack(void)
+{
+	uint32_t p = g_erx_smp_put;
+	uint32_t l = g_erx_smp_l2;
+	uint32_t t = g_erx_smp_txll;
+
+	if (p > 255U) { p = 255U; }
+	if (l > 255U) { l = 255U; }
+	if (t > 255U) { t = 255U; }
+	*ERX_RTC = 0xE2000000UL | (p << 16) | (l << 8) | t;
+}
+
+/*  ACL(HCIヘッダ付き) om が «SMP を運ぶ first フラグメント» かを判定する．
+    first_pb＝RX なら 2（FIRST_FLUSH）／TX なら 0（FIRST_NON_FLUSH）．  */
+static int
+erx_acl_is_smp_first(void *om, uint32_t first_pb)
+{
+	uint8_t		h[8];
+
+	if (os_mbuf_copydata(om, 0, 8, h) != 0) {
+		return 0;						/* 8B 未満＝L2CAP ヘッダ無し */
+	}
+	if ((((uint32_t) h[1] >> 4) & 0x3U) != first_pb) {
+		return 0;						/* 継続フラグメント等 */
+	}
+	return (((uint32_t) h[6] | ((uint32_t) h[7] << 8)) == 0x0006U);
+}
+
 static void
 rx_trace_pack(void)
 {
@@ -98,6 +173,8 @@ __wrap_ble_hs_hci_evt_process(void *ev)
 			g_rx_toll_at_enc = g_rx_toll;
 		}
 		rx_trace_pack();
+		erx_pack();			/*  （E-RX）タグ 0xE2 の生存証明＝HCI evt が1個でも
+								流れれば STORE4 が立つ（SMP 0 個でも判別可能）  */
 	}
 	return __real_ble_hs_hci_evt_process(ev);
 }
@@ -122,8 +199,36 @@ int
 __wrap_ble_mqueue_put(void *mq, void *evq, void *om)
 {
 	g_rx_put++;
+	/*  （E-RX）controller→host ACL＝HCI ヘッダ付き・RX first PB=2  */
+	if (erx_acl_is_smp_first(om, 2U)) {
+		g_erx_smp_put++;
+	}
 	rx_trace_pack();
+	erx_pack();
 	return __real_ble_mqueue_put(mq, evq, om);
+}
+
+/*  （E-RX）RX：host タスクが rx_q から降ろした ACL を L2CAP へ dispatch する点．
+    ble_hs_hci_evt_acl_process(ble_hs_hci_evt.c)→ble_l2cap_rx(ble_l2cap.c)＝
+    クロスTU＝--wrap 有効（逆asmで確認すること）．この時点で HCI ヘッダは
+    strip 済＝pb は引数・CID は om の byte2|byte3．
+    smp_put>0 かつ smp_l2==0 なら «rx_q に入ったが host タスクが処理していない»
+    ＝RX 配送の内側（eventq/OSAL）へ嫌疑が絞れる．  */
+extern int __real_ble_l2cap_rx(uint16_t conn_handle, uint8_t pb, void *om);
+
+int
+__wrap_ble_l2cap_rx(uint16_t conn_handle, uint8_t pb, void *om)
+{
+	if (pb == 2U) {						/* BLE_HCI_PB_FIRST_FLUSH */
+		uint8_t		h[4];
+
+		if (os_mbuf_copydata(om, 0, 4, h) == 0
+			&& (((uint32_t) h[2] | ((uint32_t) h[3] << 8)) == 0x0006U)) {
+			g_erx_smp_l2++;
+		}
+	}
+	erx_pack();
+	return __real_ble_l2cap_rx(conn_handle, pb, om);
 }
 
 /*  TX：我々の SM が SMP PDU を L2CAP へ送出しようとした点．  */
@@ -144,6 +249,13 @@ int
 __wrap_ble_transport_to_ll_acl_impl(void *om)
 {
 	g_rx_toll++;
+	/*  （E-RX）host→controller ACL＝HCI ヘッダ付き・TX first PB=0．
+	    ★ここが我々の «全» SMP 送出の漏斗（Pairing Response/Failed/鍵配布を含む）＝
+	    __wrap_ble_sm_tx の盲点（ble_sm.c 内部呼出しに噛まない）を覆う．  */
+	if (erx_acl_is_smp_first(om, 0U)) {
+		g_erx_smp_txll++;
+	}
 	rx_trace_pack();
+	erx_pack();
 	return __real_ble_transport_to_ll_acl_impl(om);
 }

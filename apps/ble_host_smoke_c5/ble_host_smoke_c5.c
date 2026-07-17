@@ -550,7 +550,11 @@ storm_monitor_task(EXINF exinf)
 						| ((hw > 0xFFUL ? 0xFFUL : hw) << 16)
 						| (used > 0xFFFFUL ? 0xFFFFUL : used));
 		}
-#else
+#elif !defined(TOPPERS_ESP32C5_BT_RXTRACE)
+		/*  ★E-RX（evidence-c5-10）：RXTRACE=ON のとき STORE4 は rx_trace.c の
+		    SMP 生カウンタパック（タグ 0xE2）専用＝本タスクからの int_count[1]
+		    ミラー（常に 0 と実測済＝evidence-c5-08 §8.1/§11）を止めて
+		    «1 レジスタ 1 書き手» を守る（200ms 毎の 0 上書きで計器を消さない）．  */
 		sil_wrw_mem((void *) LP_AON_STORE4, esp_shim_int_count[1]);
 #endif
 		/*  ★D-2c：STORE5 は write マーカへ転用したのでミラーしない

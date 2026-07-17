@@ -502,7 +502,17 @@ if(ESP32C5_BT_NIMBLE)
         list(APPEND ASP3_COMPILE_DEFS TOPPERS_C5_PEND_DIAG)
     endif()
 
+    #  （E-RX／evidence-c5-10）RXTRACE は STORE4 へ «暗号前の SMP 往復生カウンタ»
+    #  （タグ 0xE2・ble_l2cap_rx を追加 wrap・CID=0x0006 覗き）も記録するよう拡張。
+    #  STORE4 の前用途 E1 計器（PEND_DIAG・タグ 0xE1）は evidence-c5-09 で完結済＝
+    #  上書き可。★同一レジスタへの二重書込みになるため RXTRACE と PEND_DIAG の
+    #  同時 ON は禁止（下の FATAL で機械的に落とす）。
     option(ESP32C5_BT_RXTRACE "Trace post-encryption RX/TX ACL pipeline via --wrap (D-2d bond diag)" OFF)
+    if(ESP32C5_BT_RXTRACE AND ESP32C5_BT_PEND_DIAG)
+        message(FATAL_ERROR
+            "ESP32C5_BT_RXTRACE and ESP32C5_BT_PEND_DIAG both write LP_AON STORE4 "
+            "(0x600B1010) and cannot be enabled together. Turn one of them OFF.")
+    endif()
     if(ESP32C5_BT_RXTRACE)
         list(APPEND ASP3_SYSSVC_TARGET_C_FILES ${BT_TARGETDIR}/rx_trace.c)
         list(APPEND ASP3_LINK_OPTIONS
@@ -511,6 +521,7 @@ if(ESP32C5_BT_NIMBLE)
             -Wl,--wrap=ble_sm_tx
             -Wl,--wrap=ble_transport_to_ll_acl_impl
             -Wl,--wrap=ble_sm_enc_change_rx
+            -Wl,--wrap=ble_l2cap_rx
         )
         list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_BT_RXTRACE)
     endif()
