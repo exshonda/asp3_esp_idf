@@ -446,3 +446,35 @@ FAST conn_cmpl=1/ltk_req=1/enc_chg=1/enc_status=0・**tx_smp=8**（フル SC `0b
 - **成果物＝両側観測の型（device カウンタ＋phone snoop・本数一致で立証）＋C3 で撮れた失敗記録。**
 
 ★**推奨＝B**（観測者効果を排除して安定共通項 DISC=0 に snoop 無しで迫れる）。**要件充足を優先し機序を保険とするなら C**。**A は非推奨**（間欠は実証済＝統計を足すだけ）。
+
+---
+
+## 14. Step B — DISC=0 の特徴づけ（★スマホ無し・BlueZ 主導・観測者効果なし・自走）
+
+**問い**：安定共通項 **DISC=0（controller→host 切断配送の欠落）は «全切断» か «supervision timeout 限定» か «間欠» か。**
+
+**計器（★新規 wrap 不要＝既存が配送鎖をブラケット）**：
+controller →[HCI transport]→ `ble_hs_hci_evt_process`（**FAST EVT[3] disc**＝HCI Disconnection Complete 0x05 到達・★0x05 は legacy code＝盲でない）→ host GAP →app（**DISC マーカ 0xB8**＝`0xD15C<reason><count>`・毎起動0）。
+- EVT[3]=0 ∧ DISC=0 ⇒ 切断は host HCI にすら届かない＝**controller→host transport 損失**（`bt-shim.md:2637`）。
+- EVT[3]>0 ∧ DISC=0 ⇒ HCI までは来たが GAP へ来ない＝host 内部損失。
+- EVT[3]>0 ∧ DISC>0 ⇒ 完全配送。
+
+**★正の対照の注意（コーディネータ指摘・実測で確認）**：過去の非0 `DISC=0xd15c1302`（配送された）は
+**evidence-c3-09 cell2＝hal 供給**＝**esp-idf 供給（rc_c3_evt）での DISC 配送は «一度も確認されていない»**。
+⇒ **rc_c3_evt で «能動切断→DISC≠0» が出るか自体が正の対照の確保**（出れば計器非盲＋配送可能・出なければ構造的損失候補）。
+
+### 14.1 事前登録（★測定前 commit・書き換えない）
+
+| # | 予測 | 登録値 | 意味 |
+|---|---|---|---|
+| **P_poscontrol** | rc_c3_evt で **«能動切断→DISC≠0»** が «一度でも» 出る（＝計器非盲＋配送可能条件が在る） | **55%** | 出れば「何が配送を分けるか」が問い／出なければ「esp-idf 供給で配送が構造的に死ぬ」候補（hal は配送した＝供給差） |
+| **P_active_delivered** | 能動切断（BlueZ Disconnect）で **DISC≠0**（配送率で判定） | **50%** | esp-idf での配送は未確認＝五分。清潔な HCI event なら届く見込み vs Step1-3 の一貫 DISC=0 |
+| **P_timeout_lost** | timeout 切断（hci0 down で沈黙）で **DISC=0** | **75%** | Step1-3（supervision timeout）と同型を予想 |
+
+★**分岐（測定前固定）**：(a)能動≠0 ∧ (b)timeout=0 ⇒ **«配送欠落は timeout 限定»**（能動は届く）。
+(a)(b) とも 0 ⇒ **«全切断が構造的に届かない»**（esp-idf 供給差の候補）。(a) が間欠 ⇒ **配送自体が間欠**。
+★**1回で断定しない＝各 N 回で «配送率» を出す。**
+
+### 14.2 射程
+- ★**BlueZ は bond しない＝«初回 SMP まで» しか駆動できない**＝**本実験は «切断配送» に限定**（再接続・bond 後は対象外）。
+- ★**過去の非0 は hal 由来**＝**«DISC=0 は普遍» と書かない**（供給・切断型で分ける）。
