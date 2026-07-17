@@ -13,6 +13,36 @@
 set(TARGETDIR ${CMAKE_CURRENT_LIST_DIR})
 
 #
+#  ------------------------------------------------------------------
+#  ESP ツールチェーン検証（C5 で確立し C6 が転写した型の再転写．2行）
+#  ------------------------------------------------------------------
+#  「黙って汎用GCCへ落ちる」事故（asp3_core の toolchain-riscv64.cmake は
+#  既定プレフィクスを PATH 解決するため -DRISCV64_TOOLCHAIN_PREFIX を
+#  渡し忘れると /usr/bin の汎用GCCを掴み，rv32 マルチリブがあるので
+#  **ビルドが通ってしまう**）を configure 段階で止める．
+#  実体は asp3/cmake/esp_toolchain_check.cmake（チップ非依存＝3チップ共有．
+#  submodule 変更は不要）．退避路は同ファイルのコメント参照．
+#
+#  ★期待版＝esp-14.2.0_20260121＝esp-idf submodule（真の v5.5.4 タグ
+#  735507283d）の tools/tools.json が riscv32-esp-elf に指定する版．
+#  供給（ソース・blob・ROM ld）を真の v5.5.4 に統一したのだから
+#  コンパイラもそこから採る，という整合．
+#
+#  ★★C3 では **これは挙動変更である**（C5/C6 と違う点．隠さない）：
+#  C3 の «既知良好» レシピは **esp-15.2.0_20251204（GCC15）** で建てられて
+#  いた（実測＝`build/c3_w1`・`build/c3ble_halbk` の CMakeCache）ので，
+#  **本 guard はそれを FATAL で弾く**．それが guard の正しい動作であり，
+#  IDF 標準版へ揃えるのが本ラウンドのミッション．
+#  従来レシピを一時的に通したい場合は
+#    -DASP3_ESP_EXPECTED_TOOLCHAIN=esp-15.2.0_20251204
+#  （または -DASP3_ESP_TOOLCHAIN_CHECK=OFF）で退避できる．
+#
+if(NOT DEFINED ASP3_ESP_EXPECTED_TOOLCHAIN)
+    set(ASP3_ESP_EXPECTED_TOOLCHAIN esp-14.2.0_20260121)
+endif()
+include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_toolchain_check.cmake)
+
+#
 #  esp-hal-3rdparty（submodule）のパスとインクルードディレクトリ
 #
 #  Phase B-1で使用するのはRTOS非依存の下層のみ：
@@ -82,21 +112,37 @@ endif()
 #        B: hal 供給                        ＝**成功 2/2**（`Pairing successful`）**
 #      ＝**帰属は «供給»**（対照 B が同条件で成功しているので central/ハーネスの問題ではない）。
 #
-#  ⇒ **既定は «実機で bond が通る構成»（hal）を維持する**。
-#     `-DASP3_ESPIDF_SUPPLY=ON` で **hal 参照 0 の BT ビルドは可能**（adv/D-2b までは
-#     真cold で成立＝§5）。**bond が要らない用途なら選べる**＝可逆。
+#  ⇒ （〜2026-07-17）**既定は «実機で bond が通る構成»（hal）を維持**していた。
 #
 #  ★これは「ビルドが通ること」と「機能すること」が別だという実例であり，
 #    **hal 参照 0 を «達成した» ことと，それを «既定にしてよい» ことは別**である。
 #
-if(ESP32C3_BT)
-    set(_asp3_espidf_supply_default OFF)
-else()
-    set(_asp3_espidf_supply_default ON)
-endif()
+#  ------------------------------------------------------------------
+#  ★★2026-07-17 既定を **ON（esp-idf 供給で統一）** へ変更＝**ユーザーの決定**
+#  ------------------------------------------------------------------
+#
+#  「**esp-idf で統一する**」＝ C3 も WiFi・BT とも esp-idf 供給（hal 参照 0）。
+#  ＝ C5／C6 と同じ形（両チップとも既に BT まで esp-idf 供給で統一済み）。
+#
+#  ★**帰結を承知の決定である**（隠さない）：上の §3 のとおり，**現在の測定では
+#    esp-idf 供給の BT は bond が通らない**（真cold A/B で esp-idf 失敗 2/2 ／
+#    hal 成功 2/2＝evidence-c3-03 §5）。**本変更で C3 の既定は bond を失う**。
+#    それでも供給を1本化する，というのがユーザーの判断。
+#
+#  ★**可逆**：`-DASP3_ESPIDF_SUPPLY=OFF` で従来どおり hal 供給（bond が通る
+#    唯一の構成）へ完全復帰できる。`ASP3_BT_IDF_V554` はこれに追従するので
+#    基盤と BT ツリーが混成することはない（esp_bt.cmake の FATAL_ERROR で担保）。
+#
+#  ★**bond 失敗の機序は «コントローラ（blob）側» に局在済み**（evidence-c3-05）：
+#    ホスト SMP は DHKey Check まで A/B バイト同一で完走し，**LTK Request が
+#    一度も来ない**＝暗号開始が完遂しない。ホスト SM は C5 クロスチップ対照で
+#    無罪。⇒ **toolchain で直る見込みは低い**が，それは «測らない理由» ではない
+#    （本ラウンドで IDF 標準 GCC14 での bond を実測する）。
+#
+set(_asp3_espidf_supply_default ON)
 
 option(ASP3_ESPIDF_SUPPLY
-    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (true v5.5.4 tag) instead of esp-hal-3rdparty. Default ON = HAL-free (WiFi / plain). Default OFF for ESP32C3_BT=ON because bond FAILS 2/2 on the esp-idf BT supply while hal succeeds 2/2 under an identical true-cold A/B (evidence-c3-03 §5); the esp-idf BT build itself is HAL-free and reaches adv/D-2b, so -DASP3_ESPIDF_SUPPLY=ON is available when bond is not required. ASP3_BT_IDF_V554 follows this so the base and the BT tree never mix"
+    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (true v5.5.4 tag) instead of esp-hal-3rdparty. Default ON for ALL configs (WiFi and BT) = HAL-free, matching C5/C6 -- this is a deliberate user decision to unify the supply. KNOWN COST: on the esp-idf BT supply bond FAILS 2/2 while hal succeeds 2/2 under an identical true-cold A/B (evidence-c3-03 5); adv/D-2b still work. Use -DASP3_ESPIDF_SUPPLY=OFF to fall back to the hal supply (the only configuration where bond is known to pass). ASP3_BT_IDF_V554 follows this so the base and the BT tree never mix"
     ${_asp3_espidf_supply_default})
 
 if(ASP3_ESPIDF_SUPPLY)

@@ -167,18 +167,19 @@ list(APPEND ASP3_COMPILE_DEFS
     #  esp_wifi.cmakeと同じ理由（PLL温度追従は較正データ永続化前提．
     #  本ビルドは毎回フル較正のため無効化で十分）
     CONFIG_ESP_PHY_DISABLE_PLL_TRACK=1
-    #  MALLOC_CAP_DMA/MALLOC_CAP_INTERNAL：esp_wifi.cmakeと同じ理由
-    #  （phy_init.cがheap_caps.hを#includeせず直値のビットマスクを
-    #  期待するため．値の意味自体はesp_shim_libc.cのheap_caps_*が
-    #  capsを無視するため持たない．シンボル解決のみ）
-    MALLOC_CAP_DMA=8
-    MALLOC_CAP_INTERNAL=2048
-    #  MALLOC_CAP_RETENTION：v5.5.4のbt.c（malloc_retention_wrapper）が
-    #  heap_caps_malloc(size, MALLOC_CAP_RETENTION)を呼ぶ．bt.cはesp_heap_caps.hを
-    #  #includeせず直値のビットマスクを期待する（上のMALLOC_CAP_*と同じ事情）ため
-    #  -Dで供給する．値=(1<<14)＝hal/v5.5.4のesp_heap_caps.h定義と一致．
-    #  hal版bt.cはこのwrapperを持たないため既存ビルドには無害．
-    MALLOC_CAP_RETENTION=16384
+    #  ★MALLOC_CAP_DMA/MALLOC_CAP_INTERNAL/MALLOC_CAP_RETENTION の -D は
+    #  撤去した（.steering/20260716-c3c5c6-esp-idf-supply-migration の
+    #  C3 toolchain 整合ラウンド）．経緯＝esp_wifi.cmake の同節と，
+    #  下の set_source_files_properties を参照．
+    #  ★撤去できた理由＝**旧コメントの事実認識が誤っていた**：
+    #  「bt.c は esp_heap_caps.h を #include せず直値のビットマスクを期待する」
+    #  は実測で **偽**．bt.c は hal 版・esp-idf 版とも :13 で
+    #  **無条件に** esp_heap_caps.h を #include している（MALLOC_CAP_RETENTION
+    #  を使う esp-idf 版 :1077 も同様）．bt_osi_mem.c・esp_mem.c も同じ．
+    #  ⇒ MALLOC_CAP_* を真に欠いていたのは **phy_init.c だけ**であり，
+    #  それは下の force-include で本物のヘッダから供給される．
+    #  ⇒ -D は不要なだけでなく有害だった（"16384" vs 本物の "(1<<14)" で
+    #  トークン列が違うため "MALLOC_CAP_RETENTION redefined" 警告を実際に出していた）．
 )
 
 #
@@ -287,6 +288,28 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     #  Wi-Fiと共有のcoexアダプタ（docs/wifi-shim.md．ダミーno-opテーブル
      #  登録＝ROM側coexist_funcs NULL回避）．BT単体でも要求される．
     ${TARGETDIR}/wifi/esp_coex_adapter.c
+)
+
+#
+#  ------------------------------------------------------------------
+#  phy_init.c へ esp_heap_caps.h を force-include する（esp_wifi.cmake と同型）
+#  ------------------------------------------------------------------
+#  phy_init.c は heap_caps_malloc() を呼ぶが esp_heap_caps.h を #include
+#  していない（hal 版 :470・esp-idf 版 :479．**両供給とも**．実測）．
+#  詳細な経緯・設計判断は esp_wifi.cmake の同名の節を正本とする．
+#  ここは BT 経路（${BT_IDF} 供給の phy_init.c）に同じ処置を当てる．
+#
+#  ★esp_heap_caps.h の解決はインクルードパス（${ESP_SUP_DIR}/components/
+#  heap/include）に委ねる＝phy_init.c が自分で #include していたら
+#  解決したのと同じヘッダになる．ASP3_ESPIDF_SUPPLY=OFF かつ
+#  ASP3_BT_IDF_V554=ON のような混成でも安全：hal 版と esp-idf 版の
+#  esp_heap_caps.h は heap_caps_malloc の署名も MALLOC_CAP_* の値も
+#  一致することを実測で確認済み（void *heap_caps_malloc(size_t, uint32_t)．
+#  DMA=(1<<3)・INTERNAL=(1<<11)・RETENTION=(1<<14)）．
+#
+set_source_files_properties(
+    ${BT_IDF}/components/esp_phy/src/phy_init.c
+    PROPERTIES COMPILE_OPTIONS "-include;esp_heap_caps.h"
 )
 
 #

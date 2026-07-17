@@ -167,21 +167,14 @@ list(APPEND ASP3_INCLUDE_DIRS
 #
 list(APPEND ASP3_COMPILE_DEFS
     CONFIG_ESP_PHY_DISABLE_PLL_TRACK=1
-    #  MALLOC_CAP_DMA/MALLOC_CAP_INTERNAL：esp_phy/src/phy_init.cの
-    #  esp_phy_modem_init()がheap_caps_malloc()へ渡すビットマスク引数．
-    #  本来はesp_heap_caps.h（heap/include．インクルードパスは既に
-    #  §1bで追加済み）が定義するが，phy_init.c自身はこのヘッダを
-    #  #includeしていない（実物のESP-IDFビルドではheapコンポーネント
-    #  経由で間接的に見えている）．hal/配下は編集禁止のため，
-    #  esp_heap_caps.h（hal/components/heap/include）と同じ値を
-    #  コンパイル定義として直接与える．esp_shim_libc.cの
-    #  heap_caps_malloc()実装自体はcaps引数を無視する（DMA/internal
-    #  の区別が不要なESP32-C3向け設計．docs/wifi-shim.md参照）ため，
-    #  値そのものは意味を持たずシンボル解決のためだけに必要．
-    #  （8=1<<3・2048=1<<11．CMakeのlist APPENDが"<<"を含む文字列を
-    #  正しく1要素として扱えないため数値リテラルで与える）
-    MALLOC_CAP_DMA=8
-    MALLOC_CAP_INTERNAL=2048
+    #  ★MALLOC_CAP_DMA/MALLOC_CAP_INTERNAL の -D は撤去した
+    #  （.steering/20260716-c3c5c6-esp-idf-supply-migration の C3 toolchain
+    #   整合ラウンド）．経緯と根拠＝下の set_source_files_properties を参照．
+    #  要点：phy_init.c へ esp_heap_caps.h を force-include したので，
+    #  マクロも関数宣言も **本物のヘッダ** から来る．-D は不要になったうえ，
+    #  実測で有害だった（-D の "8" と本物の "(1<<3)" はトークン列が異なるため，
+    #  esp_heap_caps.h を include する他ファイル＝bt.c・bt_osi_mem.c・
+    #  esp_mem.c で "MALLOC_CAP_DMA redefined" 警告を実際に出していた）．
     #  TCNT_SYSLOG_BUFFER：既定32件（syssvc/syslog.c．kernel/同様
     #  編集禁止のため上書きはコンパイル定義で行う）はesp_wifi_init()の
     #  起動時ログバースト（"config nano"・"Init dynamic rx buffer num"
@@ -200,6 +193,40 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     ${ESP_SUP_DIR}/components/esp_phy/src/phy_init.c
     ${ESP_SUP_DIR}/components/esp_phy/src/phy_common.c
     ${ESP_SUP_DIR}/components/esp_phy/esp32c3/phy_init_data.c
+)
+
+#
+#  ------------------------------------------------------------------
+#  phy_init.c へ esp_heap_caps.h を force-include する
+#  ------------------------------------------------------------------
+#  【問題】phy_init.c の esp_phy_modem_init() は heap_caps_malloc() を
+#  呼ぶが，phy_init.c 自身は esp_heap_caps.h を #include していない
+#  （**hal 版・esp-idf 版とも**．実測）．実物の ESP-IDF ビルドでは
+#  freertos/FreeRTOS.h 経由で推移的に宣言が見えるが，本ビルドの
+#  freertos/FreeRTOS.h は bt/stub/include の**スタブ**に解決されるため
+#  その経路が切れている＝**本ビルド固有の shadow が原因**．
+#
+#  【従来】暗黙宣言のまま放置され，GCC13（暗黙宣言が警告）では通っていた．
+#  GCC14 以降は既定で hard error になるため，既知良好レシピは
+#  -DCMAKE_C_FLAGS=-Wno-error=implicit-function-declaration を
+#  **コマンドラインで手渡し**して黙らせていた（ツリーには残っていない）．
+#  ＝「潜在バグを隠すフラグ」．本ラウンドで根治した．
+#
+#  【解法】本物の esp_heap_caps.h（${ESP_SUP_DIR}/components/heap/include．
+#  インクルードパスは §1b で追加済み）を force-include する．
+#  - **スタブを新設しない**：本物がインクルードパス上に在るので，
+#    hal_stub/ へ esp_heap_caps.h を置くと**本物を shadow する**＝
+#    esp_timer.h で実際に起きた事故（evidence-c6-15 §1）の再演になる．
+#  - **宣言を手写ししない**：本物を読ませれば署名は定義と必ず一致する．
+#  - **対象を phy_init.c に限る**：esp_heap_caps.h は multi_heap.h/
+#    sdkconfig.h を引くので，全ファイルへ force-include すると
+#    カーネル側まで巻き込む．set_source_files_properties は
+#    esp32c6_espidf/esp_wifi.cmake:910・esp_bt.cmake:497 に既存の前例．
+#  - MALLOC_CAP_* の -D が不要になる（上のコメント参照）．
+#
+set_source_files_properties(
+    ${ESP_SUP_DIR}/components/esp_phy/src/phy_init.c
+    PROPERTIES COMPILE_OPTIONS "-include;esp_heap_caps.h"
 )
 
 #

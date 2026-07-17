@@ -39,6 +39,21 @@ if(NOT DEFINED ASP3_ESP_EXPECTED_TOOLCHAIN)
     set(ASP3_ESP_EXPECTED_TOOLCHAIN esp-14.2.0_20260121)
 endif()
 
+#
+#  エラーメッセージ内の `install.sh <chip>` 用のチップ名．
+#  本ファイルはチップ非依存だが，案内文だけは実際のチップ名を出したい
+#  （C3 転写時に «esp32c5» とハードコードされていたのを実測で発見して是正．
+#   riscv32-esp-elf は RISC-V 全チップで同一なのでどのチップ名でも実害は
+#   無かったが，C3 のユーザーに esp32c5 と案内するのは誤りである）．
+#  ASP3_TARGET（例：esp32c3_espidf）から接尾辞を落として得る．
+#  取れない場合は総称へフォールバックする（案内が壊れないこと優先）．
+#
+if(DEFINED ASP3_TARGET)
+    string(REGEX REPLACE "_espidf$|_gcc$" "" _asp3_esp_chip "${ASP3_TARGET}")
+else()
+    set(_asp3_esp_chip "<chip>")
+endif()
+
 if(ASP3_ESP_TOOLCHAIN_CHECK)
     #
     #  (1) ターゲット三つ組を実測する．
@@ -106,7 +121,7 @@ if(ASP3_ESP_TOOLCHAIN_CHECK)
             "\n"
             "How to fix (choose one):\n"
             "  1. Install the expected version:\n"
-            "       cd <repo>/esp-idf && ./install.sh esp32c5\n"
+            "       cd <repo>/esp-idf && ./install.sh ${_asp3_esp_chip}\n"
             "  2. Select an already-installed one explicitly:\n"
             "       -DCMAKE_TOOLCHAIN_FILE=<repo>/asp3/cmake/toolchain-esp32-riscv32.cmake \\\n"
             "       -DESP_TOOLCHAIN_VERSION=${_asp3_esp_tag}\n"
