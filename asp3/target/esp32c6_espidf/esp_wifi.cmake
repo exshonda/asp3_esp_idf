@@ -235,67 +235,24 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
 #  2. リンクライブラリパス・ライブラリ（Wireless.mk 80-88行目）
 #  ------------------------------------------------------------------
 #
-#  DIAGNOSTIC (temporary，RX-enable --wrapトレース)．nmで発見した
-#  libpp.a／libnet80211.a内部シンボル（公開ヘッダなし）をラップし，
-#  wifi_trace.cのリングバッファへ呼出し回数・引数・戻り値を記録する．
-#  調査終了後にこのブロックごと削除する．docs/wifi-shim-c6.md
-#  「実施12」参照．
-list(APPEND ASP3_LINK_OPTIONS
-    -Wl,--wrap=wifi_hw_start
-    -Wl,--wrap=wifi_hmac_init
-    -Wl,--wrap=wifi_lmac_init
-    -Wl,--wrap=wDev_Rxbuf_Init
-    -Wl,--wrap=esf_buf_setup
-    -Wl,--wrap=esf_buf_setup_static
-    -Wl,--wrap=wdev_set_promis
-    -Wl,--wrap=sta_rx_cb
-    -Wl,--wrap=wifi_recycle_rx_pkt
-    -Wl,--wrap=esf_buf_alloc
-    -Wl,--wrap=esf_buf_alloc_dynamic
-    -Wl,--wrap=wdev_data_init
-    -Wl,--wrap=wifi_set_rx_policy
-    -Wl,--wrap=adc2_wifi_acquire
-    -Wl,--wrap=ieee80211_set_hmac_stop
-    -Wl,--wrap=wifi_mode_set
-    -Wl,--wrap=_do_wifi_start
-    -Wl,--wrap=ieee80211_update_phy_country
-    -Wl,--wrap=wifi_start_process
-    -Wl,--wrap=wifi_set_promis_process
-    -Wl,--wrap=register_chipv7_phy
-    -Wl,--wrap=scan_inter_channel_timeout_process
-    -Wl,--wrap=chip_v7_set_chan_ana
-    -Wl,--wrap=set_channel_rfpll_freq
-    -Wl,--wrap=set_rfpll_freq
-    -Wl,--wrap=write_rfpll_sdm
-    -Wl,--wrap=wait_rfpll_cal_end
-    -Wl,--wrap=enable_agc
-    -Wl,--wrap=disable_agc
-    -Wl,--wrap=mac_enable_bb
-    -Wl,--wrap=fe_reg_init
-    -Wl,--wrap=fe_txrx_reset
-    -Wl,--wrap=phy_bbpll_cal
-    -Wl,--wrap=set_rxclk_en
-    -Wl,--wrap=set_txclk_en
-    -Wl,--wrap=write_chan_freq
-    -Wl,--wrap=restart_cal
-    -Wl,--wrap=i2cmst_reg_init
-    -Wl,--wrap=rxiq_cal_init
-    -Wl,--wrap=set_rx_gain_cal_dc_new
-    -Wl,--wrap=coex_init
-    -Wl,--wrap=coex_schm_process_restart
-    -Wl,--wrap=coex_schm_lock
-    -Wl,--wrap=coex_schm_interval_get
-    #  実施38：set_rx_gain_cal_dc_new()内部呼出しの直接トレース
-    -Wl,--wrap=pbus_rx_dco_cal_1step_new
-    -Wl,--wrap=ram_pbus_force_mode
-    -Wl,--wrap=rx_pbus_reset
-    #  実施58：RXデータパス各段（sta_rx_cbが0の原因切り分け・一時的）
-    -Wl,--wrap=lmacProcessRxSucData
-    -Wl,--wrap=ppRxPkt
-    -Wl,--wrap=wdevProcessRxSucDataAll
-    -Wl,--wrap=wDev_ProcessRxSucData
-    -Wl,--wrap=wDev_IndicateFrame
-)
+#
+#  ★【2026-07-17 evidence-c6-11】ここに在った «DIAGNOSTIC (temporary)» の
+#  `-Wl,--wrap=` ブロック（**52本**）を **削除した**（コメント自身が「調査終了後に
+#  このブロックごと削除する」と指示していたもの。実施12＝2026-07-05 の調査は終了済み）。
+#  ★問題だったのは «診断トグルが無く if(ESP32C6_WIFI)＝機能トグルで有効化» ＝
+#  **WiFi を使う全ビルドが計装込み**だったこと。--wrap は死んでおらず、
+#  ELF に __wrap_* が 37 個リンクされていた（★52＝cmake 指示数／37＝リンク済み
+#  シンボル数＝**別の指標**。どちらも正しい）。
+#  ★再投入は診断トグル `ESP32C6_WIFI_TRACE`（既定 OFF）で行う＝**退避路は捨てない**。
+#  ON のときだけ wifi/wifi_trace_wrap.cmake（--wrap 52本）を積む。
+#
+option(ESP32C6_WIFI_TRACE
+    "DIAGNOSTIC (default OFF): C6 Wi-Fi -Wl,--wrap trace hooks (docs/wifi-shim-c6.md 実施12). Routes esf_buf_alloc/lmacProcessRxSucData/register_chipv7_phy etc. through wifi_trace.c; __wrap_esf_buf_alloc(a1==2) then costs ~1035 volatile MMIO reads (AGC 1024 words) on the packet-buffer alloc path and is NOT gated by wifi_trace_frozen. Never enable for functional/perf builds"
+    OFF)
+if(ESP32C6_WIFI_TRACE)
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_WIFI_TRACE)
+    include(${CMAKE_CURRENT_LIST_DIR}/wifi/wifi_trace_wrap.cmake)
+endif()
 
 #
 #  ------------------------------------------------------------------

@@ -416,8 +416,27 @@ if(ESP32C6_WIFI)
         ${TARGETDIR}/wifi/esp_wifi_adapter.c
         ${C3_TARGETDIR}/wifi/esp_event_shim.c
         ${C3_TARGETDIR}/wifi/esp_coex_adapter.c
-        #  DIAGNOSTIC (temporary, RX-enable --wrap trace)．
-        #  docs/wifi-shim-c6.md「実施12」参照．調査終了後に削除する．
+        #
+        #  ★【2026-07-17 evidence-c6-11】ここに在った «DIAGNOSTIC (temporary)» の
+        #  コメントは残置していたが、**wifi_trace.c 自体は if(ESP32C6_WIFI) 配下に
+        #  «残す»**（下記の理由）。**除去したのは esp_wifi.cmake の `-Wl,--wrap=` 群**
+        #  ＝**実害（ホットパスのコスト）の本体**。
+        #
+        #  ★なぜ wifi_trace.c を消せないか（実測）：
+        #  **apps/wifi_scan/wifi_scan.c が `#ifdef TOPPERS_ESP32C6_WIFI`（＝機能マクロ）
+        #  配下で wifi_trace_reset()／wifi_regi2c_patch_install()／wifi_regsnap_reset()
+        #  等を «直接呼んで» いる**ため、消すと wifi_scan がリンクできない。
+        #  ★さらに同ブロックには **live なレジスタ書込み**
+        #  `*(volatile uint32_t *)0x600af018U = 0x7U;`（「追記10：根本原因テスト／
+        #  クロック再アサート」）が在り、**これは診断ではなく «恒久修正の代行» の
+        #  可能性がある**（0x600af018=MODEM_LPCON_CLK_CONF＝bt_shim.c が |=0x1 を
+        #  恒久修正として入れている register と同一）。**外すと wifi_scan が壊れうる**。
+        #  ⇒ **app 側の整理は «別の判断» としてユーザーへ返す**（evidence-c6-11 §5）。
+        #
+        #  ★`--wrap` が無ければ __wrap_* は誰からも呼ばれず、wifi_regsnap_capture
+        #  （AGC 1024ワード読み）も --gc-sections で落ちる＝**ホットパスのコストは消える**。
+        #  wifi_dhcp（W1）は wifi_trace を一切参照しない＝**ELF から完全に消える**（§4 で実測）。
+        #
         ${TARGETDIR}/wifi/wifi_trace.c
     )
 endif()
