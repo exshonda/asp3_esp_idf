@@ -71,7 +71,7 @@ bondできない。`-DASP3_ESPIDF_SUPPLY=ON` で選べる（可逆）。
 
 | option | 既定 | 意味 |
 |---|---|---|
-| `ASP3_ESPIDF_SUPPLY` | ON（C3のBT時のみOFF） | 供給元。OFFでhalへ完全復帰（可逆） |
+| `ASP3_ESPIDF_SUPPLY` | ON（C3のBT時のみOFF） | 基盤の供給元。**OFFがhalフォールバックになるのはWi-Fi/plainのみ**（下記★） |
 | `ASP3_BT_IDF_V554` | C5/C6=ON，C3=`ASP3_ESPIDF_SUPPLY`に追従 | BTツリーの供給元。基盤と混ぜない |
 | `ASP3_WIFI_BLOB_HAL` | OFF | Wi-Fi/PHY/coexist blobだけhalへ戻す（可逆fallback） |
 | `ESP32C{3,5,6}_WIFI` / `_LWIP` / `_BT` | OFF | 機能の有効化 |
@@ -83,6 +83,13 @@ bondできない。`-DASP3_ESPIDF_SUPPLY=ON` で選べる（可逆）。
 
 ★`ASP3_ESPIDF_SUPPLY` の既定は `if()` で計算される（C3は `ESP32C3_BT` に依存）。
 `option()` の宣言値だけを読むと**実効値と食い違う**。
+
+★**`ASP3_ESPIDF_SUPPLY=OFF` は「halへ完全復帰」ではない**。OFFが真のhal
+fallbackになるのは**Wi-Fi/plainビルドだけ**で，BTツリーは独立に
+`ASP3_BT_IDF_V554`（既定ON）に従う。したがってC5/C6で `ESP32C{5,6}_BT=ON`
+のままOFFにすると**混成ビルド**になる（ビルドは通るがhal fallbackではない）。
+C5/C6には**全halのBT構成は存在しない**（`esp_bt.cmake` の `ESP_HAL_DIR` 参照が0．
+C6のhal BT経路は撤去済）。C3のみ混成をFATAL_ERRORで防いでいる。
 
 ## ビルド
 
