@@ -1,368 +1,544 @@
 #
-#               ESP32-C6 Bluetooth（BLE）統合 Phase D-1／BLE実施01
+#               ESP32-C6 Bluetooth（BLE）統合
 #
-#  コントローラ起動＋VHCIループバック（ホストスタック無し）．設計は
-#  docs/ble-c5c6-plan.md，実装ログはdocs/ble-c5c6.md「BLE実施01」．
+#  設計は docs/ble-c5c6-plan.md，実装ログは docs/ble-c5c6.md。
+#  ★構成は **C5（esp32c5_espidf/esp_bt.cmake）と同型**：BT の供給は
+#  `ASP3_BT_IDF_V554` 1本で選ぶ（ON＝esp-idf submodule の真の v5.5.4 タグ／
+#  OFF＝外部 IDF v6.1 ツリー）。**hal（esp-hal-3rdparty）経路は存在しない。**
 #
-#  C3（esp32c3_espidf/esp_bt.cmake）との違い：C6/C5世代のBTコントローラ
-#  （components/bt/controller/esp32c6/bt.c）はソース配布だがFreeRTOS API
-#  を直接呼ばず，"platform/os.h" のesp_os_*（task/intr）関数群と3つの
-#  登録テーブル（osi_coex_funcs_t／ext_funcs_t／npl_funcs_t）を経由する．
-#  bt.c自身がosi_coex_funcs_t（coex無効時は全no-op）とnpl_funcs_t
-#  （porting/npl/freertos/src/npl_os_freertos.cが自前提供）を埋めるため，
-#  ASP3が新規実装するのはesp_os_*（bt/bt_shim.c）とnpl_os_freertos.cが
-#  要求するFreeRTOS原始プリミティブ（queue/semaphore/task/timer．C3の
-#  bt/stub/include/freertos/*.hをそのまま流用）だけで良い．
+#  ------------------------------------------------------------------
+#  ★★【2026-07-17 evidence-c6-09】hal 経路と `ESP32C6_BT_IDF61` を撤去した
+#  ------------------------------------------------------------------
+#  ★**旧 `ESP32C6_BT_IDF61` は廃止**。かつては «hal 経路の入口» だった
+#  （ON＝非hal＝本ファイル／OFF＝hal submodule 版＝削除済みの else ブロック）。
+#  撤去に至った実測：
+#    - `evidence-c6-05`：hal・v5.5.4・v6.1 の **3供給すべてが D-1 到達**
+#      ＝blob もグルーも無罪（hal 経路を «別の選択肢» として残す技術的理由が消えた）。
+#      md5 実測：v5.5.4 タグの C6 BT blob は hal と **4/4 バイト完全一致**
+#      （libble_app.a 75db98e5／libphy.a cb429107／libbtbb.a cbe3022f／
+#      libcoexist.a 55344862）＝**hal 経路を残しても «別の blob» にはならない**。
+#    - `evidence-c6-06`：既定を v5.5.4 submodule へ（外部 v6.1 tree 依存を解消）。
+#    - `evidence-c6-08`：BT の **hal 参照 0** を達成（hal 経路は既定で通らない）。
+#  ⇒ **ユーザー判断で hal 経路ごと削除**（退避路を捨てることを承知の決定）。
+#  ⇒ トグル名の «誤称»（既定供給が v5.5.4 なのに名前が IDF61）も自然消滅した。
 #
-#  RAM予算のためESP32C3_BT同様，ESP32C6_WIFIとの同時ONは現時点で未対応
-#  （FATAL_ERRORはtarget.cmake側）．
+#  ★**docs/.steering の旧名は当時の記録として «そのまま» 残してある**
+#  （書き換えると履歴が嘘になる）。読み替え表：
+#    `ESP32C6_BT_IDF61=ON`      → 現在の既定（hal 非経由＝本ファイル）
+#    `ESP32C6_BT_IDF61=OFF`     → 削除された hal 経路（もう存在しない）
+#    `ESP32C6_BT_NIMBLE`  → `ESP32C6_BT_NIMBLE`
+#    `ESP32C6_BT_SM`      → `ESP32C6_BT_SM`
 #
 
 if(ESP32C6_BT)
-
-#
-#  ★BLE実施13（docs/ble-c5c6-plan.md §13）：IDF v6.1 matched-set swap
-#  トグル．ON にすると bt/phy/coex/libble_app.a を hal submodule ではなく
-#  IDF v6.1 から採り，C3型 bt.c（esp_bt_idf61.cmake）でビルドする．
-#  OFF＝従来の hal 版（本ファイル本体）．
-#
-#  ------------------------------------------------------------------
-#  ★★既定を OFF→ON へ是正（2026-07-17．docs/blob-unify-v554-review.md ★B1．
-#    真因を特定した上での変更＝憶測ではない．evidence-c6-01 §5）
-#  ------------------------------------------------------------------
-#  【B1の真因】本トグルが**上位ゲート**であり，v5.5.4統一の既定flipコミット
-#  （e1e965c）は下位の `ASP3_BT_IDF_V554`（esp_bt_idf61.cmake:48）の既定しか
-#  変えていない。ところが `ASP3_BT_IDF_V554` は `if(ESP32C6_BT_IDF61)` の
-#  **内側でしか評価されない**ため，本トグルが OFF である限り**下位flipは
-#  一度も効かない**（＝二段オプションの構造的な穴）。
-#  ∴ 素の `-DESP32C6_BT=ON` は hal 版に着地していた。
-#
-#  【なぜ ON が正しいか（実測に基づく）】
-#   - OFF（hal 版）＝ §10-12 で `register_chipv7_phy` の RFシンセ非ロックが
-#     再現し **D-1 未達**の構成（clock 2修正込みの c6bt_fix でもハング）。
-#   - ON（v6.1）＝ §13 で D-1，§14 で D-2a/D-2b，§15 で D-2c/D-2d ビルド＋
-#     device-side 非回帰を **board C 実機 2/2 で達成**した唯一の構成。
-#     board C の最終 flash（build/c6bt_idf61_sm）もこの経路。
-#   ＝「既定＝実機エビデンスのある構成」に揃える。hal 版へは
-#     `-DESP32C6_BT_IDF61=OFF` の**単一ノブ**で完全に戻れる（★B2 も解消）。
-#
-#  【★C6 で「v5.5.4 統一」を既定にしない理由（重要．evidence-c6-01 §2）】
-#  md5 実測：**真の v5.5.4 タグ（submodule esp-idf＝735507283d）の C6 BT blob は
-#  hal の blob と 4/4 バイト完全一致**（libble_app.a 75db98e5／libphy.a cb429107／
-#  libbtbb.a cbe3022f／libcoexist.a 55344862）。
-#  ＝C6 では「v5.5.4 へ統一する」ことと「hal に戻す」ことが**同じ blob を
-#  リンクする**ことを意味し，§10-12 のハングを持ち込む側になる。
-#  ∴ C6 BT の既定は v6.1 とし，v5.5.4（submodule）は
-#  `-DASP3_BT_IDF_V554=ON` の**明示 opt-in**（＝下記の決定的対照実験用）とする。
-#
-option(ESP32C6_BT_IDF61 "Use IDF v6.1 matched-set (bt/phy/coex/libble_app.a) instead of hal submodule for C6 BLE. Default ON = the only C6 BT configuration with hardware evidence (D-1/D-2b/D-2c). OFF = hal (esp-hal-3rdparty; §10-12 register_chipv7_phy synth-lock hang, D-1 unreached)" ON)
-if(ESP32C6_BT_IDF61)
-    include(${CMAKE_CURRENT_LIST_DIR}/esp_bt_idf61.cmake)
-else()
 
 set(BT_TARGETDIR ${TARGETDIR}/bt)
 get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf ABSOLUTE)
 
 #
-#  ESP32C6_BT_NIMBLEの判定を先出しする（下の「2. ソースファイル」節で
-#  hci_driver_standard.c／hci_driver_nimble.cの二者択一に使うため．
-#  ブロック本体＝ソース/インクルード追加は末尾のD-2a節で行う）．
+#  ------------------------------------------------------------------
+#  ★★供給元の選択（2026-07-17 に全面訂正．evidence-c6-01 §1・§2・§5）
+#  ------------------------------------------------------------------
 #
-option(ESP32C6_BT_NIMBLE "Enable NimBLE host stack on top of BT controller (Phase D-2a/BLE実施02)" OFF)
+#  【旧記述は実測で反証された】旧コメントは
+#    「事前md5実測：libble_app.a・libphy.a・libbtbb.a は v5.5.4/v6.1 間で
+#      C6 もバイト完全一致（register_chipv7_phy含む）——差はlibcoexist.aのみ」
+#  としていたが，**C6 では成立しない**。本PCでの md5 実測：
+#
+#    file           submodule(v5.5.4tag)  hal        v6.1-beta1  ~/tools/esp-idf
+#    libble_app.a   75db98e5              75db98e5   c28653df    54cb6f5f
+#    libphy.a       cb429107              cb429107   3fea0708    6b62ea91
+#    libbtbb.a      cbe3022f              cbe3022f   d31c8865    1037b470
+#    libcoexist.a   55344862              55344862   797d4daf    cd3c5cff
+#
+#  ＝(a) **真の v5.5.4 タグ ≡ hal（4/4 バイト一致）**，
+#    (b) v5.5.4 タグ と v6.1 は **4/4 すべて相違**（「バイト同一」は誤り）。
+#  旧記述が成立していたのは，当時の `~/tools/esp-idf`（＝別PCの
+#  `v5.5.4-1169-gbb2188bf`＝release/v5.5 先端）が **BT blob について v6.1 と
+#  一致していた**ためで，そのツリーを「v5.5.4」と**名前で誤認**した結果である
+#  （実際は +1169）。＝本質は「v5.5.4≡v6.1」ではなく「**+1169≡v6.1**」。
+#
+#  【★外部絶対パスの撤去（本PCでは版すら違う）】旧実装は
+#  `set(IDF /home/honda/tools/esp-idf)`（v5.5.4を名乗る）と
+#  `set(IDF /home/honda/tools/esp-idf-v6.1)` のローカルパス直書きだった。
+#  実測：**本PCの `~/tools/esp-idf` は v5.5(=v5.5.0, 8c750b08) の shallow clone**
+#  ＝v5.5.4 タグでも +1169 でもない**第3の版**であり，どのラウンドでも
+#  検証されていない。同じパス名が PC ごとに別版を指す＝再現性が無い。
+#  ⇒ v5.5.4 は **submodule（IDF_V554＝735507283d）を相対参照**する。
+#     v6.1 は submodule 化されていないため `ESP_IDF61_DIR` キャッシュ変数
+#     （既定＝従来パス）とし，不在なら明示的に FATAL_ERROR で落とす。
+#
+#  【既定＝v6.1（OFF）とする理由】上表 (a) より，C6 で v5.5.4 を選ぶことは
+#  **hal と同一の blob をリンクする**ことと等価であり，§10-12 の
+#  `register_chipv7_phy` RFシンセ非ロック（D-1未達）を持ち込む側になる。
+#  実機エビデンス（D-1/D-2b/D-2c）があるのは v6.1 のみ（§13-15）。
+#
+#  【★ASP3_BT_IDF_V554=ON は「決定的対照」実験のためにこそ在る】
+#  §13 の A/B は **blob と グルー(bt.c/シム) を同時に**入れ替えていた
+#  （hal＝esp_os_*/platform-os.h 型 → v6.1＝C3型＋bt_shim_idf61.c）＝
+#  2変数同時変更で交絡しており，「非収束は blob の版が原因」という帰属は
+#  **分離されていない**（HANDOFF §5-1「決定的対照を省くと偽の成功譚になる」）。
+#  実測：**submodule v5.5.4 タグの C6 bt.c は v6.1 と同じ C3型**（hal だけが
+#  esp_os_* 型）。∴ 本トグル ON ＝「**C3型グルー × hal と同一の blob**」＝
+#  §13 に欠けていた **4アーム目**であり，これを実機で回すと
+#    - ハングする → 原因は **blob の版**（v6.1 が必須／C6のv5.5.4統一は不可）
+#    - 動作する   → 原因は **hal のグルー/シム**（blob は無罪／統一は可能）
+#  が**一意に決まる**。＝実機ラウンドで最優先に測るべき対照（evidence-c6-01 §7）。
+#
+#  ★★【2026-07-17 実機結果＝evidence-c6-05。上の «2択» はどちらでもなかった】
+#  本DUT（14:C1:9F:E0:5A:9C・rev v0.2）で3アームを同一条件で回した実測：
+#      hal  （hal型グルー × blob 75db98e5/cb429107）: warm D-1 / 真cold D-1
+#      v554 （C3型グルー  × blob 75db98e5/cb429107）: warm D-1 / 真cold D-1  ★4アーム目
+#      v61  （C3型グルー  × blob c28653df/3fea0708）: warm D-1 / 真cold D-1
+#  ＝**3供給すべて D-1 到達**。∴ **blob 無罪・グルー無罪**。
+#  上の2択表は「hal＝ハング」を所与にしていたが、**その所与が本個体で再現しない**
+#  （§10-12 の hal ハングは board C＝rev v0.3 での観測。本DUT は rev v0.2）。
+#  ⇒ **「非収束は blob の版が原因」は反証**され、**「動作する⇒hal グルーが原因」も
+#  成立しない**（グルーを替えなくても動くため）。**§10-12 の正体は未解決＝個体/rev 交絡**
+#  （board C 非接続で分離不能）。
+#  ⇒ **実務結論：submodule の v5.5.4 供給で C6 BT は D-1 に到達する＝外部 v6.1 tree 依存は
+#  外せる**（evidence-c6-01 §6 の据置きは撤回）。**ただし v554 の実績は D-1 まで／
+#  現行既定 v6.1 は D-2b/D-2c まで**＝**既定を替える前に v554 で D-2b を確認すること**。
+#  正本＝.steering/20260716-c3c5c6-esp-idf-supply-migration/evidence-c6-05-blob-vs-glue-4th-arm.md
+#
+#
+#  ★★【2026-07-17 evidence-c6-06：既定を ON へ反転した】
+#  4アーム目（evidence-c6-05）で blob 無罪・グルー無罪が確定し、本ラウンドで
+#  v554 の実機実績が v6.1 に «追いついた／追い越した»（同一ボード board C 実測）：
+#      level                          v6.1(§13-15)   v554(evidence-c6-06)
+#      D-1                            warm           warm + ★真cold
+#      D-2b (sync→adv rc=0)           warm           warm + ★真cold
+#      SM=ON build + device D-2a/2b   warm           warm + ★真cold
+#      D-2c/D-2d OTA                  未実施          未実施（同条件）
+#  ⇒ **v554 は全レベルで v6.1 以上**＝「D-1 の実績で D-2b の実績を上書きする」問題は無い。
+#  ⇒ 既定 ON にすることで **外部 v6.1 tree（ESP_IDF61_DIR＝submodule でない
+#     ローカルパス＝provenance の罠）への依存を «既定で» 外す**（evidence-c6-01 §6 の
+#     据置き撤回の実装）。**OFF で v6.1 へ完全に戻せる＝可逆**。
+#
+option(ASP3_BT_IDF_V554 "Use the esp-idf submodule (TRUE v5.5.4 tag = 735507283d) BT controller/phy/coexist. Default ON (evidence-c6-06): on board C the v5.5.4-submodule supply reaches D-1 / D-2b / SM=ON device-side D-2a-2b at BOTH warm and TRUE COLD, i.e. >= the v6.1 evidence (which is warm-only), and it removes the dependency on the external non-submodule v6.1 tree. OFF = v6.1 matched set (reversible)" ON)
+
+set(ESP_IDF61_DIR /home/honda/tools/esp-idf-v6.1 CACHE PATH
+    "Path to an ESP-IDF v6.1 tree (NOT a submodule; supplies the C6 BLE matched set). Override with -DESP_IDF61_DIR=<path>")
+
+if(ASP3_BT_IDF_V554)
+    #  ★真の v5.5.4 タグ＝submodule（target.cmake が相対で定義済み）
+    set(IDF ${IDF_V554})
+else()
+    set(IDF ${ESP_IDF61_DIR})
+    if(NOT EXISTS ${IDF}/components/bt/controller/esp32c6/bt.c)
+        #  ★evidence-c6-09：旧文言は退避先として「-DESP32C6_BT_IDF61=OFF (hal)」を
+        #  案内していたが、**hal 経路は削除された**ので «存在しない指示» になる。
+        #  現在の退避先は「既定へ戻す（-DASP3_BT_IDF_V554=ON）」だけ。
+        message(FATAL_ERROR
+            "ESP32C6_BT: -DASP3_BT_IDF_V554=OFF selects the external IDF v6.1 "
+            "matched set, but no v6.1 tree was found at ESP_IDF61_DIR='${IDF}'. "
+            "v6.1 is NOT vendored as a submodule. Either pass "
+            "-DESP_IDF61_DIR=<path-to-esp-idf-v6.1>, or just use the default "
+            "(-DASP3_BT_IDF_V554=ON = esp-idf submodule, true v5.5.4 tag), "
+            "which reaches D-1/D-2b/D-2c/D-2d at true cold. "
+            "NOTE: the old hal fallback (-DESP32C6_BT_IDF61=OFF) no longer "
+            "exists; the hal path was removed in evidence-c6-09. "
+            "See .steering/20260716-c3c5c6-esp-idf-supply-migration/"
+            "evidence-c6-09-*.md")
+    endif()
+endif()
+set(BT_CHIP_SERIES esp32c6)
+
+#
+#  ★BLE実施14（docs/ble-c5c6-plan.md §14）：v6.1 D-1 の上に NimBLE ホストを
+#  載せて D-2a（host-controller sync）→D-2b（ble_gap_adv_start rc=0）を実機
+#  到達させる．NimBLE 有効化トグル（ESP32C6_BT_NIMBLE）で判定を先出し
+#  する（下の「2. ソースファイル」節で hci_driver_standard.c／
+#  hci_driver_nimble.c の二者択一・CONFIG_BT_CONTROLLER_ONLY の D-1 限定化に
+#  使うため．ブロック本体＝NimBLE ソース/インクルード追加は末尾の D-2a 節）．
+#  RAM 予算のため既定 OFF．NimBLE を要するアプリ（ble_host_smoke_c6）で自動 ON．
+#  D-1 の bt_smoke_c6 は痩せたまま保つ．★実装は hal 版（esp_bt.cmake の
+#  ESP32C6_BT_NIMBLE ブロック）ではなく **C5 esp_bt.cmake の IDF v6.1 NimBLE
+#  ブロックを範とする**——本 D-1 が既に v6.1 controller/phy を使うため，
+#  nimble も ${IDF} から採り hal-nimble を混ぜない（C5 冒頭のライブラリ世代
+#  選定と同じ理由．検証則：v6.1 blob は nimble_mem_*／os_memblock_* を未解決の
+#  まま残すため esp_nimble_mem.c と os_mempool.c の «両方» をリンクして初めて
+#  v6.1 nimble に乗れている＝esp_nimble_mem.c 無しでリンクが通ったら hal-nimble を
+#  誤って引いた合図＝要調査）．
+#
+option(ESP32C6_BT_NIMBLE "Enable NimBLE host stack on IDF v6.1 controller (Phase D-2a/D-2b, BLE実施14)" OFF)
 if(ASP3_APPLNAME STREQUAL "ble_host_smoke_c6")
     set(ESP32C6_BT_NIMBLE ON)
 endif()
 
+#
+#  ★§20 pmu_init（evidence-c6-02 §5）を A/B するためのトグル。
+#
+#  既定 ON ＝ evidence-c6-01 までの挙動と «完全に同一»（非回帰）。
+#  OFF ＝ §20（2c39cad）以前の挙動＝pmu_init を «呼ばない・積まない»。
+#
+#  なぜトグルが要るか：§20 は「stock の pmu_init を移植して C6 BT の cold
+#  PLL-lock を直す」変更だが，**コミットメッセージ自身が「cold実機検証は
+#  次段（親の真電源断が必要）」と書いており実機で一度も検証されていない**。
+#  そして evidence-c6-02 の実測では，§20 «以前» のバイナリ
+#  （build/c6bt_idf61＝§13 の D-1 成功イメージ）は本個体で phy_init を
+#  通過するのに，現在のコードを同一 toolchain（GCC14.2）で再ビルドすると
+#  phy_init でハングする。∴ §20 が回帰の «容疑者» になった。
+#
+#  ★これは «相関» に過ぎない（rigor 標準・第6再発「change X → symptom Y
+#  は因果の証拠にならない」）。だから憶測で消さず，**トグルで反実仮想
+#  （pmu_init だけを外して再測）を実際に走らせて判定する**。
+#
+option(ESP32C6_BT_PMU_INIT
+    "Call the ported stock PMU HP_ACTIVE init (§20/2c39cad) early from hardware_init_hook. Default ON = the behaviour of evidence-c6-01 (unchanged). OFF = pre-§20 behaviour (pmu_init neither linked nor called); use to A/B the §20 port, which was never hardware-verified"
+    ON)
+
 list(APPEND ASP3_COMPILE_DEFS
     TOPPERS_ESP32C6_BT
-    #  bt.cは`#ifdef ESP_PLATFORM`でesp_log.hの実include可否を分岐する
-    #  （未定義だとESP_LOGWがESP_LOG_LEVEL_LOCAL等へマクロ展開されず，
-    #  他ヘッダ由来の素の関数宣言のみが残りリンクエラーになる．実機
-    #  ビルドで判明）．
     ESP_PLATFORM
     CONFIG_BT_ENABLED
     CONFIG_BT_CONTROLLER_ENABLED
     CONFIG_IDF_TARGET_ESP32C6=1
     CONFIG_FREERTOS_NUMBER_OF_CORES=1
-    #  VHCI（HCI_TRANSPORT_VHCI経由．esp_vhci_host_*公開API）を選択．
+    #  CONFIG_BT_CONTROLLER_ONLY=1 は D-1（NimBLE ホスト無し）限定．実ESP-IDF
+    #  Kconfig では CONTROLLER_ONLY と NIMBLE_ENABLED は排他選択のため，NimBLE
+    #  ON 時（ble_host_smoke_c6）には立てない（C5 esp_bt.cmake と同じ分離）．
+    #  実際の定義は下の「2. ソースファイル」節の if(NOT ESP32C6_BT_NIMBLE) 内．
+    #  VHCI（esp_vhci_host_* 公開API）
     CONFIG_BT_LE_HCI_INTERFACE_USE_RAM=1
-    #  msys（HCI ACL用共有mbufプール）の初期化をコントローラ内部
-    #  （blobのr_esp_ble_msys_init）へ委譲する．OFFにすると
-    #  porting/nimble/src/os_mbuf.c／mem.c（C3の古い世代専用ツリー）が
-    #  別途必要になり本ビルドのソース集合に含まれないため，必ずONにする
-    #  （esp32c6 Kconfig既定値もy．詳細はdocs/ble-c5c6.md）．
+    #  msys 初期化をコントローラ内部へ委譲（esp32c6 Kconfig 既定 y）
     CONFIG_BT_LE_MSYS_INIT_IN_CONTROLLER=1
-    #  ↑がyのため実行時にはr_esp_ble_msys_init(blob)へ委譲されるが，
-    #  os_msys_init.cはOS_MSYS_*_BLOCK_COUNT/SIZE計算のため以下を
-    #  無条件に参照する（esp32c6/Kconfig.inの既定値）．
     CONFIG_BT_LE_MSYS_1_BLOCK_COUNT=12
     CONFIG_BT_LE_MSYS_1_BLOCK_SIZE=256
     CONFIG_BT_LE_MSYS_2_BLOCK_COUNT=24
     CONFIG_BT_LE_MSYS_2_BLOCK_SIZE=320
     CONFIG_BT_LE_MSYS_BUF_FROM_HEAP=1
-    #  npl_os_freertos.cのcallout実装にesp_timer_*（bt/bt_shim.c提供）を
-    #  選択し，FreeRTOSソフトタイマ（xTimerCreate等）経路を避ける
-    #  （C3のD-2a節と同じ判断．bt/stub/include/freertos/timers.hは型と
-    #  プロトタイプのみで実体を持たないため必須）．
+    #  callout に esp_timer_*（bt_shim_idf61.c 提供）を選択
     CONFIG_BT_LE_USE_ESP_TIMER=1
-    #  esp_bt_cfg.hがフォールバック無しで無条件参照する4項目
-    #  （esp32c6/Kconfig.inの既定値をそのまま採用）．
+    #  esp_bt_cfg.h が無条件参照する項目（esp32c6 Kconfig.in 既定値）
     CONFIG_BT_LE_COEX_PHY_CODED_TX_RX_TLIM_EFF=0
     CONFIG_BT_LE_DFT_TX_POWER_LEVEL_DBM_EFF=0
     CONFIG_BT_LE_DFT_ADV_SCHED_PRIO_LEVEL=0
     CONFIG_BT_LE_DFT_PERIODIC_ADV_SCHED_PRIO_LEVEL=1
     CONFIG_BT_LE_DFT_SYNC_SCHED_PRIO_LEVEL=1
-    #  BT_CONTROLLER_INIT_CONFIG_DEFAULT()（esp32c6/esp_bt.h）が参照する
-    #  残りのCONFIG_*一式（esp32c6/Kconfig.inの既定値をそのまま採用．
-    #  bt_smoke_c6はKconfig非経由のためここで明示的に埋める）．
     CONFIG_BT_LE_LL_RESOLV_LIST_SIZE=4
     CONFIG_BT_LE_LL_DUP_SCAN_LIST_COUNT=20
     CONFIG_BT_LE_LL_SCA=60
     CONFIG_BT_LE_CONTROLLER_TASK_STACK_SIZE=4096
     CONFIG_BT_LE_EXT_ADV_RESERVED_MEMORY_COUNT=2
     CONFIG_BT_LE_CONN_RESERVED_MEMORY_COUNT=2
-    #  CONFIG_XTAL_FREQはhal/nuttx/esp32c6/include/sdkconfig.h（カーネル
-    #  共通で常時include済み）が既に40を定義済み（ASP3実測40MHz XTALと
-    #  一致，Phase A実機結果）のため重複定義しない．CPUクロック160MHzは
-    #  同sdkconfig.hが `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ
-    #  CONFIG_ESPRESSIF_CPU_FREQ_MHZ` という間接マクロにしているため，
-    #  CONFIG_ESP_DEFAULT_CPU_FREQ_MHZを直接-Dしても後勝ちで無効化される
-    #  （sdkconfig.hが後からredefineする）．実体のCONFIG_ESPRESSIF_
-    #  CPU_FREQ_MHZ側を定義する（target_kernel_impl.cのCORE_CLK_MHZと
-    #  一致させる）．
+    #  ★XTAL/CPU クロック：C6 は hal/nuttx/esp32c6/include/sdkconfig.h
+    #  （カーネル共通で常時include済み）が CONFIG_XTAL_FREQ=40 と
+    #  CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ→CONFIG_ESPRESSIF_CPU_FREQ_MHZ の
+    #  間接マクロを定義する．esp_bt.h（v6.1 esp32c6）の
+    #  BT_CONTROLLER_INIT_CONFIG_DEFAULT() は CONFIG_XTAL_FREQ／
+    #  CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ を直接参照するため，実体の
+    #  CONFIG_ESPRESSIF_CPU_FREQ_MHZ=160 のみ -D する（C5 のように XTAL を
+    #  -D すると sdkconfig.h の後勝ち redefine と競合するため定義しない．
+    #  hal 版 esp_bt.cmake と同じ判断）．
     CONFIG_ESPRESSIF_CPU_FREQ_MHZ=160
-    #  esp_ipc.hのesp_ipc_func_t等はCONFIG_ESP_IPC_ENABLE無しでは
-    #  丸ごと非公開になる（C3のesp_bt.cmakeと同じ理由）．
     CONFIG_ESP_IPC_ENABLE
-    #  esp_wifi.cmake／C3のesp_bt.cmakeと同じ理由（PLL温度追従は較正
-    #  データ永続化前提．本ビルドは毎回フル較正のため無効化で十分）
     CONFIG_ESP_PHY_DISABLE_PLL_TRACK=1
-    #  MALLOC_CAP_DMA/MALLOC_CAP_INTERNAL：phy_init.cがheap_caps.hを
-    #  #includeせず直値のビットマスクを期待するため（値の意味自体は
-    #  esp_shim_libc.cのheap_caps_*がcapsを無視するため持たない．
-    #  シンボル解決のみ）
     MALLOC_CAP_DMA=8
     MALLOC_CAP_INTERNAL=2048
 )
 
 #
-#  npl_os_freertos.cはnimble/nimble_npl.h（→nimble_npl_os.h．IRAM_ATTR
-#  使用のstatic inline群）を，esp_heap_caps.h等esp_attr.hを間接的に
-#  含むヘッダより前にincludeする（C3のesp_bt.cmakeの-include
-#  esp_intr_alloc.hと同種の事情）．IRAM_ATTRが未定義のまま
-#  static inline宣言の途中でパースエラーになるため，全Cファイルへ
-#  esp_attr.hを強制includeする．
-#
-#
-#  npl_os_freertos.cはESP_IDF_VERSION/ESP_IDF_VERSION_VAL（esp_idf_
-#  version.h）を#if内で使うが，自ファイルではincludeしない
-#  （実ESP-IDFではビルドシステムが暗黙includeする前提のヘッダ．
-#  esp_intr_alloc.hと同種の事情）．未定義のまま#if内で関数マクロ
-#  呼出し風に使われると"missing binary operator"エラーになるため，
-#  esp_attr.hと合わせて強制includeする．
-#
-#  ★2個以上の-includeを併用する場合はSHELL:接頭辞が必須（C3の
-#  esp_bt.cmake「D-2b」節の罠と同じ．無しだと2個目以降の引数分割が
-#  壊れ"cannot specify -o with -c/-S/-E with multiple files"になる）．
-#  esp_bt_cfg.h（BT_LL_ADV_SM_RESERVE_CNT_N等）はMIN()マクロを
-#  <sys/param.h>の暗黙includeを前提に使う（実ESP-IDFはビルドシステム
-#  経由でグローバルに見える）．未定義だと関数呼出しと誤認され
-#  リンクエラーになる（実機ビルドで判明．hal_stub/include/sys/param.h
-#  に既存のMIN定義あり＝そちらへ強制誘導する）．
-#  os/os_mempool.h・os/os_mbuf.hは
-#  `#if SOC_ESP_NIMBLE_CONTROLLER && CONFIG_BT_CONTROLLER_ENABLED` で
-#  r_プレフィクス版（os_memblock_get→r_os_memblock_get等，blob/ROM
-#  実体と一致するASP3が使うべき側）かplain名版かを切替えるが，
-#  hci_driver_standard.c／npl_os_freertos.cは"soc/soc_caps.h"
-#  （SOC_ESP_NIMBLE_CONTROLLERの定義元）より前に"os/os_mbuf.h"や
-#  "os/os_mempool.h"をincludeするため，plain名版が選ばれてしまい
-#  未定義参照になる（実機リンクで判明）．soc_caps.hを強制的に最初へ
-#  includeして常にr_版を選ばせる．
-#
-#  ★BLE実施02（GCC14.2.0での再ビルドで発覚．D-1にも波及する既存不具合の
-#  修正）：本環境のGCC 14.2.0はimplicit-function-declaration／
-#  int-to-pointer変換を既定でハードエラーにする（実施01時点のツール
-#  チェーンでは警告どまりだった）．npl_os_freertos.cはesp_timer.hを
-#  自ファイルでincludeせずesp_timer_is_active/esp_timer_get_expiry_time
-#  を直接呼ぶ（実ESP-IDFのビルドシステムが暗黙includeする前提のヘッダ．
-#  上のsoc/soc_caps.h等と同種の事情）．bt.cはnpl_os_funcs_init等
-#  （実体はbt/bt_shim.cのブリッジ関数）をプロトタイプ無しで直接呼ぶ
-#  （BLE実施01が特定した上流ドリフト）．いずれもhal/は編集できないため，
-#  target側でプロトタイプ／宣言を強制includeする．
-#  npl_os_bridge.hの詳細＝同ファイル冒頭コメント参照．
+#  強制include（C5 BLE実施03 と同一．v6.1 のソースが暗黙include前提と
+#  する 5ヘッダ．hal 版の esp_timer.h／npl_os_bridge.h は不要＝v6.1 は
+#  esp_timer.h を自ファイルで include し，npl_os_* ドリフトも無い．
+#  代わりに os_mempool.c の BIT() マクロ用に esp_bit_defs.h を足す）．
 #
 list(APPEND ASP3_COMPILE_OPTIONS
     "$<$<COMPILE_LANGUAGE:C>:SHELL:-include soc/soc_caps.h>"
     "$<$<COMPILE_LANGUAGE:C>:SHELL:-include esp_attr.h>"
     "$<$<COMPILE_LANGUAGE:C>:SHELL:-include esp_idf_version.h>"
     "$<$<COMPILE_LANGUAGE:C>:SHELL:-include sys/param.h>"
-    "$<$<COMPILE_LANGUAGE:C>:SHELL:-include esp_timer.h>"
-    "$<$<COMPILE_LANGUAGE:C>:SHELL:-include npl_os_bridge.h>"
+    "$<$<COMPILE_LANGUAGE:C>:SHELL:-include esp_bit_defs.h>"
+    #  ★v6.1 npl_os_freertos.c は esp_timer_is_active／esp_timer_get_expiry_time
+    #  を esp_timer.h を include せずに呼ぶ（上流ドリフト）が，本ビルドの
+    #  esp_timer.h は hal_stub 版に解決され同2関数の宣言を持たない．
+    #  bt/bt_esp_timer_ext.h（stub esp_timer.h を include し2宣言を補う）を
+    #  force-include して GCC14.2 の暗黙宣言 hard error を回避する．
+    "$<$<COMPILE_LANGUAGE:C>:SHELL:-include bt/bt_esp_timer_ext.h>"
+    #  ★v6.1 phy_init.c（phy_enter_critical）は xPortInIsrContext() を呼ぶが
+    #  freertos/task.h を include しない（freertos/FreeRTOS.h＋portmacro.h の
+    #  みで xPortInIsrContext は task.h 側にある）．GCC14.2 は暗黙宣言を
+    #  hard error にするため，C3 stub の freertos/task.h（xPortInIsrContext
+    #  ＝sns_ctx() の static inline．自己完結＝先頭で FreeRTOS.h を include）を
+    #  強制includeして可視化する．他の -include 群と同じ«暗黙include前提
+    #  ヘッダの補完»．
+    "$<$<COMPILE_LANGUAGE:C>:SHELL:-include freertos/task.h>"
 )
 
 #
 #  ------------------------------------------------------------------
 #  1. インクルードパス
 #  ------------------------------------------------------------------
+#  ★C3 の bt/stub/include（freertos/*.h＋esp_partition.h）を再利用する
+#  （v6.1 の bt.c は C3 と同じプログラミングモデル）．
 #
-#  ★重要：BT_TARGETDIR/stub/includeを先頭へPREPENDする．
-#  "platform/os.h" の解決はまず本ディレクトリのos.h（esp_os_*宣言を
-#  追加）に当たり，そのos.hが#include_nextでC3のhal_stub/include版
-#  （target.cmakeが既に全ビルド共通でASP3_INCLUDE_DIRSへ追加済み＝
-#  この時点で既にリストに入っている）へフォールバックする設計．
-#  単純APPENDだとhal_stub版が先に見つかり，esp_os_*宣言が失われる．
-#
-list(PREPEND ASP3_INCLUDE_DIRS ${BT_TARGETDIR}/stub/include)
+#  ★BLE実施14：NimBLE ON 時，C6 idf61 専用の bt_nimble_config.h（LEGACY_VHCI=0）を
+#  C3 stub（LEGACY_VHCI=1 同梱）より前に PREPEND する（C5 esp_bt.cmake と同じ罠
+#  対策）．順序を誤ると C3 版が先に見つかり LEGACY_VHCI=1＝mbuf 余白計算が
+#  トランスポートと不整合になるサイレントな実行時バッファバグ．D-1（bt_smoke_c6）は
+#  bt_nimble_config.h を include しないため本 PREPEND は無害．
+list(PREPEND ASP3_INCLUDE_DIRS ${TARGETDIR}/bt/stub_idf61/include)
 
 list(APPEND ASP3_INCLUDE_DIRS
-    ${TARGETDIR}/wifi
     ${C3_TARGETDIR}/bt/stub/include
-    ${ESP_HAL_DIR}/components/bt/include/esp32c6/include
-    ${ESP_HAL_DIR}/components/bt/common/include
-    ${ESP_HAL_DIR}/components/bt/common/ble_log/include
-    ${ESP_HAL_DIR}/components/bt/porting/include
-    ${ESP_HAL_DIR}/components/bt/porting/include/os
-    ${ESP_HAL_DIR}/components/bt/porting/npl/freertos/include
-    ${ESP_HAL_DIR}/components/bt/porting/transport/include
-    ${ESP_HAL_DIR}/components/bt/controller/esp32c6
-    #  esp_nimble_mem.h（porting/mem/os_msys_init.cが要求）
-    ${ESP_HAL_DIR}/components/bt/host/nimble/port/include
-    #  os/os.h・os/os_trace_api.h・modlog/modlog.h（os_mbuf.cが要求．
-    #  upstream nimbleツリーの共通include）
-    ${ESP_HAL_DIR}/components/bt/host/nimble/nimble/porting/nimble/include
-    ${ESP_HAL_DIR}/components/esp_hw_support/include
-    ${ESP_HAL_DIR}/components/esp_hw_support/include/soc
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c6/include
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c6/private_include
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/include
-    ${ESP_HAL_DIR}/components/esp_system/include
-    #  esp_private/wifi.h（phy_init.cが要求．C3のesp_bt.cmakeと同じ理由
-    #  ＝BTもWi-Fiと同じPHY実ソースを使うため）
-    ${ESP_HAL_DIR}/components/esp_wifi/include
-    ${ESP_HAL_DIR}/components/esp_phy/include
-    ${ESP_HAL_DIR}/components/esp_phy/esp32c6/include
-    ${ESP_HAL_DIR}/components/esp_pm/include
-    ${ESP_HAL_DIR}/components/esp_timer/include
-    ${ESP_HAL_DIR}/components/esp_coex/include
-    ${ESP_HAL_DIR}/components/esp_rom/include
-    ${ESP_HAL_DIR}/components/esp_rom/esp32c6/include
-    ${ESP_HAL_DIR}/components/esp_rom/esp32c6/include/esp32c6
-    ${ESP_HAL_DIR}/components/esp_rom/esp32c6
-    ${ESP_HAL_DIR}/components/heap/include
-    ${ESP_HAL_DIR}/components/log/include
-    ${ESP_HAL_DIR}/components/riscv/include
-    ${ESP_HAL_DIR}/components/esp_hal_gpio/include
-    ${ESP_HAL_DIR}/components/esp_hal_gpio/esp32c6/include
-    ${ESP_HAL_DIR}/components/esp_hal_clock/include
-    ${ESP_HAL_DIR}/components/esp_hal_clock/esp32c6/include
-    ${ESP_HAL_DIR}/components/efuse/include
-    ${ESP_HAL_DIR}/components/efuse/esp32c6/include
-    ${ESP_HAL_DIR}/components/esp_event/include
-    #  hal/pmu_ll.h・hal/pmu_hal.h（wifi/esp_shim.cのesp_shim_modem_icg_init
-    #  が要求．esp_wifi.cmakeにも同じ2行がある＝WiFi/BT共有ファイルの
-    #  依存としてBT側でも要る）
-    ${ESP_HAL_DIR}/components/esp_hal_pmu/include
-    ${ESP_HAL_DIR}/components/esp_hal_pmu/esp32c6/include
-    #  hal/rtc_timer_hal.h（rtc_time.cが要求）
-    ${ESP_HAL_DIR}/components/esp_hal_rtc_timer/include
-    ${ESP_HAL_DIR}/components/esp_hal_rtc_timer/esp32c6/include
-    #  hal/timg_ll.h（rtc_time.cが要求）
-    ${ESP_HAL_DIR}/components/esp_hal_timg/include
-    ${ESP_HAL_DIR}/components/esp_hal_timg/esp32c6/include
+    ${TARGETDIR}/wifi
+    ${IDF}/components/bt/include/${BT_CHIP_SERIES}/include
+    ${IDF}/components/bt/common/include
+    ${IDF}/components/bt/common/ble_log/include
+    ${IDF}/components/bt/porting/include
+    ${IDF}/components/bt/porting/include/os
+    #  ★evidence-c6-06：v5.5.4 の nimble_port.c:49 は `hci_log/bt_hci_log.h` を
+    #  include する（v6.1 の同ファイルは要求しない＝版差）。実体は
+    #  components/bt/common/hci_log/include/hci_log/bt_hci_log.h（v5.5.4・v6.1 とも実在）。
+    #  ∴ 供給元非依存で include path に加える（無害＝v6.1 でも同じ物が在る）。
+    #  ※本ファイル下方の注記「もし実機ビルドで hci_log/bt_hci_log.h が要求されたら」が
+    #    まさに現実化したもの（ASP3_BT_IDF_V554=ON 経路）。
+    ${IDF}/components/bt/common/hci_log/include
+    ${IDF}/components/bt/porting/npl/freertos/include
+    ${IDF}/components/bt/porting/transport/include
+    ${IDF}/components/bt/controller/${BT_CHIP_SERIES}
+    ${IDF}/components/bt/host/nimble/port/include
+    ${IDF}/components/bt/host/nimble/nimble/porting/nimble/include
+    ${ESP_SUP_DIR}/components/esp_hw_support/include
+    ${ESP_SUP_DIR}/components/esp_hw_support/include/soc
+    #  §20：pmu_init.c/ocode_init.c の `#include "regi2c_ctrl.h"`（プレーン名）
+    #  を解決する（esp_hw_support の private include．NON_OS_BUILD で ROM 直呼び）．
+    ${ESP_SUP_DIR}/components/esp_hw_support/include/esp_private
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/private_include
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/include
+    ${ESP_SUP_DIR}/components/esp_system/include
+    #  esp_private/wifi.h（phy_init.c．BT も WiFi と同じ PHY 実ソース）
+    ${IDF}/components/esp_wifi/include
+    ${IDF}/components/esp_phy/include
+    ${IDF}/components/esp_phy/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_DIR}/components/esp_pm/include
+    ${ESP_SUP_DIR}/components/esp_timer/include
+    ${IDF}/components/esp_coex/include
+    ${ESP_SUP_DIR}/components/esp_rom/include
+    ${ESP_SUP_DIR}/components/esp_rom/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_DIR}/components/esp_rom/${BT_CHIP_SERIES}/include/${BT_CHIP_SERIES}
+    ${ESP_SUP_DIR}/components/esp_rom/${BT_CHIP_SERIES}
+    ${ESP_SUP_DIR}/components/heap/include
+    ${ESP_SUP_DIR}/components/log/include
+    ${ESP_SUP_DIR}/components/riscv/include
+    ${ESP_SUP_HAL_gpio}/include
+    ${ESP_SUP_HAL_gpio}/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_HAL_clock}/include
+    ${ESP_SUP_HAL_clock}/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_DIR}/components/efuse/include
+    ${ESP_SUP_DIR}/components/efuse/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_DIR}/components/esp_event/include
+    #  hal/pmu_ll.h・hal/pmu_hal.h（wifi/esp_shim.c の esp_shim_modem_icg_init）
+    ${ESP_SUP_HAL_pmu}/include
+    ${ESP_SUP_HAL_pmu}/${BT_CHIP_SERIES}/include
+    #  hal/rtc_timer_hal.h（rtc_time.c）
+    ${ESP_SUP_HAL_rtc_timer}/include
+    ${ESP_SUP_HAL_rtc_timer}/${BT_CHIP_SERIES}/include
+    #  hal/timg_ll.h（rtc_time.c）
+    ${ESP_SUP_HAL_timg}/include
+    ${ESP_SUP_HAL_timg}/${BT_CHIP_SERIES}/include
+    #  modem/i2c_ana_mst_reg.h・regi2c_impl.h 等（IDF socレイアウトでのみ
+    #  解決．esp_wifi.cmake §1b／C5 esp_bt.cmake と同じ理由．hal soc より後）
+    ${IDF}/components/esp_phy/${BT_CHIP_SERIES}/include
 )
 
-#
-#  ------------------------------------------------------------------
-#  2. ソースファイル（D-1最小集合＝controller-only＋VHCI）
-#  ------------------------------------------------------------------
-#  hal/components/bt/CMakeLists.txt L65-106（CONFIG_BT_CONTROLLER_ENABLED）
-#  ＋L694-743（CONFIG_BT_LE_CONTROLLER_NPL_OS_PORTING_SUPPORT＝新世代npl
-#  ＋CONFIG_BT_LE_HCI_INTERFACE_USE_RAM＝VHCI，非NimBLE分岐）で確認した
-#  最小ソース集合．
-#
-list(APPEND ASP3_CFG_FILES ${BT_TARGETDIR}/bt.cfg)
-
-list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-    ${ESP_HAL_DIR}/components/bt/controller/esp32c6/bt.c
-    ${ESP_HAL_DIR}/components/bt/controller/esp32c6/ble.c
-    ${ESP_HAL_DIR}/components/bt/porting/npl/freertos/src/npl_os_freertos.c
-    ${ESP_HAL_DIR}/components/bt/porting/mem/os_msys_init.c
-    ${ESP_HAL_DIR}/components/bt/porting/mem/bt_osi_mem.c
-    #  ★os_mbuf.c/os_mempool.cは自前で持たない：libble_app.a自身が
-    #  os_mbuf.c.o（g_msys_pool_list等）を同梱しており，自前リンクすると
-    #  多重定義になる（実機リンクで判明．最初の判断
-    #  ＝「os_mbuf.cが必要」は誤り，nmでの"U"表示はアーカイブ内members間
-    #  の相互参照を見誤ったもの）．hci_driver_standard.cが要求する
-    #  r_os_msys_get_pkthdr等はlibble_app.aから自動的に解決される．
-    #  esp_clk_tree_lp_slow_get_freq_hz（bt.cが直接呼ぶ．esp_wifi.cmakeの
-    #  ような既存リンクが無いためBT側で自前リンク．実体はcommon.c側）
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c6/esp_clk_tree.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp_clk_tree_common.c
-    ${ESP_HAL_DIR}/components/esp_hal_clock/esp32c6/clk_tree_hal.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c6/rtc_time.c
-    ${ESP_HAL_DIR}/components/bt/porting/transport/src/hci_transport.c
-    ${BT_TARGETDIR}/bt_shim.c
-    #  hci_driver_standard.c と hci_driver_nimble.c（D-2a節）は共に
-    #  hci_driver_vhci_opsを定義するため二者択一（同時リンク不可）．
-    #  D-1（controller-only．bt_smoke_c6）はstandard版を使う．
-    #  NimBLE ON時（ble_host_smoke_c6）はD-2a節がnimble版を追加する．
-    #  esp_wifi.cmakeと同じ理由でPHY/クロック/ペリフェラルの実ソースを
-    #  採用する（BTもWi-Fiと同じ無線ハードウェアを使うため必要）．
-    #  modem_clock.c／modem_clock_hal.cはWiFi非同時ONの制約があるため
-    #  BT単体ビルドでも自前で持つ必要がある（esp_wifi.cmakeのif
-    #  (ESP32C6_WIFI)ブロック内にありBTからは見えないため）．
-    ${ESP_HAL_DIR}/components/esp_phy/src/phy_init.c
-    ${ESP_HAL_DIR}/components/esp_phy/src/phy_common.c
-    ${ESP_HAL_DIR}/components/esp_phy/esp32c6/phy_init_data.c
-    ${ESP_HAL_DIR}/components/esp_phy/src/lib_printf.c
-    #  btbb_init.c（esp_btbb_enable/disable．bt.cが呼ぶ．CONFIG_SOC_BT_
-    #  SUPPORTED時は必須．hal/components/esp_phy/CMakeLists.txtの
-    #  has_libbtbb分岐と同じ判断——実機リンクでlibble_app.aの
-    #  esp_ble_interface.c.oがglobal_ext_bb_funcs経由でbt_bb_*シンボルを
-    #  直接参照することが判明し，「btbb相当は不要」という設計書6節1の
-    #  当初判断を訂正した．libbtbb.aは`bt/CMakeLists.txt`ではなく
-    #  esp_phy/lib/esp32c6/に同居している）
-    ${ESP_HAL_DIR}/components/esp_phy/src/btbb_init.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/modem_clock.c
-    ${ESP_HAL_DIR}/components/hal/esp32c6/modem_clock_hal.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/periph_ctrl.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/esp_clk.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp32c6/rtc_clk.c
-    #  efuse_hal_chip_revision()：BT_CONTROLLER_INIT_CONFIG_DEFAULT()と
-    #  modem_clock_select_lp_clock_source()の両方が参照する（esp_wifi.cmake
-    #  と同じ理由．ESP32C6_WIFI限定ブロック内のためBT側でも自前で持つ）．
-    ${ESP_HAL_DIR}/components/hal/efuse_hal.c
-    ${ESP_HAL_DIR}/components/hal/esp32c6/efuse_hal.c
-)
-
-if(NOT ESP32C6_BT_NIMBLE)
-    #  ★D-1＝controller-onlyスモークテスト（NimBLEホスト無し）限定．
-    #  CONFIG_BT_CONTROLLER_ONLYとCONFIG_BT_NIMBLE_ENABLEDは実ESP-IDFの
-    #  Kconfigでは同時に1にならない排他選択（advisorレビュー指摘）．
-    #  両方1のまま動かした実害箇所は現時点で未確認だが（hci_transport.c
-    #  のACL rxガードはNIMBLE_ENABLED&&ROLE_*のORで別途真になるため
-    #  無害と確認済み），未検証の組合せをC6実機のBLE初回結果に持ち込む
-    #  リスクを避けるためD-1限定に閉じ込める．
-    list(APPEND ASP3_COMPILE_DEFS
-        CONFIG_BT_CONTROLLER_ONLY=1
-    )
-    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-        ${ESP_HAL_DIR}/components/bt/porting/transport/driver/vhci/hci_driver_standard.c
+if(ASP3_BT_IDF_V554)
+    #  C5 esp_bt.cmakeと同じ理由：v5.5.4のesp_wifi_types_generic.hが
+    #  "esp_interface.h"を直接includeする（v6.1は不要）。実体は
+    #  ${IDF}/components/esp_hw_support/includeにある。
+    list(APPEND ASP3_INCLUDE_DIRS
+        ${IDF}/components/esp_hw_support/include
     )
 endif()
 
 #
 #  ------------------------------------------------------------------
-#  3. リンクライブラリパス・ライブラリ
+#  2. ソースファイル（D-1最小集合＝controller-only＋VHCI）
 #  ------------------------------------------------------------------
-#  ★実施92メモ（設計書リスク2）：無印C6（esp32c6サブディレクトリ）を
-#  選ぶ．esp32c61は別チップ（hal/components/bt/CMakeLists.txtの
-#  CONFIG_IDF_TARGET_ESP32C61分岐）で本リポジトリの対象外．
+#
+list(APPEND ASP3_CFG_FILES ${BT_TARGETDIR}/bt.cfg)
+
+list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+    ${IDF}/components/bt/controller/${BT_CHIP_SERIES}/bt.c
+    ${IDF}/components/bt/controller/${BT_CHIP_SERIES}/ble.c
+    ${IDF}/components/bt/porting/npl/freertos/src/npl_os_freertos.c
+    ${IDF}/components/bt/porting/mem/os_msys_init.c
+    ${IDF}/components/bt/porting/mem/bt_osi_mem.c
+    #  ★os_mempool.c を自前リンク（v6.1 blob が os_memblock_*／
+    #  os_mempool_* を plain名で未解決参照＝C5 BLE実施03の教訓．hal C6 は
+    #  blob 同梱で不要だったが v6.1 blob は異なる．os_mbuf.c は未参照の
+    #  ため引き続き含めない＝多重定義が出れば除去する）．
+    #
+    #  ★供給元による**レイアウト差**（実測．evidence-c6-01 §5）：
+    #    v6.1        … components/bt/porting/mem/os_mempool.c
+    #    v5.5.4タグ  … components/bt/porting/mem/ に **無い**
+    #                  （在るのは host/nimble/nimble/porting/nimble/src/ の方
+    #                  ＝NimBLE本家サブモジュール側の旧レイアウト）
+    #  ＝v6.1 で bt/porting へ移された。∴ `${IDF}` を差し替えるだけでは
+    #  configure が通らない（実測：Cannot find source file）。
+    #  なお v5.5.4タグの libble_app.a は **hal とバイト同一**であり，hal は
+    #  os_mempool.c を要さなかった（blob 同梱）ため，v5.5.4 側では
+    #  そもそも積まないのが正しい＝下の if で分岐する。
+    #  ★この事実自体が「旧 ASP3_BT_IDF_V554=ON は v5.5.4 タグを
+    #  一度も指していなかった」ことの傍証：旧実装は `${IDF}` を
+    #  `~/tools/esp-idf`（+1169＝v6.1系レイアウト）に向けていたため
+    #  この経路が通っていた。
+    #  （実体は下の if(NOT ASP3_BT_IDF_V554) で追加する）
+    #  PHY／クロック／ペリフェラルの実ソース（bt/phy/coex は IDF v6.1，
+    #  hw_support/clock/rtc/efuse/periph/modem_clock はチップ依存で hal 版．
+    #  C5 esp_bt.cmake と同じ origin-split）
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/esp_clk_tree.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/esp_clk_tree_common.c
+    ${ESP_SUP_HAL_clock}/${BT_CHIP_SERIES}/clk_tree_hal.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_time.c
+    ${IDF}/components/bt/porting/transport/src/hci_transport.c
+    #  hci_driver_standard.c（D-1）と hci_driver_nimble.c（D-2a 節）は共に
+    #  hci_driver_vhci_ops を定義するため二者択一（同時リンク不可）．D-1
+    #  （controller-only．bt_smoke_c6）は standard 版を下の
+    #  if(NOT ESP32C6_BT_NIMBLE) ブロックで追加する．NimBLE ON 時
+    #  （ble_host_smoke_c6）は D-2a 節が nimble 版を追加する．
+    ${BT_TARGETDIR}/bt_shim_idf61.c
+    ${IDF}/components/esp_phy/src/phy_init.c
+    ${IDF}/components/esp_phy/src/phy_common.c
+    ${IDF}/components/esp_phy/${BT_CHIP_SERIES}/phy_init_data.c
+    ${IDF}/components/esp_phy/src/lib_printf.c
+    ${IDF}/components/esp_phy/src/btbb_init.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/modem_clock.c
+    ${ESP_SUP_DIR}/components/hal/${BT_CHIP_SERIES}/modem_clock_hal.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/periph_ctrl.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/esp_clk.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_clk.c
+    ${ESP_SUP_DIR}/components/hal/efuse_hal.c
+    ${ESP_SUP_DIR}/components/hal/${BT_CHIP_SERIES}/efuse_hal.c
+    #
+    #  ★§20：cold RF-synth-PLL ロック用の pmu_init 移植．stock IDF の
+    #  起動シーケンスが呼ぶ PMU HP_ACTIVE 電源/アナログ初期化を ASP3 の
+    #  Direct Boot が飛ばしているのが C6 BT phy_init cold ハングの真因
+    #  （docs/ble-c5c6-plan.md §19.8＋§20）．pmu_init.c/pmu_param.c/
+    #  ocode_init.c は hal submodule（IDF v6.1 とバイト一致）を «そのまま»
+    #  リンクし，薄いシム bt_pmu_init_c6.c 経由で hardware_init_hook から
+    #  早期に呼ぶ（hal は編集しない＝禁则遵守）．regi2c は ROM 直呼び
+    #  （NON_OS_BUILD）でロック不要にし regi2c_ctrl.c 依存を避ける．
+    #  esp_rom_regi2c_read/write_mask（ROM regi2c ラッパ）を提供する ROM
+    #  パッチ．pmu_init/ocode/rtc_clk が NON_OS_BUILD で ROM 直呼びに落ちる
+    #  ときの最下層プロバイダ．
+    ${ESP_SUP_DIR}/components/esp_rom/patches/esp_rom_hp_regi2c_${BT_CHIP_SERIES}.c
+)
+
+#
+#  ★§20 の pmu_init 一式は ESP32C6_BT_PMU_INIT=ON のときだけ積む
+#  （既定 ON＝従来と同一．OFF で §20 以前＝pmu_init を積まない/呼ばない）。
+#  実体を積むのはここだけなので，呼出し側ガード
+#  TOPPERS_ESP32C6_BT_PMU_INIT の定義も «ここでだけ» 行う
+#  （hal 版＝esp_bt.cmake 本体は本ファイルを積まないので呼出しも無効＝
+#   §20 以前と同じ挙動でリンクできる＝★B2 可逆性）。
+#
+if(ESP32C6_BT_PMU_INIT)
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_init.c
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_param.c
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/ocode_init.c
+        ${BT_TARGETDIR}/bt_pmu_init_c6.c
+    )
+    list(APPEND ASP3_COMPILE_DEFS
+        TOPPERS_ESP32C6_BT_PMU_INIT
+    )
+endif()
+
+#
+#  ★os_mempool.c は v6.1 のみ（上の「レイアウト差」注記を参照）。
+#  v5.5.4タグ（ASP3_BT_IDF_V554=ON）では bt/porting/mem/ に存在せず，かつ
+#  当該 blob は hal とバイト同一＝hal 同様 blob 同梱で不要と予測される。
+#  実測で os_memblock_*／os_mempool_* が未解決になったら，v5.5.4 側の
+#  実体 `components/bt/host/nimble/nimble/porting/nimble/src/os_mempool.c`
+#  を積むこと（旧レイアウト）。
+#
+if(NOT ASP3_BT_IDF_V554)
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${IDF}/components/bt/porting/mem/os_mempool.c
+    )
+endif()
+
+#
+#  ★evidence-c6-08：LP タイマ HAL 実体の供給元差（C5 esp_bt.cmake:247-249 が
+#  記録済みの «同じドリフト»）。
+#    hal 供給 : rtc_time.c は `rtc_timer_hal_get_cycle_count` を呼ぶ
+#    esp-idf供給: rtc_time.c は `lp_timer_hal_get_cycle_count` を呼ぶ（実測）
+#  ＝**呼び先の名前が供給元で違う**。C5 の原則どおり「**ソースも同じ供給元から取る**
+#  ので名前差は消える」——ただし esp-idf 側は実体が `components/hal/lp_timer_hal.c`
+#  という **独立した .c** に居るため、**明示的にリンクが要る**（hal 側は
+#  `rtc_timer_hal.c` が存在せず別経路で解決するため不要＝実測）。
+#  ∴ esp-idf 供給のときだけ積む（hal 供給時に積むとファイルが無くて落ちる）。
+#
+if(ASP3_ESPIDF_SUPPLY)
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${ESP_SUP_DIR}/components/hal/lp_timer_hal.c
+    )
+endif()
+
+#  pmu_init.c/ocode_init.c/rtc_clk.c 内の REGI2C_WRITE_MASK/READ_MASK・
+#  regi2c_ctrl_write_reg* を «ROM 直呼び»（esp_rom_regi2c_*，ロック無し）へ
+#  解決させる（NON_OS_BUILD）．hardware_init_hook の早期（単一スレッド・
+#  割込み前）で呼ぶため regi2c_ctrl.c のクリティカルセクション（esp_os_*/
+#  saradc/tsens 依存）は不要＝リンク肥大を避ける．rtc_clk.c は ocode の
+#  calibrate 経路（本 board=efuse blk>=1 では非実行）から参照されるため
+#  同様に NON_OS へ寄せて regi2c_ctrl_write_reg 未解決を回避．
+set(_c6_non_os_srcs
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_clk.c
+)
+if(ESP32C6_BT_PMU_INIT)
+    list(APPEND _c6_non_os_srcs
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_init.c
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/ocode_init.c
+    )
+endif()
+set_source_files_properties(
+    ${_c6_non_os_srcs}
+    PROPERTIES COMPILE_DEFINITIONS "NON_OS_BUILD=1"
+)
+
+#
+#  §18：RF-cal regi2c トレース計装（既定 OFF・非回帰）．g_phyFuns テーブル
+#  （0x4087f954）の write/write_mask 枠を差し替え，synth 位相の regi2c write
+#  列を .bss リングバッファへ記録する．synth-lock ハング（§16/§17）の
+#  C5-vs-C6 diff 用．app が esp_bt_regi2c_trace_install() を controller_init
+#  より前に呼ぶ（TOPPERS_ESP32C6_BT_REGI2C_TRACE で app 側呼出しをガード）．
+#
+option(ESP32C6_BT_REGI2C_TRACE "Trace RF-cal regi2c writes via g_phyFuns table patch (§18 synth-lock diag)" OFF)
+if(ESP32C6_BT_REGI2C_TRACE)
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_BT_REGI2C_TRACE)
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${BT_TARGETDIR}/esp_bt_regi2c_trace.c
+    )
+endif()
+
+if(NOT ESP32C6_BT_NIMBLE)
+    #  ★D-1＝controller-only スモークテスト（NimBLE ホスト無し）限定．
+    #  CONFIG_BT_CONTROLLER_ONLY と CONFIG_BT_NIMBLE_ENABLED は実ESP-IDF の
+    #  Kconfig では同時に 1 にならない排他選択（C5 esp_bt.cmake と同じ分離）．
+    #  NimBLE ON 時は立てず，hci_driver_standard.c も外す
+    #  （hci_driver_vhci_ops の多重定義回避）．
+    list(APPEND ASP3_COMPILE_DEFS
+        CONFIG_BT_CONTROLLER_ONLY=1
+    )
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${IDF}/components/bt/porting/transport/driver/vhci/hci_driver_standard.c
+    )
+endif()
+
+#
+#  ------------------------------------------------------------------
+#  3. リンクライブラリパス・ライブラリ（IDF v6.1 matched set）
+#  ------------------------------------------------------------------
+#  ★C6 の bt-lib は esp32c6-bt-lib/esp32c6/（無印 esp32c6．esp32c61 は
+#  別チップ）．C5（esp32c5-bt-lib 直下）とはサブディレクトリ構造が異なる．
 #
 list(APPEND ASP3_LINK_OPTIONS
-    -L${ESP_HAL_DIR}/components/bt/controller/lib_esp32c6/esp32c6-bt-lib/esp32c6
-    -L${ESP_HAL_DIR}/components/esp_phy/lib/esp32c6
-    -L${ESP_HAL_DIR}/components/esp_coex/lib/esp32c6
+    -L${IDF}/components/bt/controller/lib_${BT_CHIP_SERIES}/${BT_CHIP_SERIES}-bt-lib/${BT_CHIP_SERIES}
+    -L${IDF}/components/esp_phy/lib/${BT_CHIP_SERIES}
+    -L${IDF}/components/esp_coex/lib/${BT_CHIP_SERIES}
 )
 list(APPEND ASP3_LINK_LIBS
     ble_app
@@ -373,23 +549,24 @@ list(APPEND ASP3_LINK_LIBS
 
 #
 #  ------------------------------------------------------------------
-#  4. ROM関数ld（esp_wifi.cmakeと同じ一覧．BT専用ldは存在しない
-#     ＝コントローラ本体はflash blob(libble_app.a)に完全常駐のため
-#     eco3_bt_funcs.ld相当は不要．設計書6節1で確認済み）．
+#  4. ROM関数ld（IDF v6.1 の esp32c6 ldセット）
 #  ------------------------------------------------------------------
+#  esp_wifi.cmake と同じ理由で eco3.ld は除外，net80211/pp（WiFi専用）は
+#  除外．systimer.ld は IDF v6.1 に存在しない（C5 esp_bt.cmake と同じ）．
+#  coexist.ld は IDF v6.1 esp32c6 に存在するため追加する．
 #
-set(BT_ROM_LD_DIR ${ESP_HAL_DIR}/components/esp_rom/esp32c6/ld)
+set(BT_ROM_LD_DIR ${IDF}/components/esp_rom/${BT_CHIP_SERIES}/ld)
 set(ESP_BT_ROM_LD_FILES
-    ${BT_ROM_LD_DIR}/esp32c6.rom.ld
-    ${BT_ROM_LD_DIR}/esp32c6.rom.api.ld
-    ${BT_ROM_LD_DIR}/esp32c6.rom.libc.ld
-    ${BT_ROM_LD_DIR}/esp32c6.rom.libgcc.ld
-    ${BT_ROM_LD_DIR}/esp32c6.rom.newlib.ld
-    ${BT_ROM_LD_DIR}/esp32c6.rom.libc-suboptimal_for_misaligned_mem.ld
-    ${BT_ROM_LD_DIR}/esp32c6.rom.version.ld
-    ${ESP_HAL_DIR}/components/riscv/ld/rom.api.ld
-    ${BT_ROM_LD_DIR}/esp32c6.rom.phy.ld
-    ${BT_ROM_LD_DIR}/esp32c6.rom.systimer.ld
+    ${BT_ROM_LD_DIR}/${BT_CHIP_SERIES}.rom.ld
+    ${BT_ROM_LD_DIR}/${BT_CHIP_SERIES}.rom.api.ld
+    ${BT_ROM_LD_DIR}/${BT_CHIP_SERIES}.rom.libc.ld
+    ${BT_ROM_LD_DIR}/${BT_CHIP_SERIES}.rom.libgcc.ld
+    ${BT_ROM_LD_DIR}/${BT_CHIP_SERIES}.rom.newlib.ld
+    ${BT_ROM_LD_DIR}/${BT_CHIP_SERIES}.rom.libc-suboptimal_for_misaligned_mem.ld
+    ${BT_ROM_LD_DIR}/${BT_CHIP_SERIES}.rom.version.ld
+    ${IDF}/components/riscv/ld/rom.api.ld
+    ${BT_ROM_LD_DIR}/${BT_CHIP_SERIES}.rom.phy.ld
+    ${BT_ROM_LD_DIR}/${BT_CHIP_SERIES}.rom.coexist.ld
 )
 foreach(_esp_bt_rom_ld ${ESP_BT_ROM_LD_FILES})
     list(APPEND ASP3_LINK_OPTIONS -Wl,-T,${_esp_bt_rom_ld})
@@ -397,112 +574,71 @@ endforeach()
 
 #
 #  ==================================================================
-#  Phase D-2a／BLE実施02：NimBLE ホストスタック
+#  Phase D-2a/D-2b／BLE実施14：NimBLE ホストスタック（IDF v6.1版）
 #  ==================================================================
 #
-#  D-1（コントローラ＋VHCI，bt_smoke_c6）の上に NimBLE ホストを載せる．
-#  ★C3（esp32c3_espidf/esp_bt.cmake）のD-2ブロックとの決定的な違い：
-#  C6/C5は新世代コントローラ（SOC_ESP_NIMBLE_CONTROLLER=1）のため，
-#  hal/components/bt/host/nimble/nimble/porting/nimble/src/nimble_port.c
-#  の esp_nimble_init() 内部で esp_nimble_hci_init() の呼出し自体が
-#  `#if !SOC_ESP_NIMBLE_CONTROLLER || !CONFIG_BT_CONTROLLER_ENABLED`で
-#  コンパイルアウトされる＝C3が使うLEGACY VHCI経路（esp_nimble_hci.c＋
-#  hci_esp_ipc_legacy.c）はC6には存在しない．C6は
-#  hci_transport.c（D-1で既存）＋hci_driver_nimble.c＋hci_esp_ipc.cという
-#  別のHCIトランスポートを使う（D-1のhci_driver_standard.cとは
-#  hci_driver_vhci_ops一つを取り合う関係＝二者択一．NimBLE ON時は
-#  hci_driver_standard.cを外しhci_driver_nimble.c+hci_esp_ipc.cへ差替える）．
-#  詳細はdocs/ble-c5c6.md「BLE実施02」．
+#  D-1（コントローラ＋VHCI，bt_smoke_c6）の上に NimBLE ホストを載せ，
+#  D-2a（host-controller sync）→D-2b（ble_gap_adv_start rc=0）を実機到達
+#  させる．★C5 esp_bt.cmake の IDF v6.1 NimBLE ブロックの逐語的な C6 転写
+#  （ソースは hal submodule ではなく IDF v6.1（${IDF}）から採る——本 D-1 が
+#  既に v6.1 controller/phy を使うため，nimble も同一 matched set で揃える．
+#  hal-nimble ＋ v6.1-controller のブロブ ABI 境界を新規に作らない）．
 #
-#  RAM予算のため既定はOFF．NimBLEを要するアプリ（ble_host_smoke_c6）では
-#  自動でONにする（D-1のbt_smoke_c6は痩せたまま保つ）．
-#  ★ESP32C6_BT_NIMBLEのoption()/自動ON判定はファイル冒頭（「2. ソース
-#  ファイル」節でのhci_driver二者択一に使うため）で既に行っている．
+#  C6/C5 は新世代コントローラ（SOC_ESP_NIMBLE_CONTROLLER=1）のため，
+#  nimble_port.c の esp_nimble_init() 内部で esp_nimble_hci_init() 呼出しが
+#  コンパイルアウトされる＝C3 の LEGACY VHCI 経路は存在しない．
+#  hci_transport.c（D-1で既存）＋hci_driver_nimble.c＋hci_esp_ipc.c を使う
+#  （D-1 の hci_driver_standard.c と hci_driver_vhci_ops を取り合う二者択一．
+#  上の if(NOT ESP32C6_BT_NIMBLE) で分離済み）．
 #
-
+#  ★C5 と同じく，TRUE=1／BT_HCI_LOG_INCLUDED=0／-include sdkconfig.h は
+#  «追加しない»：v6.1 の nimble_port.c は bt_common.h（TRUE／
+#  BT_HCI_LOG_INCLUDED の定義元）を #if より前に include するため，hal 版で
+#  踏んだ順序バグは v6.1 には存在しない（もし実機ビルドで hci_log/
+#  bt_hci_log.h が要求されたら，そのとき C6 hal 版と同じ -DTRUE=1
+#  -DBT_HCI_LOG_INCLUDED=0 を本ブロックへ追加する）．
+#
 if(ESP32C6_BT_NIMBLE)
 
-    set(NIMBLE_ROOT ${ESP_HAL_DIR}/components/bt/host/nimble/nimble/nimble)
-    set(BT_ROOT ${ESP_HAL_DIR}/components/bt)
-    set(TINYCRYPT_ROOT ${ESP_HAL_DIR}/components/bt/host/nimble/nimble/ext/tinycrypt)
+    set(NIMBLE_ROOT ${IDF}/components/bt/host/nimble/nimble/nimble)
+    set(BT_ROOT ${IDF}/components/bt)
+    set(TINYCRYPT_ROOT ${IDF}/components/bt/host/nimble/nimble/ext/tinycrypt)
 
-    #  ---- ★D-2d：SMP（ペアリング／ボンディング）有効化 ----
-    #  C5のESP32C5_BT_SM（369a86a）のC6版．ON時はMYNEWT_VAL_BLE_SM_LEGACY/SC=0
-    #  の«蓋»を外し（tinycrypt/mbedTLSリンク回避の蓋を外す），SC=ECDH P-256の
-    #  cryptoをvendored tinycryptで供給する．bond storeはble_store_ram
-    #  （IDF文脈=BLE_USED_IN_IDF=1で空）ではなくble_store_config
-    #  （BLE_STORE_CONFIG_PERSIST=0＝RAM保持，NVS不使用）を使う（S3 §5.2の
-    #  真因対策，C3/C5と同じ判断）．OFFに戻せばD-2c（GATTディスカバリ・
-    #  自前サービス）までの構成へ完全復帰（可逆）．C6はC3/C5とは別世代の
-    #  コントローラ（blob）だが，SM/tinycrypt/ble_store_configはいずれも
-    #  NimBLEホスト側（チップ非依存）の機能のため，C3の「2個目暗号化ACL
-    #  不達」の壁もC5同様に非該当の公算．
-    option(ESP32C6_BT_SM "Enable NimBLE SMP pairing/bonding on C6 (Phase D-2d, tinycrypt)" ON)
+    #  ---- SMP（ペアリング／ボンディング，D-2d）----
+    #  ★本ラウンド（BLE実施14）の目標は D-2a/D-2b（sync→adv rc=0）＝暗号不要の
+    #  ため既定 OFF（C5/C6-hal は D-2d 到達済みで既定 ON だが，本 v6.1 初 bring-up
+    #  はビルド面を痩せさせ tinycrypt リンクを避ける）．OFF 時は
+    #  MYNEWT_VAL_BLE_SM_LEGACY/SC=0 で ble_sm*.c を near-empty 化し，bond store は
+    #  ble_store_ram（IDF文脈で空＝sync/adv には十分）を使う．ON にすれば C5 と
+    #  同じ tinycrypt5ソース＋ble_store_config へ切替（D-2d 拡張時）．可逆．
+    option(ESP32C6_BT_SM "Enable NimBLE SMP pairing/bonding on C6 idf61 (D-2d, tinycrypt)" OFF)
 
     #  ---- コンパイル定義 ----
-    #  ESP_PLATFORM／CONFIG_BT_CONTROLLER_ENABLEDはD-1で既に定義済み．
-    #  MYNEWT_VAL_BLE_SM_LEGACY/SCはble_sm*.cをnear-empty化しmbedTLS/
-    #  tinycryptのリンクを回避する（C3のD-2a節と同じ判断．sync到達に
-    #  暗号は不要）．bt_nimble_config.h（本ディレクトリのC6専用版．
-    #  C3版を流用しない＝ファイル冒頭コメント参照）で CONFIG_BT_NIMBLE_*
-    #  一式を供給する．
-    #  ★nimble_port.cの上流ドリフト（順序バグ）：`#if (BT_HCI_LOG_INCLUDED
-    #  == TRUE)`（41〜50行目付近）を，その定義元`bt_common.h`のinclude
-    #  （50行目）より前に評価する．TRUE／FALSEはstdbool.hのtrue/falseでは
-    #  なく，bt_common.h自身が`#define TRUE true`／`#define FALSE false`
-    #  として定義するESP-IDF独自マクロ（大文字）——つまりTRUEも
-    #  BT_HCI_LOG_INCLUDEDも，最小includeチェーンではこの#ifに到達する
-    #  時点で共に未定義（0として評価）のため`0==0`＝真となり，存在しない
-    #  hci_log/bt_hci_log.hをincludeしようとしてfatal errorになる
-    #  （実機ビルドで判明．stdbool.hを強制includeしてもtrue/falseが
-    #  増えるだけでTRUE/FALSEは変わらないため無効——一度試して確認済み）．
-    #  TRUE=1を明示的に-Dし，BT_HCI_LOG_INCLUDED=0と組み合わせて
-    #  `0==1`＝偽へ確実に倒す（後段でbt_common.hが両方とも同じ値へ
-    #  再定義するため以降は無矛盾．再定義警告のみ＝他の-D/-include群と
-    #  同種の無害な警告）．
-    list(APPEND ASP3_COMPILE_DEFS
-        TRUE=1
-        BT_HCI_LOG_INCLUDED=0
-    )
-
+    #  CONFIG_BT_NIMBLE_* 一式は bt/stub_idf61/include/bt_nimble_config.h
+    #  （C6 idf61 専用．LEGACY_VHCI=0）で供給する（上で PREPEND 済み）．
     list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_BT_NIMBLE)
     if(ESP32C6_BT_SM)
-        #  D-2d：SMP有効．app側（ble_host_smoke_c6.c）のSM設定・store初期化を
-        #  有効化する識別子．MYNEWT_VAL_BLE_SM_LEGACY/SCは-Dで上書きしない
-        #  （bt_nimble_config.hのCONFIG_BT_NIMBLE_SM_LEGACY/SC定義が#ifdefで
-        #  拾われ自動的に1になる．esp_nimble_cfg.hの実装＝定義の「値」でなく
-        #  「定義の有無」で1/0を決めるため）．
         list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_BT_SM)
     else()
-        #  D-2cまで：SECURITY off．NIMBLE_BLE_SM=SM_LEGACY||SM_SCを0に落とし
-        #  （nimble_opt_auto.h），ble_sm*.cをnear-empty化してtinycrypt/mbedTLS
-        #  リンクを回避する．
+        #  D-2a/D-2b：SECURITY off．NIMBLE_BLE_SM=SM_LEGACY||SM_SC を 0 に落とし
+        #  ble_sm*.c を near-empty 化して tinycrypt/mbedTLS リンクを回避する．
         list(APPEND ASP3_COMPILE_DEFS
             MYNEWT_VAL_BLE_SM_LEGACY=0
             MYNEWT_VAL_BLE_SM_SC=0
         )
     endif()
 
-    #  sdkconfig.h（CONFIG_*）・bt_nimble_config.h（CONFIG_BT_NIMBLE_*）・
-    #  syscfg/syscfg.h（MYNEWT_VAL）の順で強制include．D-1の
-    #  -include soc/soc_caps.h／esp_attr.h／esp_idf_version.h／
-    #  sys/param.h と衝突しないようSHELL:接頭辞を使う（C3の罠と同じ）．
+    #  bt_nimble_config.h（CONFIG_BT_NIMBLE_*）・syscfg/syscfg.h（MYNEWT_VAL）を
+    #  強制 include．D-1 の -include soc/soc_caps.h 等と衝突しないよう SHELL: 接頭辞．
     list(APPEND ASP3_COMPILE_OPTIONS
-        "$<$<COMPILE_LANGUAGE:C>:SHELL:-include sdkconfig.h>"
         "$<$<COMPILE_LANGUAGE:C>:SHELL:-include bt_nimble_config.h>"
         "$<$<COMPILE_LANGUAGE:C>:SHELL:-include syscfg/syscfg.h>"
     )
 
     #  ---- インクルードパス ----
-    #  ★porting/nimble/include・porting/npl/freertos/include・
-    #  host/nimble/port/includeはD-1のインクルードリストに既に含まれて
-    #  いる（本節より前にAPPEND済み＝-Iの並びで先に来るため優先解決
-    #  される）．重複追加すると"どちらの版が先に見つかるか"という
-    #  暗黙の前提を増やすだけなので，ここでは追加しない
-    #  （★npl_freertos.h／nimble_npl_os.h／nimble_port_freertos.hは
-    #  upstreamツリー側にも同名ファイルが存在するが内容が異なる
-    #  ——D-1のporting/npl/freertos/{include,src}が対のペアで正しい．
-    #  D-1のディレクトリが先に来る現在の順序を変えないこと）．
+    #  porting/nimble/include（syscfg/syscfg.h）・porting/npl/freertos/include・
+    #  host/nimble/port/include（esp_nimble_init/mem）は D-1 のインクルード
+    #  リストに既に含まれる（-I の並びで先に来る＝優先解決）．
     list(APPEND ASP3_INCLUDE_DIRS
         ${NIMBLE_ROOT}/host/include
         ${NIMBLE_ROOT}/include
@@ -513,7 +649,6 @@ if(ESP32C6_BT_NIMBLE)
         ${NIMBLE_ROOT}/host/store/ram/include
     )
     if(ESP32C6_BT_SM)
-        #  D-2d：ble_store_configとtinycrypt（SCのuECC P-256＋AES-CMAC）
         list(APPEND ASP3_INCLUDE_DIRS
             ${NIMBLE_ROOT}/host/store/config/include
             ${TINYCRYPT_ROOT}/include
@@ -521,22 +656,34 @@ if(ESP32C6_BT_NIMBLE)
     endif()
 
     #  ---- ソースファイル ----
-    #  D-1で既に npl_os_freertos.c／os_msys_init.c／bt_osi_mem.c／
-    #  hci_transport.c はリンク済み（新npl経路．上のコメント参照）．
-    #  ★hci_driver_standard.cはNimBLE ON時は使わない
-    #  （hci_driver_vhci_opsの多重定義を避ける．D-1専用のbt_smoke_c6は
-    #  従来どおりhci_driver_standard.cを使う＝上のD-1ソース節は不変）．
+    #  D-1 で既に npl_os_freertos.c／os_msys_init.c／bt_osi_mem.c／os_mempool.c／
+    #  hci_transport.c はリンク済み．
+    #
+    #  ★evidence-c6-06：nimble のメモリ供給元は «版で形が違う»（実測）
+    #    - v6.1  : esp_nimble_mem.h が `void *nimble_mem_malloc(...)` を «関数宣言» し、
+    #              実体は port/src/esp_nimble_mem.c（339行）。∴ 積む必要がある。
+    #    - v5.5.4: 同ヘッダが `#define nimble_platform_mem_malloc bt_osi_mem_malloc`
+    #              ＝**マクロで bt_osi_mem_* へ直接展開**。port/src/ に
+    #              esp_nimble_mem.c は **存在しない**（src/ は nvs_port.c のみ）。
+    #              ∴ 積んではならない（cmake が「Cannot find source file」で落ちる＝実測）。
+    #  実体の供給は porting/mem/bt_osi_mem.c（v5.5.4 に実在）が担う。
+    #  ★os_mempool.c の if(NOT ASP3_BT_IDF_V554) と同じ «版差の吸収» パターン。
+    #
+    if(NOT ASP3_BT_IDF_V554)
+        #  nimble_mem_malloc/calloc/free（ホスト各所が直接呼ぶ．heap_caps_* へ
+        #  委譲）．v6.1 blob は plain 名で未解決参照＝C5 BLE実施05 と同じ壁．
+        #  ★v6.1 に乗れている検証点：hal blob なら不要だが v6.1 では必須．
+        list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+            ${BT_ROOT}/host/nimble/port/src/esp_nimble_mem.c
+        )
+    endif()
+
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
         ${BT_ROOT}/porting/transport/driver/vhci/hci_driver_nimble.c
         ${NIMBLE_ROOT}/transport/esp_ipc/src/hci_esp_ipc.c
-        ${ESP_HAL_DIR}/components/bt/host/nimble/nimble/porting/nimble/src/nimble_port.c
-        ${ESP_HAL_DIR}/components/bt/host/nimble/nimble/porting/npl/freertos/src/nimble_port_freertos.c
-        #  ホストスタック本体（C3のesp32c3_espidf/esp_bt.cmakeと同一
-        #  トリム済み集合．ble_svc_gap/gatt のみ採用・他サービス
-        #  （ans/bas/dis/hr/htp/ias/ipss/lls/prox/cts/tps/hid/sps/cte/
-        #  ras）・ble_store_config/nvs（永続ボンディング）・ble_cs／
-        #  ble_ead／ble_aes_ccm／ble_gattc_cache*／ble_eatt（新機能，
-        #  sync/adv到達には不要）は不採用）
+        ${IDF}/components/bt/host/nimble/nimble/porting/nimble/src/nimble_port.c
+        ${IDF}/components/bt/host/nimble/nimble/porting/npl/freertos/src/nimble_port_freertos.c
+        #  ホストスタック本体（C5/C6-hal と同一トリム集合．ble_svc_gap/gatt のみ）
         ${NIMBLE_ROOT}/transport/src/transport.c
         ${NIMBLE_ROOT}/host/util/src/addr.c
         ${NIMBLE_ROOT}/host/services/gap/src/ble_svc_gap.c
@@ -586,9 +733,6 @@ if(ESP32C6_BT_NIMBLE)
         ${NIMBLE_ROOT}/host/src/ble_uuid.c
     )
     if(ESP32C6_BT_SM)
-        #  D-2d：bond storeはble_store_config（PERSIST=0＝RAM，NVS不使用．
-        #  ble_store_ram.cはIDF文脈で空＝S3 §5.2の真因）＋tinycrypt必要5ソース
-        #  （ble_sm_alg.cのtc_aes*/tc_cmac_*/uECC_*参照に対応）．
         list(APPEND ASP3_SYSSVC_TARGET_C_FILES
             ${NIMBLE_ROOT}/host/store/config/src/ble_store_config.c
             ${TINYCRYPT_ROOT}/src/aes_encrypt.c
@@ -604,7 +748,5 @@ if(ESP32C6_BT_NIMBLE)
     endif()
 
 endif()  # ESP32C6_BT_NIMBLE
-
-endif()  # ESP32C6_BT_IDF61 (hal 版 else ブロック終端)
 
 endif()  # ESP32C6_BT
