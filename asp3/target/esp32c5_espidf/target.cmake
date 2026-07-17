@@ -67,8 +67,20 @@ if(NOT DEFINED IDF_V554)
     get_filename_component(IDF_V554 ${CMAKE_CURRENT_LIST_DIR}/../../../esp-idf ABSOLUTE)
 endif()
 
+#
+#  ★2026-07-17：docstring の「OFF = hal fallback」は **BT ビルドでは嘘だった**ので
+#  «実測された挙動» へ書き換えた（挙動そのものは変えていない）。実測：
+#    C5 WiFi + OFF : hal 7357 / esp-idf    0            ＝真の hal fallback（docstring は真）
+#    C5 BT   + OFF : hal 1594 / esp-idf  119（うち BT 88）＝**混成（MIXED）**（docstring は偽）
+#  ＝OFF が戻すのは **基盤だけ**で，BT ツリーは `ASP3_BT_IDF_V554`（既定 ON）に従い
+#  esp-idf のまま残る。しかも C5 の `esp_bt.cmake` に `ESP_HAL_DIR` は **0箇所**
+#  ＝**hal の BT 経路はそもそも存在しない**ので「BT を hal へ戻す」は不可能。
+#  ★C3 は同じ混成を **両方向の FATAL_ERROR で禁止**している（`esp_bt.cmake:133-145`）が，
+#  C5/C6 にガードは無い（実測：cross guard 0箇所）＝**黙って混成が通る**。
+#  ガード追加は «挙動変更» なのでユーザー判断（本ラウンドでは提案に留める）。
+#
 option(ASP3_ESPIDF_SUPPLY
-    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (v5.5.4 tag) instead of esp-hal-3rdparty. Default ON = HAL-free. OFF = hal fallback (reversible)"
+    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (true v5.5.4 tag) instead of esp-hal-3rdparty. Default ON = HAL-free. OFF = a true hal fallback ONLY for WiFi/plain builds (measured: hal 7357 / esp-idf 0). WARNING for ESP32C5_BT=ON: OFF reverts the BASE components only -- the BT tree independently follows ASP3_BT_IDF_V554 (default ON = esp-idf submodule), so -DASP3_ESPIDF_SUPPLY=OFF alone silently yields a MIXED build (measured: hal 1594 / esp-idf 119, of which 88 = components/bt). It does build, but it is NOT a hal fallback. There is no all-hal BT configuration for C5 at all (esp_bt.cmake references ESP_HAL_DIR 0 times); the BT supply choices are ASP3_BT_IDF_V554=ON (esp-idf submodule v5.5.4) or =OFF (external v6.1 via ESP_IDF61_DIR). Unlike C3 (esp_bt.cmake:133-145), C5 has no FATAL_ERROR guard against the mixture"
     ON)
 
 if(ASP3_ESPIDF_SUPPLY)

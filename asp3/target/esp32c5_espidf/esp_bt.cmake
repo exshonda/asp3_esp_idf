@@ -73,11 +73,40 @@ get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf 
 #  OFF は従来どおり外部 v6.1 ツリー＝可逆 fallback。
 #
 option(ASP3_BT_IDF_V554 "Use the esp-idf submodule (true v5.5.4 tag) BT controller/phy/coexist tree instead of external v6.1. Default ON = supply unified with WiFi (ESP_SUP_DIR). OFF = external v6.1 fallback (reversible)" ON)
+
+#
+#  ★2026-07-17：OFF 側の退避先だった `set(IDF /home/honda/tools/esp-idf-v6.1)`
+#  は **個人の絶対パス直書き**で，(a) CACHE でないので `-D` で上書きできず，
+#  (b) EXISTS チェックが無いため，そのツリーが無いPCでは「v6.1 が無い」とは
+#  言わずに **存在しないパスを -I/-L し続けて意味不明な未解決参照で死ぬ**。
+#  ⇒ C6（`esp_bt.cmake:120` の `ESP_IDF61_DIR`）が既に確立している型を転写する
+#  ＝**新規規約の発明ではない**。C3 も同型（`ASP3_BT_IDF_V554_DIR`＝ON 側の
+#  ツリーを CACHE＋EXISTS で検証）。
+#
+set(ESP_IDF61_DIR /home/honda/tools/esp-idf-v6.1 CACHE PATH
+    "Path to an ESP-IDF v6.1 tree (NOT a submodule; supplies the C5 BT/BLE matched set when ASP3_BT_IDF_V554=OFF). Override with -DESP_IDF61_DIR=<path>")
+
 if(ASP3_BT_IDF_V554)
     #  submodule（ESP_SUP_DIR と同一ツリー）。外部絶対パスを撤去。
     set(IDF ${IDF_V554})
 else()
-    set(IDF /home/honda/tools/esp-idf-v6.1)
+    set(IDF ${ESP_IDF61_DIR})
+    if(NOT EXISTS ${IDF}/components/bt/controller/esp32c5/bt.c)
+        #  ★案内する退避先は «実在するもの» だけを書く（C6 evidence-c6-09 の
+        #  教訓＝旧文言が削除済みの hal 経路を案内して «存在しない指示» に
+        #  なっていた）。C5 の退避先は既定へ戻すこと＝submodule の真の v5.5.4。
+        message(FATAL_ERROR
+            "ESP32C5_BT: -DASP3_BT_IDF_V554=OFF selects the external IDF v6.1 "
+            "matched set, but no v6.1 tree was found at ESP_IDF61_DIR='${IDF}'. "
+            "v6.1 is NOT vendored as a submodule, so this path only exists if you "
+            "cloned it yourself. Either pass -DESP_IDF61_DIR=<path-to-esp-idf-v6.1>, "
+            "or just use the default (-DASP3_BT_IDF_V554=ON = the esp-idf submodule, "
+            "true v5.5.4 tag 735507283d), which is the supply that reaches "
+            "D-1 / W2 / D-2c / D-2d on real hardware at TRUE COLD "
+            "(.steering/20260716-c3c5c6-esp-idf-supply-migration/"
+            "evidence-c5-05-bt-supply-migration.md). "
+            "If the submodule itself is missing: `git submodule update --init esp-idf`.")
+    endif()
 endif()
 set(BT_CHIP_SERIES esp32c5)
 
