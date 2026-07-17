@@ -701,3 +701,34 @@ ENC 到達（ETIMEOUT）で、BlueZ の `ltk_req=0` とは病態が違う ⇒ **
   ⇒ **P5 が外れて Android が OK なら「Android の NG も toolchain 依存だった」**＝
   **BlueZ と同型の交互作用**＝重大。**その場合も §4.3 と同じ作法で
   «hal 対照» と «GCC15 対照» を同一セッションで測ってから帰属する。**
+
+---
+
+## 7. ★§4.5 の «未再測» を閉じた（実ボード構成での再測）
+
+§4.5 で「**§1.6 のコード生成 no-op と §2.1 の hal 参照 0 は QEMU=ON 構成で測った**」と
+留保した。**hal 参照については実ボード構成（`QEMU=OFF`/`CONSOLE=usbjtag`）で測り直した**：
+
+| 構成（**実ボード既定**・手渡しフラグ 0） | deps | リンク `-L`/`-T` | リンク行 any |
+|---|---|---|---|
+| **C3 BLE**（`fin_c3_ble`・esp-idf 供給） | **0** | **0** | **0** |
+| **C3 WiFi**（`fin_c3_wifi`・esp-idf 供給） | **0** | **0** | **0** |
+| ★**較正**：hal fallback（`rb_C_hal`） | **5692** | — | — |
+
+⇒ **hal 参照 0 は実ボード構成でも成立**（検出器は較正済み＝盲目でない）。
+
+**最終非回帰（すべて実ボード構成・手渡しフラグ 0・toolchain=esp-14.2.0_20260121）**：
+
+| チップ | 構成 | 結果 |
+|---|---|---|
+| C3 | `ble_host_smoke`（既定＝esp-idf 供給） | **rc=0・implicit 0** |
+| C3 | `wifi_scan`（既定＝esp-idf 供給） | **rc=0・implicit 0** |
+| C5 | `ble_host_smoke_c5` | **rc=0・implicit 0** |
+| C6 | `ble_host_smoke_c6` | **rc=0・implicit 0** |
+| C6 | `wifi_scan` | **rc=0・implicit 0** |
+
+★**残る «未再測»（正直に）**：**§1.6 のコード生成 no-op（before/after）は QEMU=ON 構成のまま**。
+**QEMU トグルは `phy_init.c` の宣言可視性に掛からない**ので結論は変わらないと考えるが、
+**実ボード構成での before/after は測っていない**。
+（※ただし**実ボード構成の «機能» 非回帰は §4 で直接示した**＝**私のツリーで建てた hal 供給ビルド
+`rb_C_hal` が真cold で bond 成功**＝**既知良好の挙動を再現**。**«builds» ではなく «works» を示した**。）
