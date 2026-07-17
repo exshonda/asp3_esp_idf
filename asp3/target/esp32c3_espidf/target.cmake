@@ -124,25 +124,42 @@ endif()
 #  「**esp-idf で統一する**」＝ C3 も WiFi・BT とも esp-idf 供給（hal 参照 0）。
 #  ＝ C5／C6 と同じ形（両チップとも既に BT まで esp-idf 供給で統一済み）。
 #
-#  ★**帰結を承知の決定である**（隠さない）：上の §3 のとおり，**現在の測定では
-#    esp-idf 供給の BT は bond が通らない**（真cold A/B で esp-idf 失敗 2/2 ／
-#    hal 成功 2/2＝evidence-c3-03 §5）。**本変更で C3 の既定は bond を失う**。
-#    それでも供給を1本化する，というのがユーザーの判断。
+#  ★★**bond は失われない — ただし «IDF 標準 toolchain を使う限り»**（evidence-c3-10 §4）。
 #
-#  ★**可逆**：`-DASP3_ESPIDF_SUPPLY=OFF` で従来どおり hal 供給（bond が通る
-#    唯一の構成）へ完全復帰できる。`ASP3_BT_IDF_V554` はこれに追従するので
-#    基盤と BT ツリーが混成することはない（esp_bt.cmake の FATAL_ERROR で担保）。
+#  当初この節は「本変更で C3 の既定は bond を失う」と書いていた（evidence-c3-03 §5 の
+#  «esp-idf 供給は bond 失敗 2/2 ／ hal 成功 2/2» に基づく）。**それは実測で覆った。**
 #
-#  ★**bond 失敗の機序は «コントローラ（blob）側» に局在済み**（evidence-c3-05）：
-#    ホスト SMP は DHKey Check まで A/B バイト同一で完走し，**LTK Request が
-#    一度も来ない**＝暗号開始が完遂しない。ホスト SM は C5 クロスチップ対照で
-#    無罪。⇒ **toolchain で直る見込みは低い**が，それは «測らない理由» ではない
-#    （本ラウンドで IDF 標準 GCC14 での bond を実測する）。
+#  **真cold・同一 central・同一セッション・毎回 forget の A/B（evidence-c3-10 §4）**：
+#
+#    アーム                                     bond
+#    -----------------------------------------  -----------------
+#    A: esp-idf 供給 × **esp-15.2.0（GCC15）**  **失敗 0/5**（AuthenticationCanceled）
+#    B: esp-idf 供給 × **esp-14.2.0_20260121**  **成功 5/6**（暗号必須 read=BT4-OK）
+#    C: hal 供給     × esp-15.2.0（陽性対照）   **成功**（ハーネス健全性の証明）
+#
+#  ⇒ **供給・ソース・blob（`libbtdm_app.a` 859e8c8e）は A/B で同一。違いは
+#     コンパイラだけ**。∴ **«bond 失敗は供給に帰属» は誤りで，実体は
+#     «供給 × toolchain の交互作用»**＝**esp-idf 供給を IDF が指定する
+#     toolchain で建てれば bond は通る**。
+#
+#  ★**だから上の toolchain guard がこの既定の «前提条件» である**：
+#    guard を切って GCC15 で建てると bond は落ちる（＝アーム A）。
+#    両者は独立した設定ではなく，**セットで初めて正しい**。
+#
+#  ★**可逆**：`-DASP3_ESPIDF_SUPPLY=OFF` で hal 供給へ完全復帰できる
+#    （`ASP3_BT_IDF_V554` は追従＝基盤と BT ツリーは混成しない
+#     ＝esp_bt.cmake の FATAL_ERROR で担保）。
+#
+#  ★**evidence-c3-05 の機序局在（«DHKey Check 送出後にコントローラが暗号開始を
+#    完遂しない»＝blob 側）とは矛盾しない**：blob は A/B で同一バイトだが，
+#    **コントローラ glue（`bt.c`）はコンパイル対象＝toolchain の射程内**であり，
+#    実測で A/B 相違オブジェクトに `bt.c`・`ble_sm*.c` が含まれる。
+#    **どの関数の何が効いているかは未特定**（本ラウンドは帰属までで機序は未解明）。
 #
 set(_asp3_espidf_supply_default ON)
 
 option(ASP3_ESPIDF_SUPPLY
-    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (true v5.5.4 tag) instead of esp-hal-3rdparty. Default ON for ALL configs (WiFi and BT) = HAL-free, matching C5/C6 -- this is a deliberate user decision to unify the supply. KNOWN COST: on the esp-idf BT supply bond FAILS 2/2 while hal succeeds 2/2 under an identical true-cold A/B (evidence-c3-03 5); adv/D-2b still work. Use -DASP3_ESPIDF_SUPPLY=OFF to fall back to the hal supply (the only configuration where bond is known to pass). ASP3_BT_IDF_V554 follows this so the base and the BT tree never mix"
+    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (true v5.5.4 tag) instead of esp-hal-3rdparty. Default ON for ALL configs (WiFi and BT) = HAL-free, matching C5/C6. BLE bond WORKS on this supply provided the build uses the toolchain ESP-IDF specifies (esp-14.2.0_20260121, enforced by the guard at the top of target.cmake): measured true-cold A/B = 5/6 bond OK on esp-14.2.0_20260121 vs 0/5 on esp-15.2.0, same supply/source/blob (evidence-c3-10 4). This supersedes evidence-c3-03 5, which attributed the bond failure to the supply while holding the compiler at esp-15.2.0. Use -DASP3_ESPIDF_SUPPLY=OFF for the reversible hal fallback. ASP3_BT_IDF_V554 follows this so the base and the BT tree never mix"
     ${_asp3_espidf_supply_default})
 
 if(ASP3_ESPIDF_SUPPLY)
