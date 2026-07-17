@@ -99,6 +99,7 @@ volatile uint32_t	g_evt_le_other;		/* 上記以外の LE Meta subevent         *
 volatile uint32_t	g_evt_seq_n;		/* 記録済み EVT code 数（最大24）      */
 volatile uint8_t	g_evt_seq[24];		/* 到着順の EVT code（0x3E は subevent を上位に） */
 
+#ifdef TOPPERS_C3_EVT_FAST_MAP
 static void
 evt_trace_fast_dump(void)
 {
@@ -127,6 +128,7 @@ evt_trace_fast_dump(void)
 				   | ((uint32_t) g_evt_seq[i * 4U + 3U] << 24);
 	}
 }
+#endif /* TOPPERS_C3_EVT_FAST_MAP */
 
 static void
 evt_trace_pack(void)
@@ -154,7 +156,6 @@ evt_trace_pack(void)
 	if (x > 255U) { x = 255U; }
 	if (e > 255U) { e = 255U; }
 	*EVT_TRACE_RTC = (e << 24) | (x << 16) | (g << 8) | p;
-	evt_trace_fast_dump();	/* ★bond機構のA/B地図（evidence-c3-04） */
 }
 
 /*  app が起動時に一度呼ぶ（.bss は0初期化だが SYNC マーカ転用を明示化）  */
@@ -246,6 +247,13 @@ __wrap_ble_hs_hci_evt_process(void *ev)
 			}
 		}
 		evt_trace_pack();
+#ifdef TOPPERS_C3_EVT_FAST_MAP
+		/*  ★ここだけで地図を書く．ACL wrap（ble_mqueue_put/get・ble_l2cap_rx）は
+		    «毎パケット» の hot path なので絶対に呼ばない——実測（evidence-c3-04 §5）：
+		    そこから 20 語 dump を呼んだら **hal でも bond が落ちた**（C0a）＝計装が侵襲的になる。
+		    HCI EVT は pairing 中せいぜい十数回なので 20 語 dump でも無視できる。  */
+		evt_trace_fast_dump();
+#endif
 	}
 	return __real_ble_hs_hci_evt_process(ev);
 }
