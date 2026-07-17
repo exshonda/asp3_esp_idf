@@ -478,3 +478,67 @@ controller →[HCI transport]→ `ble_hs_hci_evt_process`（**FAST EVT[3] disc**
 ### 14.2 射程
 - ★**BlueZ は bond しない＝«初回 SMP まで» しか駆動できない**＝**本実験は «切断配送» に限定**（再接続・bond 後は対象外）。
 - ★**過去の非0 は hal 由来**＝**«DISC=0 は普遍» と書かない**（供給・切断型で分ける）。
+
+---
+
+## 15. Step B 実測結果（BlueZ 主導・スマホ無し・観測者効果なし・自走）＝DISC=0 の «正体» を特徴づけた
+
+### 15.1 ★★正の対照＝«能動切断→DISC 配送» を esp-idf ビルドで «初めて» 確保（P_poscontrol/P_active_delivered 的中）
+
+**すべて `rc_c3_evt`（esp-idf・digest matched）・真cold 毎回・BlueZ が能動切断（explicit LL_TERMINATE）**：
+
+| 切断法 | 回数 | device DISC(0xB8) | FAST EVT[3] disc | 配送 |
+|---|---|---|---|---|
+| BlueZ `Disconnect()` | 5 | `0xd15c1305`（reason 0x13・count=5） | 5 | ★**5/5 配送** |
+| `Powered=False`（local power-off terminate） | 1 | `0xd15c1501`（reason **0x15**・count=1） | 1 | ★**1/1 配送** |
+| `RemoveDevice`（connected=True 時） | 2 | `0xd15c1301`（reason 0x13・count=1 ×2 boot） | 1 ×2 | ★**2/2 配送** |
+| **合計（explicit terminate）** | **8** | — | — | ★★**8/8＝100% 配送** |
+
+⇒ ★★**«DISC=0 は全切断が構造的に届かない» は «偽»**：**esp-idf ビルドで «明示的 terminate（LL_TERMINATE）を受けた切断» は host まで完全配送される（8/8・reason 0x13/0x15 とも）**。**計器は盲でない**（EVT[3]・DISC マーカとも非0 を出せる）。**controller→host 切断配送は «terminate に対しては» 生きている。**
+
+### 15.2 ★では Step1-3 の DISC=0 は何か＝«supervision timeout（silent link death）限定»
+
+- **Step 2/3 の snoop**：切断 reason=**0x08（supervision timeout）**＝**能動終了でない（LL_TERMINATE 無し・リンクが沈黙して死ぬ）**。
+- **その supervision timeout は device host に届かない**（DISC=0・EVT[3]=0・3/3・Android）。
+- ⇒ ★**配送欠落は «明示 terminate» でなく «silent な supervision timeout» に «限定»**：
+  **C3 controller は «LL_TERMINATE を受けた切断» は host へ渡すが、«リンクが沈黙して死んだ（supervision timeout）» 切断イベントは host へ渡さない（or 生成しない）。**
+
+### 15.3 ★事前登録の判定（★書き換えない）
+
+| 登録（`64a9bc7`） | 値 | 結果 |
+|---|---|---|
+| P_poscontrol（能動切断で DISC≠0 が出る） | 55% | ★**的中**（8/8 配送・計器非盲確定） |
+| P_active_delivered（能動切断→DISC≠0） | 50% | ★**的中**（配送率 8/8＝100%） |
+| P_timeout_lost（timeout 切断→DISC=0） | 75% | ★**部分的中（枠外注記）**：Android の supervision timeout で DISC=0（3/3）は成立。★**しかし «snoop 無しでの clean な silent timeout» は誘発できず**（下記 §15.4）＝**この leg は Android データ（phone 駆動）に依存＝snoop-free 確認は未達** |
+
+### 15.4 ★言えないこと・未測定（no silent caps）
+
+- ★**«silent supervision timeout» を snoop 無しで誘発できなかった**：`sudo hciconfig hci0 down`（NOPASSWD 外＝password 要求で失敗）以外の BlueZ 経路（`Disconnect`/`Powered=False`/`RemoveDevice`）は **すべて明示 terminate を送る＝配送されてしまう**。⇒ **«timeout→DISC=0» の snoop-free 確認は未達**（Android 3/3 に依存）。
+  - 1 例だけ «connect が False に落ちた後 RemoveDevice→DISC=0» を観測したが、**established connection でない可能性**があり clean な silent-timeout の証拠にしない（正直に）。
+- ★**«なぜ Step1-3 でリンクが supervision timeout で死ぬのか»（＝実際の間欠失敗の «根» ）は本 Step では未解明**。
+  DISC=0 は «timeout で死ぬ» ＋ «timeout を配送しない» の下流症状。**根＝«活動後 ~5-6s でリンクが沈黙する» LL/接続維持の問題**（我々の LL が維持を止めた／phone／RF＝両側が timeout を見た＝RF が実際に沈黙・分離不能）。
+- BlueZ の Connect が 1 回 False に落ちた（接続確立自体が時々不安定）＝同じリンク不安定 substrate の可能性（断定しない）。
+- 能動切断中に PAIR=`0x5dc00c00`/ENC=`0x5de0000c`（status 0x0c）が付随（cycle が 5s tick を跨いだ際の SecReq→BlueZ 不完了ペアリング）＝DISC の問いに無関係・付随。
+
+### 15.5 ★DISC=0 の «正体»（言える範囲・確定）
+
+**DISC=0（Step1-3）＝«全切断が届かない» のではない。«明示 terminate» は 8/8 配送される（snoop-free 確定）。
+DISC=0 は «リンクが supervision timeout で silent に死ぬ» 切断が host へ配送されないこと＝«timeout 限定» の症状**
+（timeout leg は Android 3/3 に依存＝snoop-free 未確認）。**間欠なのは «配送» ではなく «リンクが死ぬ／pairing がどこまで進むか»**
+（配送は terminate に対し 8/8 決定的）。**残る根本＝«なぜ活動後にリンクが沈黙して supervision timeout で死ぬか»（LL/接続維持・controller 層）＝未解明。**
+
+### 15.6 ★判断表の更新（実施はユーザー判断・推奨に印）
+
+| 案 | 内容 | 判別力 | 費用 | 推奨 |
+|---|---|---|---|---|
+| **D** «silent timeout» を snoop-free で誘発 | sudo（hciconfig down）が要る or RF 遮蔽治具＝**環境的に不可**（NOPASSWD 外） | timeout leg の snoop-free 確認 | 環境変更要 | △（環境依存） |
+| **E** «リンク沈黙の根» を追う | 活動後 ~5-6s の supervision timeout を LL/接続イベントで観測（JTAG or controller トレース）＝**実際の間欠失敗の根に迫る** | ★高（根本） | 大（controller/LL 計装・難度高） | ○（機序を要するなら） |
+| ★**C** 閉じる（更新版） | 下記 §15.7＝**DISC=0 の正体まで確定した状態で畳む** | — | ゼロ | ★**推奨**（要件充足優先・DISC=0 は解明済・根は保険） |
+
+### 15.7 (C) 更新版の «正しい結論»
+
+- **C3 × Android は間欠的に失敗（3態）＝共通の下流症状は DISC=0。**
+- ★**DISC=0 の正体を snoop-free で確定**：**明示 terminate は 8/8 配送される（計器非盲・配送生存）／DISC=0 は «supervision timeout で silent に死ぬ» 切断に限定**（timeout leg は Android 3/3 依存・snoop-free 未確認）。
+- **層＝我々の controller/LL（terminate は配送するが timeout は配送しない＋活動後にリンクが沈黙する）＝blob でも host ソフトでもない**（host は SMP を正しく出す・terminate 配送は生きている）。
+- **未解明＝«なぜ活動後 ~5-6s でリンクが supervision timeout で死ぬか»（間欠失敗の根）と «timeout 配送欠落の snoop-free 確認»。**
+- **成果物＝両側観測の型＋C3 で撮れた失敗記録＋DISC=0 の切断型依存性（terminate 8/8 配送・timeout 欠落）を snoop-free で特徴づけ。**
