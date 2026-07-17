@@ -356,3 +356,93 @@ records=813・span 10:44:06..10:48:12。calibration `cmd230/acl_tx16/acl_rx192/e
 Android で `ASP3-C3-BLE` ペアリング（＝Step 2 と同じ操作）→ 観測を逐語で（popup→失敗までの体感・切れ方）→
 **BT を触らず** USB 接続のまま報告 → こちらで bugreport 追加回収。
 （★もし snoop を切ってしまっていたら：snoop ON→BT OFF/ON→forget→ペアリング。その «BT 再起動で消えるか» も記録。）
+
+---
+
+## 12. Step 3 実測結果＋★★3回横断の総合（間欠が実証された・安定な共通項を同定）
+
+**ユーザー観測（逐語）**：「**Android : again ペアリング表示 OK : ペアリングできたが，ちょくごに切断，画面上はBONDED**」
+
+### 12.1 Step 3 デバイス側（★Step 1 と «device 側は同一»）
+
+PAIR=`0x5dc00000`（発火・status0・our=0/peer=0）・ENC=`0x5de00000`（**暗号成功**）・CONN=1・
+FAST conn_cmpl=1/ltk_req=1/enc_chg=1/enc_status=0・**tx_smp=8**（フル SC `0b 02 0c 03 04 0d 08 09`）・put=29・**DISC=0**。
+⇒ **Step 1 の device マーカと «ほぼ完全一致»**（bond 成立・DISC=0）。**ユーザー体感の差（Step1「解除後 connect 不可」/ Step3「直後切断 BONDED」）は device 側では同じ事象**。
+
+### 12.2 Step 3 snoop（handle=5・较正 PASS・cumulative log に Step2=handle3 も含む）
+
+| 時刻 | イベント |
+|---|---|
+| 10:58:55.558 | Enhanced Conn Complete handle=5（phone=central） |
+| 10:59:00.4〜03.1 | ★**フル SC 交換«成立»**：SecReq(DUT)→PairReq(phone)→**Pairing Response(DUT)«今回は届いた»**→PubKey↔→Confirm(DUT)→Random↔→DHKey↔→**鍵配布両方向** |
+| 10:59:03.145 | ★**Encryption Change status=0 enabled=1**＝**暗号成立・bond 完了**（device ENC=`0x5de00000`・snoop 一致） |
+| 10:59:08.912 | ★**Disconnection reason=0x08（supervision timeout）**＝暗号成立の ~5.8s 後・**能動終了でない** |
+
+⇒ **両側一致**：bond+暗号は «完全成立»。その後 **リンクが supervision timeout で死ぬ**。**device は DISC=0（切断を受けていない）**。
+
+### 12.3 ★★3回横断の総合表（本ラウンド最大の成果物）
+
+| 信号 | Step 1（snoop無） | Step 2（snoop・BT再起動） | Step 3（snoop） | 安定/変動 |
+|---|---|---|---|---|
+| ユーザー体感 | bond→解除→再接続不可 | 初回ペアリング失敗 | ペアリング成功→直後切断 BONDED | **毎回違う＝間欠** |
+| CONN / conn_cmpl | 1/1 | 1/1 | 1/1 | ★安定（1接続） |
+| PAIR（bond） | 発火(0/0) | **未発火** | 発火(0/0) | 変動 |
+| tx_smp / SMP 到達 | **8**（フル SC） | **2**（PairRsp 止まり） | **8**（フル SC） | 変動（SMP 段） |
+| ENC status | 00 成功 | **0d ETIMEOUT** | 00 成功 | 変動 |
+| **DISC（device）** | **0** | **0** | **0** | ★★**安定（3/3 切断未配送）** |
+| snoop 切断 reason | （snoop無） | **0x08 supervision timeout** | **0x08 supervision timeout** | ★安定（能動終了でない） |
+| **我々 host の TX** | 出している | 出している（Response も） | 出している | ★安定（**host 無罪**） |
+| put/get/l2cap | 26 | 15 | 29 | 変動（GATT 量） |
+
+### 12.4 ★安定な共通項＝追うべき機序（間欠の中の不変量）
+
+1. ★★**DISC=0（3/3）＝我々の controller→host «切断イベント配送» の欠落**（`docs/bt-shim.md:2637` が名指したギャップ・PLAN 軸C の wedge 症状と同型）。
+2. ★**リンクは «supervision timeout(0x08)» で死ぬ**（snoop で撮れた 2/2）＝**能動切断でない＝リンク維持（LL keepalive）が保てず沈黙→timeout**。両側の controller が timeout を見た＝**RF リンクが実際に沈黙**。暗号成立の ~5〜6s 後（Step2/3 とも）。
+3. ★**我々の host は常に «正しく PDU を出す»（tx_smp・Response・鍵配布）＝host 無罪**。
+
+**⇒ 追うべきは «我々の controller 駆動層（shim/OSAL/init・LL）»**：**blob でも host ソフトでもない**（host は 3/3 で正しく振る舞う）。**evidence-c3-04「真因=controller/LL 層」・Step2「Pairing Response が host 下で消失」と同方向。**
+
+**⇒ «変動する部分»（bond 成否・SMP がどこまで進むか・暗号成否）＝間欠のノイズ**（RF/タイミング/ATT 輻輳/観測者効果のいずれか＝**区別できない**）。
+
+### 12.5 事前登録の判定（★書き換えない・枠外明記）
+
+| 登録（`1570cdc`） | 値 | 結果 |
+|---|---|---|
+| P3_repro（Step2 型=初回失敗） | 50% | 外れ（Step3 は bond 成功） |
+| P3_alt（Step1 型=bond 成功後の問題） | 25% | ★**device 側は Step1 と «一致»＝最も近い**（bond 成功・DISC=0） |
+| P3_heal（C5 型に «消える»＝安定成功） | 25% | 外れ（bond 直後に切断＝安定成功でない） |
+| （総合） | — | ★**«第4の顔»（ペアリング成功→直後切断 BONDED）＝«枠外» と明記**（device 側は Step1 型だが体感は新記述）。**登録は書き換えない** |
+
+### 12.6 ★間欠の «実証»（見出し）
+
+**Step 2→3 は BT 再起動すら挟んでいない（snoop ON のまま・同条件）** のに病態が変わった（初回失敗→bond成功+切断）
+＝★**«間欠» が実証された**。**«間欠の駆動要因»（RF/観測者効果/スマホ状態/タイミング）は区別できない（列挙のみ）。**
+
+### 12.7 言えないこと（no silent caps）
+- ★**3態を «同一機序» と断定しない**（共通は DISC=0＋«host 下の脆さ»«まで»）。
+- **supervision timeout の «根本原因»**（我々の LL がリンク維持を止めたか／RF／conn param）は未分離。
+- **DISC=0 が «全切断» か «supervision timeout 限定» か**は未検定（→ Step B で BlueZ 主導の能動切断が DISC を出すか测れる）。
+- snoop/bugreport は scratchpad（repo 外・第三者 MAC 出現せず＝peer 全て DUT）。
+
+---
+
+## 13. ★判断表（A/B/C・実施はユーザー判断・推奨に印）
+
+**間欠がスマホ駆動セルで «確定» した今、費用対効果が変わった。**
+
+| 案 | 内容 | 判別力 | 費用 | 何が確定するか | 推奨 |
+|---|---|---|---|---|---|
+| **A** さらにセルを重ねる | N 回連続で «安定共通項(DISC=0)» の再現率・間欠の分布を測る | 低〜中：間欠は既に実証済＝新規性小。観測者効果が混じる | 大（スマホ操作律速） | 間欠の «統計» のみ（機序でない） | — |
+| ★**B** デバイス側だけ深掘り | **controller→host 切断配送（DISC=0・`bt-shim.md:2637`）**と **Pairing Response TX 経路**を **BlueZ 主導で** 計器化。BlueZ は bond 完了しないが «接続/能動切断/初回 SMP» は駆動できる＝**«能動切断で DISC が出るか»** で «全切断欠落» vs «timeout 限定» を判別／**Response TX を無線送出まで追う** | ★高：**観測者効果を排除**し、**安定共通項(DISC=0)に直接迫る**。スマホ不要＝反復自由 | 中（ビルド＋BlueZ・スマホ不要） | **DISC=0 が全切断か supervision 限定か**・**controller→host 配送ギャップの実在**を snoop 無しで | ★**推奨** |
+| **C** 閉じる | 成果を畳む（下記 §13.1） | — | ゼロ | 現時点の到達点を確定 | ○（要件充足を優先するなら） |
+
+### 13.1 (C) で畳む場合の «正しい結論»
+
+- **C3 × Android は «間欠的に» 失敗（3態：再接続不可／初回ペアリング失敗／bond 成功後 直後切断）。**
+- **両側観測で «初回 Pairing Response が host より下で消える» を1回捕捉**（C5 では «撮れなかった» 失敗記録）。
+- **安定な共通項＝DISC=0（controller→host 切断配送の欠落・3/3）＋リンクは supervision timeout で死ぬ（能動終了でない）＋host は無罪。**
+- **機序の «層»＝我々の controller 駆動（shim/OSAL/init・LL）＝blob でも host ソフトでもない**（host は 3/3 で正しく PDU を出す）。
+- **未決＝原因層の分離（controller 内/RF/conn param）と間欠の駆動要因。**
+- **成果物＝両側観測の型（device カウンタ＋phone snoop・本数一致で立証）＋C3 で撮れた失敗記録。**
+
+★**推奨＝B**（観測者効果を排除して安定共通項 DISC=0 に snoop 無しで迫れる）。**要件充足を優先し機序を保険とするなら C**。**A は非推奨**（間欠は実証済＝統計を足すだけ）。
