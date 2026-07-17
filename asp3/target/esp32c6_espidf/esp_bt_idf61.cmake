@@ -295,45 +295,45 @@ list(APPEND ASP3_INCLUDE_DIRS
     ${IDF}/components/bt/controller/${BT_CHIP_SERIES}
     ${IDF}/components/bt/host/nimble/port/include
     ${IDF}/components/bt/host/nimble/nimble/porting/nimble/include
-    ${ESP_HAL_DIR}/components/esp_hw_support/include
-    ${ESP_HAL_DIR}/components/esp_hw_support/include/soc
+    ${ESP_SUP_DIR}/components/esp_hw_support/include
+    ${ESP_SUP_DIR}/components/esp_hw_support/include/soc
     #  §20：pmu_init.c/ocode_init.c の `#include "regi2c_ctrl.h"`（プレーン名）
     #  を解決する（esp_hw_support の private include．NON_OS_BUILD で ROM 直呼び）．
-    ${ESP_HAL_DIR}/components/esp_hw_support/include/esp_private
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/private_include
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/include
-    ${ESP_HAL_DIR}/components/esp_system/include
+    ${ESP_SUP_DIR}/components/esp_hw_support/include/esp_private
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/private_include
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/include
+    ${ESP_SUP_DIR}/components/esp_system/include
     #  esp_private/wifi.h（phy_init.c．BT も WiFi と同じ PHY 実ソース）
     ${IDF}/components/esp_wifi/include
     ${IDF}/components/esp_phy/include
     ${IDF}/components/esp_phy/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/esp_pm/include
-    ${ESP_HAL_DIR}/components/esp_timer/include
+    ${ESP_SUP_DIR}/components/esp_pm/include
+    ${ESP_SUP_DIR}/components/esp_timer/include
     ${IDF}/components/esp_coex/include
-    ${ESP_HAL_DIR}/components/esp_rom/include
-    ${ESP_HAL_DIR}/components/esp_rom/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/esp_rom/${BT_CHIP_SERIES}/include/${BT_CHIP_SERIES}
-    ${ESP_HAL_DIR}/components/esp_rom/${BT_CHIP_SERIES}
-    ${ESP_HAL_DIR}/components/heap/include
-    ${ESP_HAL_DIR}/components/log/include
-    ${ESP_HAL_DIR}/components/riscv/include
-    ${ESP_HAL_DIR}/components/esp_hal_gpio/include
-    ${ESP_HAL_DIR}/components/esp_hal_gpio/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/esp_hal_clock/include
-    ${ESP_HAL_DIR}/components/esp_hal_clock/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/efuse/include
-    ${ESP_HAL_DIR}/components/efuse/${BT_CHIP_SERIES}/include
-    ${ESP_HAL_DIR}/components/esp_event/include
+    ${ESP_SUP_DIR}/components/esp_rom/include
+    ${ESP_SUP_DIR}/components/esp_rom/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_DIR}/components/esp_rom/${BT_CHIP_SERIES}/include/${BT_CHIP_SERIES}
+    ${ESP_SUP_DIR}/components/esp_rom/${BT_CHIP_SERIES}
+    ${ESP_SUP_DIR}/components/heap/include
+    ${ESP_SUP_DIR}/components/log/include
+    ${ESP_SUP_DIR}/components/riscv/include
+    ${ESP_SUP_HAL_gpio}/include
+    ${ESP_SUP_HAL_gpio}/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_HAL_clock}/include
+    ${ESP_SUP_HAL_clock}/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_DIR}/components/efuse/include
+    ${ESP_SUP_DIR}/components/efuse/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_DIR}/components/esp_event/include
     #  hal/pmu_ll.h・hal/pmu_hal.h（wifi/esp_shim.c の esp_shim_modem_icg_init）
-    ${ESP_HAL_DIR}/components/esp_hal_pmu/include
-    ${ESP_HAL_DIR}/components/esp_hal_pmu/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_HAL_pmu}/include
+    ${ESP_SUP_HAL_pmu}/${BT_CHIP_SERIES}/include
     #  hal/rtc_timer_hal.h（rtc_time.c）
-    ${ESP_HAL_DIR}/components/esp_hal_rtc_timer/include
-    ${ESP_HAL_DIR}/components/esp_hal_rtc_timer/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_HAL_rtc_timer}/include
+    ${ESP_SUP_HAL_rtc_timer}/${BT_CHIP_SERIES}/include
     #  hal/timg_ll.h（rtc_time.c）
-    ${ESP_HAL_DIR}/components/esp_hal_timg/include
-    ${ESP_HAL_DIR}/components/esp_hal_timg/${BT_CHIP_SERIES}/include
+    ${ESP_SUP_HAL_timg}/include
+    ${ESP_SUP_HAL_timg}/${BT_CHIP_SERIES}/include
     #  modem/i2c_ana_mst_reg.h・regi2c_impl.h 等（IDF socレイアウトでのみ
     #  解決．esp_wifi.cmake §1b／C5 esp_bt.cmake と同じ理由．hal soc より後）
     ${IDF}/components/esp_phy/${BT_CHIP_SERIES}/include
@@ -384,10 +384,10 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     #  PHY／クロック／ペリフェラルの実ソース（bt/phy/coex は IDF v6.1，
     #  hw_support/clock/rtc/efuse/periph/modem_clock はチップ依存で hal 版．
     #  C5 esp_bt.cmake と同じ origin-split）
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/esp_clk_tree.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/esp_clk_tree_common.c
-    ${ESP_HAL_DIR}/components/esp_hal_clock/${BT_CHIP_SERIES}/clk_tree_hal.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_time.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/esp_clk_tree.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/esp_clk_tree_common.c
+    ${ESP_SUP_HAL_clock}/${BT_CHIP_SERIES}/clk_tree_hal.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_time.c
     ${IDF}/components/bt/porting/transport/src/hci_transport.c
     #  hci_driver_standard.c（D-1）と hci_driver_nimble.c（D-2a 節）は共に
     #  hci_driver_vhci_ops を定義するため二者択一（同時リンク不可）．D-1
@@ -400,13 +400,13 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     ${IDF}/components/esp_phy/${BT_CHIP_SERIES}/phy_init_data.c
     ${IDF}/components/esp_phy/src/lib_printf.c
     ${IDF}/components/esp_phy/src/btbb_init.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/modem_clock.c
-    ${ESP_HAL_DIR}/components/hal/${BT_CHIP_SERIES}/modem_clock_hal.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/periph_ctrl.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/esp_clk.c
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_clk.c
-    ${ESP_HAL_DIR}/components/hal/efuse_hal.c
-    ${ESP_HAL_DIR}/components/hal/${BT_CHIP_SERIES}/efuse_hal.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/modem_clock.c
+    ${ESP_SUP_DIR}/components/hal/${BT_CHIP_SERIES}/modem_clock_hal.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/periph_ctrl.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/esp_clk.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_clk.c
+    ${ESP_SUP_DIR}/components/hal/efuse_hal.c
+    ${ESP_SUP_DIR}/components/hal/${BT_CHIP_SERIES}/efuse_hal.c
     #
     #  ★§20：cold RF-synth-PLL ロック用の pmu_init 移植．stock IDF の
     #  起動シーケンスが呼ぶ PMU HP_ACTIVE 電源/アナログ初期化を ASP3 の
@@ -419,7 +419,7 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     #  esp_rom_regi2c_read/write_mask（ROM regi2c ラッパ）を提供する ROM
     #  パッチ．pmu_init/ocode/rtc_clk が NON_OS_BUILD で ROM 直呼びに落ちる
     #  ときの最下層プロバイダ．
-    ${ESP_HAL_DIR}/components/esp_rom/patches/esp_rom_hp_regi2c_${BT_CHIP_SERIES}.c
+    ${ESP_SUP_DIR}/components/esp_rom/patches/esp_rom_hp_regi2c_${BT_CHIP_SERIES}.c
 )
 
 #
@@ -432,9 +432,9 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
 #
 if(ESP32C6_BT_PMU_INIT)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-        ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_init.c
-        ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_param.c
-        ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/ocode_init.c
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_init.c
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_param.c
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/ocode_init.c
         ${BT_TARGETDIR}/bt_pmu_init_c6.c
     )
     list(APPEND ASP3_COMPILE_DEFS
@@ -456,6 +456,23 @@ if(NOT ASP3_BT_IDF_V554)
     )
 endif()
 
+#
+#  ★evidence-c6-08：LP タイマ HAL 実体の供給元差（C5 esp_bt.cmake:247-249 が
+#  記録済みの «同じドリフト»）。
+#    hal 供給 : rtc_time.c は `rtc_timer_hal_get_cycle_count` を呼ぶ
+#    esp-idf供給: rtc_time.c は `lp_timer_hal_get_cycle_count` を呼ぶ（実測）
+#  ＝**呼び先の名前が供給元で違う**。C5 の原則どおり「**ソースも同じ供給元から取る**
+#  ので名前差は消える」——ただし esp-idf 側は実体が `components/hal/lp_timer_hal.c`
+#  という **独立した .c** に居るため、**明示的にリンクが要る**（hal 側は
+#  `rtc_timer_hal.c` が存在せず別経路で解決するため不要＝実測）。
+#  ∴ esp-idf 供給のときだけ積む（hal 供給時に積むとファイルが無くて落ちる）。
+#
+if(ASP3_ESPIDF_SUPPLY)
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${ESP_SUP_DIR}/components/hal/lp_timer_hal.c
+    )
+endif()
+
 #  pmu_init.c/ocode_init.c/rtc_clk.c 内の REGI2C_WRITE_MASK/READ_MASK・
 #  regi2c_ctrl_write_reg* を «ROM 直呼び»（esp_rom_regi2c_*，ロック無し）へ
 #  解決させる（NON_OS_BUILD）．hardware_init_hook の早期（単一スレッド・
@@ -464,12 +481,12 @@ endif()
 #  calibrate 経路（本 board=efuse blk>=1 では非実行）から参照されるため
 #  同様に NON_OS へ寄せて regi2c_ctrl_write_reg 未解決を回避．
 set(_c6_non_os_srcs
-    ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_clk.c
+    ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_clk.c
 )
 if(ESP32C6_BT_PMU_INIT)
     list(APPEND _c6_non_os_srcs
-        ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_init.c
-        ${ESP_HAL_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/ocode_init.c
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/pmu_init.c
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/ocode_init.c
     )
 endif()
 set_source_files_properties(

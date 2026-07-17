@@ -88,15 +88,22 @@ endif()
 #
 #  ユーザーが明示的に -DASP3_ESPIDF_SUPPLY=ON を渡せばBTでも試せる（可逆）。
 #
-if(ESP32C6_BT)
-    set(_asp3_espidf_supply_default OFF)
-else()
-    set(_asp3_espidf_supply_default ON)
-endif()
-
+#
+#  ★★【2026-07-17 evidence-c6-08：BT の «例外» を撤去し、全構成で既定 ON にした】
+#  上の «BT だけ OFF» という例外の根拠は2つあったが、両方とも実測で消えた：
+#    (1)「hal-base + v6.1-BT の構成にしか実機実績が無い」
+#        → evidence-c6-05/06/07：**submodule v5.5.4 供給で D-1／D-2b／D-2c／D-2d を
+#          真cold・warm ともに達成**（v6.1 は warm のみ）＝実績は v554 側が «上»。
+#    (2)「esp-idf base と hal の esp_hw_support を混ぜると壊れる（shared_periph_module_t）」
+#        → ★**«混ぜたこと» が原因**であって esp-idf 供給が原因ではなかった
+#          （HANDOFF §4-3-5／C3 の同一知見）。**esp_bt_idf61.cmake の ESP_HAL_DIR を
+#          全廃して «BT ツリーごと» esp-idf 供給へ寄せたら、この壁は消えた**（実測）。
+#  ⇒ **BT でも既定 ON**＝`ninja -t deps` の hal 参照 **0**（全5指標 0．evidence-c6-08 §3）。
+#  ★可逆：`-DASP3_ESPIDF_SUPPLY=OFF` で従来どおり hal 供給へ完全復帰する。
+#
 option(ASP3_ESPIDF_SUPPLY
-    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (v5.5.4 tag) instead of esp-hal-3rdparty. Default ON = HAL-free (WiFi / plain builds). Default OFF for ESP32C6_BT=ON: the C6 BLE hardware evidence (D-1/D-2b/D-2c) exists only for the hal-base + v6.1-BT configuration, and mixing an esp-idf base with hal's esp_hw_support breaks (shared_periph_module_t). Reversible either way"
-    ${_asp3_espidf_supply_default})
+    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (v5.5.4 tag) instead of esp-hal-3rdparty. Default ON for ALL configurations (WiFi / BT / plain) = HAL-free. For ESP32C6_BT=ON this became the default in evidence-c6-08: the v5.5.4-submodule supply reaches D-1/D-2b/D-2c/D-2d at both warm and TRUE COLD, and the old 'shared_periph_module_t' wall was caused by *mixing* an esp-idf base with hal's esp_hw_support, which disappears once the BT tree itself is moved. OFF = full revert to the hal supply (reversible)"
+    ON)
 
 if(ASP3_ESPIDF_SUPPLY)
     set(ESP_SUP_DIR ${IDF_V554})
