@@ -1674,28 +1674,32 @@ iPhone が timeout»**（`PAIR`/`ENC` とも status 0）＝**別の現象**。**
 ＝**«digest が一致した» だけでなく «実際に動いて広告している»**（**ASP3 は base MAC で広告／stock は `…:BE`＝別値なので取り違えない**） |
 | **復元先の保全** | ★**`rb_A_ble` / `rb_B_ble` / `w1_A` / `w1_B` の 4 つとも present＝1 つも消していない** |
 
-### 21.2 C5 / C6 ＝ **stock が載ったまま・電源断中**（★**戻すかは要判断**）
+### 21.2 C5 / C6 ＝ **ASP3 に戻した（実測で確認）**（ユーザー決定「すすめて」）
 
-| DUT | 現在 | 元のイメージ | 復旧手段（**両方とも検証済み**） |
-|---|---|---|---|
-| **C5** `d0:cf:13:f0:a7:44` | **stock D-7（`IDFCTL-C5SC`）**・**電源断** | **`build/c5_tc_A2_ble`** | ★**dump `tmp/asp3_flash_backup/c5_asp3_full_8MB.bin`（md5 `c29621d5…`・独立 2 回の dump が一致）**＋**§3.3 で write+verify を実地検証済** |
-| **C6** `14:C1:9F:E0:5A:9C` | **stock arm-1（`IDFCTL-C6`・EXT_ADV=y の初版）**・**電源断** | **`build/gd_c6_ble`** | ★**dump `tmp/asp3_flash_backup/c6_asp3_full_4MB.bin`（md5 `2f74e55a…`）**＋**§3.3 で write+verify を実地検証済** |
+★**C3 と同じ «2段階» の証明**＝**バイト（digest）と «機能»（実際に電波に出るか）は別物**。
 
-**戻すコマンド（そのまま貼れる）**：
-```bash
-ESPTOOL=~/.espressif/python_env/idf5.5_py3.12_env/bin/esptool.py
-cd /home/honda/TOPPERS/ASP3CORE/asp3_esp_idf
-sudo uhubctl -l 1-6 -p 3-4 -a on    # C5 に給電
-sudo uhubctl -l 1-6 -p 2    -a on    # C6 に給電
-$ESPTOOL --chip esp32c5 -p /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_D0:CF:13:F0:A7:44-if00 \
-    -b 921600 write_flash 0x0 tmp/asp3_flash_backup/c5_asp3_full_8MB.bin
-$ESPTOOL --chip esp32c6 -p /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_14:C1:9F:E0:5A:9C-if00 \
-    -b 921600 write_flash 0x0 tmp/asp3_flash_backup/c6_asp3_full_4MB.bin
-```
+| DUT | 書き戻し | **バイト検証** | **元ビルドとの一致** | ★**機能検証（真cold → スキャン）** |
+|---|---|---|---|---|
+| **C5** `d0:cf:13:f0:a7:44` | `Hash of data verified` | ★`verify OK (digest matched)` | ★**dump == `build/c5_tc_A2_ble/asp_flash.bin`（True）** | ★**`ASP3-C5-BLE @ D0:CF:13:F0:A7:44` を実測** |
+| **C6** `14:c1:9f:e0:5a:9c` | `Hash of data verified` | ★`verify OK (digest matched)` | ★**dump == `build/gd_c6_ble/asp_flash.bin`（True）** | ★**`ASP3-C6-BLE @ 14:C1:9F:E0:5A:9C` を実測** |
+| **C3** `60:55:f9:57:ba:bc` | （§21.1） | `verify OK` | **dump == `build/rb_A_ble/asp_flash.bin`（True）** | **`ASP3-C3-BLE @ 60:55:F9:57:BA:BC` を実測** |
 
-★**判断が要る理由**：**戻せば «次フェーズ（我々の統合の調査）» の土台が整う**が、
-**stock アームを消すと «再測定» には再 flash が必要**（**ビルドは `tmp/stock_bleprph/` に残るので復元可能**）。
-⇒ **親／ユーザーの判断を仰ぐ**。**私は C3 のみ «元に戻せ» と指示されたので C3 のみ戻した。**
+★**書き込み前に «MAC で個体を同定»**（`flash_id`＝C5 rev v1.0/8MB・C6 rev v0.2/4MB）
+＝**ポート番号だけで焼かない**。
+★**stock の広告名は «全部» 消えたことを測定**（`IDFCTL-C5SC`/`IDFCTL-C5`/`IDFCTL-C6`/
+`IDFCTL-C3SC`/`IDFCTL-C3` ＝ **すべて absent**）。
+
+★**副次的に確定した事実（3/3 チップで一致）**：
+
+| | 広告アドレス |
+|---|---|
+| **我々の ASP3** | ★**base MAC そのもの**（C3 `…BA:BC` / C5 `…A7:44` / C6 `…5A:9C`） |
+| **stock IDF** | ★**base MAC +2**（C3 `…BA:BE` / C5 `…A7:46` / C6 `…5A:9E`） |
+
+★**自己申告⑤**：私は機能検証のスクリプトに **「`ASP3-C6-BLE` は `…5A:9E` にいるはず」と書いた**が、
+**`…5A:9E` は «stock» のアドレス**であり、**ASP3 は base MAC で広告する**（**上表＝私自身が本日測った規則**）。
+⇒ **「not seen at this address」は «ボードの異常» ではなく «私の期待値の誤り»**。
+**実測は `…5A:9C` に `ASP3-C6-BLE`＝正しい。** ★**«期待値» を先に疑わず «ボード» を疑いかけた。**
 
 ### 21.3 stock のビルド資産（★再現可能な形で残る）
 
@@ -1705,3 +1709,97 @@ $ESPTOOL --chip esp32c6 -p /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug
 - **アーム**：`build_esp32c6`（C0）／`build_esp32c5`（arm-1）／`build_c5_r2`（D-7）／
   `build_esp32c3`（arm-1・fallback）／`build_c3_r2`（D-7）
 - **セルのログ**：`tmp/stock_bleprph/cell_logs/archive/`（**全セル分を保存＝上書きしていない**）
+
+
+---
+
+## 22. ★★次フェーズへの引き継ぎ（★本 evidence が «探索空間の定義» の正本）
+
+★**私は E1 を «やらない»**（**別エージェントが担当**）。**以下は «引き継ぎに要るもの» を揃えたもの。**
+
+### 22.1 ★探索空間の定義（＝**容疑者から外れたもの / 残るもの**）
+
+**外れた**（★**すべて «実測の対照» で外した。推論ではない**）＝§20.2 の表。要点：
+**チップ（同一個体）／blob（same inode `15244326`）／上流 NimBLE・controller（同一 submodule `735507283d`）／
+toolchain（3チップとも `esp-14.2.0_20260121`）／SM config（D-7 で R2 を閉じた）／
+NVS 永続性（両方 RAM-backed）／②（IRK 4関数）／`ENC status=7` が指紋という読み／EXT_ADV。**
+
+**残る＝我々の統合の «4面»**：
+
+| # | 面 | 実測の状況 | 次の一手 |
+|---|---|---|---|
+| **1** | **shim / OSAL**（`esp_shim.c`・`bt_shim.c`＝FreeRTOS の代わりに ASP3 へ橋渡し） | **未計測**。★**stock はこの層が «存在しない»** | ★**E1**（`shim_que_pend_total` の high-water ミラー） |
+| **2** | **起動**（Direct Boot・クロック初期化） | **未計測**。★**stock は IDF 自前のスタートアップ** | 未設計 |
+| **3** | **app**（`ble_host_smoke_c5.c` 等） | **未計測** | 未設計 |
+| **4** | **config の残差** | ★**測った＝19/414**（**うち SM/privacy/store 系は `BLE_STORE_MAX_EADS` の 1 個のみ**） | ★**«config 差で SM が壊れている» 筋は ほぼ死んでいる**＝優先度低 |
+
+### 22.2 ★★「差がある」と「原因」を混同するな
+
+★**stock と我々の差は «原因を含む» が、«差＝原因» ではない。**
+- **§22.1 の 4 面は «差の全リスト»**であって **«容疑者リスト» ではない**。
+- **19/414 の config 差**（§15.6）は **«差» として実在する**が、**うち SM 関連は 1 個**＝
+  ★**「この 19 個のどれかが犯人」と読むのは誤り**（**まず «SM に効く経路» が無い**）。
+- ★**私は «犯人» を名指ししない**——**それは次フェーズの «仮説» であって本日の実測ではない。**
+
+### 22.3 ★★3 つの病態は «別物»（★「同じ原因」を仮定させない）
+
+| 軸 | 病態 | ★同一視してはいけない理由 |
+|---|---|---|
+| **C5 × Android** | **bond に一度も到達しない**（`ENOTCONN`） | **SM が完遂しない段** |
+| **C3 × Android** | **bond するが再接続できない** | **bond は «成立している»＝上と別段** |
+| **C3 × iPhone** | **wedge**（`DISC=0`＝**切断イベントが届かない**） | ★**デバイス側は «成功» している**＝**イベント配送の段**。**上 2 つと別段** |
+
+⇒ ★**«3 軸とも我々の統合» は «統合が容疑者» を強く支持するが «同じ箇所» を意味しない。**
+⇒ ★**1 つの fix が 3 つを直すと «仮定するな»。**
+
+### 22.4 ★stock 側の再現手順（★「私の環境で動いた」で終わらせない）
+
+| 項目 | 実体 |
+|---|---|
+| **再現スクリプト** | ★**`tmp/stock_bleprph_setup.sh`（tracked）**＝コピー・delta・両ターゲットのビルド・**toolchain の実測**まで |
+| **供給** | **submodule `esp-idf` @ `735507283d`（真 v5.5.4 タグ）**・**全ラウンドで clean を維持** |
+| **toolchain** | **`esp-14.2.0_20260121`（IDF 標準）**＝`idf.py` の自動選択を **build.ninja の実パスで実測** |
+| **stock からの変更＝7 件**（**全列挙**） | **D-1** `EXAMPLE_BONDING=y` ／ **D-2** `EXAMPLE_ENCRYPTION=y` ／ **D-3** `EXAMPLE_EXTENDED_ADV=n`+`BT_NIMBLE_EXT_ADV=n` ／ **D-4** `BT_NIMBLE_SVC_GAP_DEVICE_NAME`（一意名）／ **D-5** `main.c:617` の 1 行（★**唯一のソース変更**＝stock が Kconfig を実行時に上書きしていたため）／ **D-6** `ESP_CONSOLE_USB_SERIAL_JTAG=y`（**C3 のみ**＝**ボードに UART ブリッジが物理的に無い**）／ **D-7** `EXAMPLE_USE_SC=y`+`EXAMPLE_RESOLVE_PEER_ADDR=y`（**D-7 アームのみ**＝**R2 を閉じる**） |
+| **★重要** | ★**D-1〜D-4・D-6・D-7 はすべて «例／IDF 自身の stock Kconfig»**＝**我々の config は 1 個も輸入していない** |
+| **アーム** | `build_esp32c6`(C0・**★命名修正前＝EXT_ADV=y の初版**) ／ `build_esp32c5`(arm-1) ／ **`build_c5_r2`(D-7)** ／ `build_esp32c3`(arm-1・fallback) ／ **`build_c3_r2`(D-7)** |
+| **全セルのログ** | **`tmp/stock_bleprph/cell_logs/archive/`**（**上書きせず全保存**） |
+| **焼き直さずに再実行できる** | ★**ビルドは残してある**（`tmp/` は gitignore 済＝リポジトリを汚さない） |
+
+### 22.5 ★★次フェーズで «使える計器»（＝arm-1 の制約が解けている）
+
+★**D-7 アーム（`EXAMPLE_RESOLVE_PEER_ADDR=y`）は IRK を配布する**
+⇒ **controller が RPA を解決する**
+⇒ ★★**「どのセッションがどの端末か」を «測定で» 特定できる**。
+
+| アーム | `peer_id_addr` | 帰属 |
+|---|---|---|
+| **arm-1**（ENC のみ） | ★**`peer_id == peer_ota`（未解決）**＝**C5 で 7/7・C6 で全セッション** | ★**セッションを端末に帰属 «できない»**（**RPA ローテートを «2台» か «別セントラル» か区別できない**） |
+| **D-7**（ENC\|ID） | ★**`peer_id != peer_ota`（解決）**＝**C5 D-7 で 1/1・C3 D-7 で 13/14**（唯一の未解決＝conn#1＝**構造上の正解**） | ★★**帰属できる** |
+
+★**実測で同定した identity**：
+- **`a8:d1:62:39:5d:fc`（type 0＝public）＝ユーザーの Android**
+  ——★**C5 D-7 セルと C3 D-7 セルで «同一の identity»**＝**同じ端末が両セルを実施したことが実測で確定**。
+- **`c4:52:4f:45:87:e4`（type 0＝public）＝ユーザーの iPhone**（C3 D-7 セル）。
+
+⇒ ★**次フェーズでは «誰が繋いだか» を測れる**（**本ラウンド前半で私を縛った制約は D-7 では存在しない**）。
+
+### 22.6 ★★未解明のまま残すもの（★消さない）
+
+| # | 未解明 | 実測でわかっていること |
+|---|---|---|
+| **U1** | ★**iPhone で ENC 行が connect 行 «より前» に出る機序** | **観測した事実のみ**（§19.3）。**未計装＝機序不明**。★**教訓：これは «C0 のログに既に見えていた»（§10.1 の `501287 ENC → 501347 CONNECT`）。私は «奇妙だ» と気づいたが追わなかった。害になったのは «スクリプトが黙ってそれを飲み込んで «7.4秒＝フルペアリング» という偽値を出した» ときだけだった。**⇒ **«奇妙だが無害» に見えるものを放置すると、後で «計器» が静かに嘘をつく。** |
+| **U2** | **iPhone の disconnect timeout の機序** | ★**stock でも出る＝我々由来ではない**、までが実測（§10.4・§19.2）。**なぜ出るかは不明。** |
+| **U3** | **3 つの病態の機序**（bond 未到達／再接続不可／wedge） | ★**すべて未計装**（**RX/TX・SMP PDU・pend_ring いずれも未測定**） |
+
+### 22.7 ★★未測定・取らなかった対照（no silent caps・最終形）
+
+- ★**stock × C5 × iPhone ＝ 未実施**（**我々の ASP3 では C5×iPhone は «OK»＝既知の健全セル**⇒
+  **相対的に価値が低いと判断**。**ただし «測っていない» と明記する**）。
+- ★★**stock × C6 は C0 のみ**——**しかも «命名修正 «前»» の初版ビルド（`EXT_ADV=y`・広告名
+  `nimble-bleprph-e`）**＝★**最終アーム（EXT_ADV=n・D-7）とは «別バイナリ»**。
+  ⇒ **「stock は C6 で動く」は成立するが、«最終アームで C6 を測った» とは言えない**。**D-7 × C6 は未実施。**
+- ★**arm-1（`IDFCTL-C5`）の READ の脚は «未実行のまま»**（§14.4＝**私の手順書の不備**）。
+- ★**我々の ASP3 側は «私が» 再測定していない**（**比較対象は別エージェントの記録＝読むだけ**）。
+- ★**`hci0` は «スキャンのみ»**（**毎回 «接続 0 件» を read-only で確認してから**）＝
+  **BlueZ での bond 試験はしていない**。
+- ★**«統合の 4 面» は 1 つも計測していない**（**本ラウンドは «外側» を消しただけ**）。
