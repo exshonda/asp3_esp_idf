@@ -605,13 +605,25 @@ if(ESP32C6_BT_NIMBLE)
     set(TINYCRYPT_ROOT ${IDF}/components/bt/host/nimble/nimble/ext/tinycrypt)
 
     #  ---- SMP（ペアリング／ボンディング，D-2d）----
-    #  ★本ラウンド（BLE実施14）の目標は D-2a/D-2b（sync→adv rc=0）＝暗号不要の
-    #  ため既定 OFF（C5/C6-hal は D-2d 到達済みで既定 ON だが，本 v6.1 初 bring-up
-    #  はビルド面を痩せさせ tinycrypt リンクを避ける）．OFF 時は
-    #  MYNEWT_VAL_BLE_SM_LEGACY/SC=0 で ble_sm*.c を near-empty 化し，bond store は
-    #  ble_store_ram（IDF文脈で空＝sync/adv には十分）を使う．ON にすれば C5 と
-    #  同じ tinycrypt5ソース＋ble_store_config へ切替（D-2d 拡張時）．可逆．
-    option(ESP32C6_BT_SM "Enable NimBLE SMP pairing/bonding on C6 idf61 (D-2d, tinycrypt)" OFF)
+    #  ★2026-07-17（evidence-c6-10）：既定を OFF → **ON** へ（ユーザー判断）。
+    #  C5 の ESP32C5_BT_SM（既定 ON）と同型になり，C6 の «完全同型化» が完了する。
+    #
+    #  ★根拠（実測。旧コメントの「ビルド面を痩せさせる」は既定 OFF の理由に
+    #  ならないことが判明した）：
+    #    - RAM 増は **+1,376 B（+0.33pt・72.00%→72.33%，残 116,732 B）** のみ。
+    #      tinycrypt/uECC はほぼ .text 側（FLASH +38,512 B＝4MB 中 9.55%）。
+    #    - **既定 ON にすると «既定構成 ＝ 実機で D-2c/D-2d まで検証済みの構成»**
+    #      になる（ユーザーがスマホ central で 0xABF1/0xABF2/0xABF4 を実証したのは
+    #      hal-free + SM=ON のビルド）。既定と検証済み構成の乖離が消える。
+    #    - D-1/D-2b は SM=ON でも真cold・warm とも非回帰（evidence-c6-10）。
+    #
+    #  OFF 時は MYNEWT_VAL_BLE_SM_LEGACY/SC=0 で ble_sm*.c を near-empty 化し，
+    #  bond store は ble_store_ram（IDF文脈で空＝sync/adv には十分）を使う＝
+    #  D-2c までの従来構成へ完全復帰（可逆）。
+    #
+    #  ★ゲート：本 option は if(ESP32C6_BT_NIMBLE) 配下（:601）にあるため，
+    #  NimBLE を積まない bt_smoke_c6（D-1 のみ）には無影響（C5 も同一構造）。
+    option(ESP32C6_BT_SM "Enable NimBLE SMP pairing/bonding on C6 (Phase D-2d, tinycrypt)" ON)
 
     #  ---- コンパイル定義 ----
     #  CONFIG_BT_NIMBLE_* 一式は bt/stub_idf61/include/bt_nimble_config.h
