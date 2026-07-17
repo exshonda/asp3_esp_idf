@@ -81,6 +81,17 @@ extern void esp_shim_bt_clock_init(void);
  */
 extern volatile uint32_t esp_shim_int_count[];
 
+#ifdef TOPPERS_C5_PEND_DIAG
+/*
+ *  ★E1計装（evidence-c5-09・診断専用）：保留リング(pend_ring)の «滞留» を
+ *  読むだけのアクセサ（wifi_v8/esp_shim.c）．
+ *    *cur  ＝ shim_que_pend_total の現在値（本タスクが 200ms 周期でサンプル
+ *             して最大値＝dwell high-water を取る）
+ *    *used ＝ shim_que_pend_used ＝ 保留経路の累積利用回数（★較正用）
+ */
+extern void esp_shim_pend_stats(uint32_t *cur, uint32_t *used);
+#endif
+
 /*
  *  LP_AON STORE系（usb-reset生存）．C5マップ（BLE実施05）：
  *    STORE0 (+0x00) sync マーカ（C6でreset生存を実証済み）
@@ -497,9 +508,51 @@ void
 storm_monitor_task(EXINF exinf)
 {
 	(void) exinf;
+#ifdef TOPPERS_C5_PEND_DIAG
+	uint32_t	hw = 0U;	/* dwell high-water（本タスクのローカル＝ISR非依存） */
+#endif
 
 	for (;;) {
+#ifdef TOPPERS_C5_PEND_DIAG
+		/*
+		 *  ★E1（evidence-c5-09）：STORE4 を «pend_ring 滞留» の観測へ転用．
+		 *
+		 *  転用の根拠：STORE4 の従来値 esp_shim_int_count[1] は
+		 *  evidence-c5-08 §8.1/§11 が «3セルとも 0x00000000＝情報価値が
+		 *  尽きている» と実測記録．⇒ 上書きしても失う情報が無い．
+		 *  （C5 の LP_AON STORE は 0-9 の 10 本«のみ»実在＝
+		 *   soc/lp_aon_reg.h:17-125 で実測．STORE10/11 は非実在．
+		 *   0/2/3/5/6/8/9 は証拠・1 は RTC cal 予約・7 は bt_shim 予約
+		 *   ⇒ 空きは STORE4 だけ．）
+		 *
+		 *  エンコード：0xE1 << 24 | (dwell_hw & 0xFF) << 16 | (used & 0xFFFF)
+		 *    [31:24] タグ 0xE1 ＝ ★«本タスクが生きている» ことの無条件証明．
+		 *            （従来の STORE4=0 は «int_count[1]==0» と «本タスクが
+		 *             死んでいる» を区別できなかった＝その曖昧さをここで閉じる）
+		 *    [23:16] dwell high-water ＝ 200ms サンプルで見た pend_total の最大．
+		 *            ★これが «滞留»（居座り）そのもの．①が主張する滞留は
+		 *            30秒スケール ⇒ 200ms サンプラなら ~150回捕捉できる．
+		 *    [15:0]  pend_used ＝ 保留経路の累積利用回数．★較正＝hw==0 が
+		 *            «滞留無し» か «経路未使用（測定対象が存在しない）» かを分ける．
+		 *
+		 *  ★hot path には触れていない：読むだけのアクセサを 200ms に1回呼ぶ．
+		 *  書込み回数は従来（STORE4 へ 200ms 毎に1回）と同一＝非侵襲．
+		 */
+		{
+			uint32_t	cur = 0U, used = 0U;
+
+			esp_shim_pend_stats(&cur, &used);
+			if (cur > hw) {
+				hw = cur;
+			}
+			sil_wrw_mem((void *) LP_AON_STORE4,
+						0xE1000000UL
+						| ((hw > 0xFFUL ? 0xFFUL : hw) << 16)
+						| (used > 0xFFFFUL ? 0xFFFFUL : used));
+		}
+#else
 		sil_wrw_mem((void *) LP_AON_STORE4, esp_shim_int_count[1]);
+#endif
 		/*  ★D-2c：STORE5 は write マーカへ転用したのでミラーしない
 		    （線2の storm 非発生は §4.3/§4.4 で live 実測済＝情報価値は尽きている．
 		    report_intr_rate() は両線ともコンソールへ出し続ける）．  */

@@ -487,6 +487,21 @@ if(ESP32C5_BT_NIMBLE)
     #  ble_mqueue_put(RX)・ble_sm_tx(我々のSMP送出試行)・ble_transport_to_ll_acl_impl
     #  (host→controller ACL)を横取りし LP_AON STORE3 へ記録（bt/rx_trace.c）。
     #  STORE3 を使うため APIERR_TRACE とは排他（同時ONで二重書込み）。既定OFF＝非回帰。
+    #  （E1／evidence-c5-09）PEND_DIAG：pend_ring の «滞留が実在するか» を測る計装。
+    #  レビュー仮説①（C5 app に周期 flush が無い＝SMP PDU が pend_ring に滞留する）を
+    #  «修正を書く前に» 反証するためのもの。★計器は «既存カウンタのミラーのみ»：
+    #    - wifi_v8/esp_shim.c に読むだけのアクセサ esp_shim_pend_stats() を 1 個追加
+    #      （★push/flush の hot path には1命令も足さない＝evidence-c3-04 の
+    #        «20語 dump を hot path に置いて bond を壊した» 事故の反対）
+    #    - app の既存 storm_monitor_task（200ms周期）が LP_AON STORE4 へ 1 レジスタ
+    #      書込み（書込み回数は従来と同一）。STORE4 の従来値 esp_shim_int_count[1] は
+    #      evidence-c5-08 §8.1/§11 が «3セルとも 0＝情報価値が尽きている» と実測記録済。
+    #  ★--wrap を使わない＝«噛んだか» の確認が要る計装を避ける。既定OFF＝非回帰。
+    option(ESP32C5_BT_PEND_DIAG "Mirror pend_ring dwell high-water + engage count to LP_AON STORE4 (E1 diag)" OFF)
+    if(ESP32C5_BT_PEND_DIAG)
+        list(APPEND ASP3_COMPILE_DEFS TOPPERS_C5_PEND_DIAG)
+    endif()
+
     option(ESP32C5_BT_RXTRACE "Trace post-encryption RX/TX ACL pipeline via --wrap (D-2d bond diag)" OFF)
     if(ESP32C5_BT_RXTRACE)
         list(APPEND ASP3_SYSSVC_TARGET_C_FILES ${BT_TARGETDIR}/rx_trace.c)

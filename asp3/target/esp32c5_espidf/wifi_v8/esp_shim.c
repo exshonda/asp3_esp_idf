@@ -947,6 +947,41 @@ esp_shim_queue_flush_pending(void)
 	}
 }
 
+#ifdef TOPPERS_C5_PEND_DIAG
+/*
+ *  ★E1計装（診断専用・既定OFF＝非回帰）：保留リングの «滞留» を app から
+ *  観測するための読み出し専用アクセサ．
+ *
+ *  設計上の要点（evidence-c5-09 §4）：
+ *    - ★push/flush の hot path には «1命令も» 足さない．本関数は「静的変数を
+ *      2つ読むだけ」で，呼ぶのは app の storm_monitor_task（200ms周期）のみ．
+ *      evidence-c3-04 の «20語 dump を hot path に置いて bond を壊した» 事故の
+ *      反対を行く．
+ *    - *cur ＝ shim_que_pend_total の «現在値»．呼び側が 200ms 周期でサンプル
+ *      して最大値を取ることで «滞留（居座り）» を測る．push 点で最大値を取ると
+ *      «即flushされた 0→1→0» も 1 と数えてしまい滞留を測れないため，
+ *      «独立した時計から覗く» 方式にしている．
+ *    - *used ＝ shim_que_pend_used ＝ 保留経路の «累積利用回数»．
+ *      ★これが «較正»：hw==0 が «滞留が無い» のか «経路が使われていない
+ *      （＝測定対象が存在しない）» のかを分ける．used を測らずに hw==0 を
+ *      «①は死んだ» と読むのは «0 を読んだが測定対象が無いだけ» の型
+ *      （review §5-b）．
+ *    - ロック不要：どちらも volatile な単一ワードで，0/非0 と大小の判定に
+ *      しか使わない（shim_que_pend_total 自身が exit_critical の高速パスで
+ *      同じくロック無しで読まれている＝:924 と同じ契約）．
+ */
+void
+esp_shim_pend_stats(uint32_t *cur, uint32_t *used)
+{
+	if (cur != NULL) {
+		*cur = shim_que_pend_total;
+	}
+	if (used != NULL) {
+		*used = shim_que_pend_used;
+	}
+}
+#endif /* TOPPERS_C5_PEND_DIAG */
+
 /*
  *  esp_shim_queue_send()：タスク文脈からのキュー送信．
  *
