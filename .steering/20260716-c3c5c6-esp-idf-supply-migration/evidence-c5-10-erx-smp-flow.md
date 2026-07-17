@@ -194,10 +194,74 @@ v5.5.4 supply・toolchain `esp-14.2.0_20260121`）：
 ★**vintage 注記（no silent caps）**：OFF ビルド 417600 B は E1 の OFF（417696 B）と**一致しない**
 （本ツリーは e17de26＝app の STORE4 ゲート追加後）。静的一致による非回帰主張はせず **C0 実機で検定**。
 
-## 4. C0（BlueZ・健全セル）
+## 4. C0（BlueZ・健全セル）＝ ★★**PASS（2/2・真cold）＋陽性対照 3/3 成立**
 
-（実測後に記入）
+**ハーネス**：E1 と同一の確立済み D-Bus 直叩き（`ble_c0.py`・`NoInputNoOutput` agent 自己登録・
+毎回 `remove` でフレッシュ bond）。**flash**：`build/erx_c5_rxtrace/asp_flash.bin` を
+by-id（`D0:CF:13:F0:A7:44`）へ `--chip esp32c5`・`Hash of data verified`。
 
-## 5. 失敗セル（C5 × Android・ユーザー実施）
+| run | 真cold の証明 | 開始時 | bond | `0xABF4` |
+|---|---|---|---|---|
+| 1 | `jtag=GONE cp2102n=GONE`（by-id 読み戻し） | `paired=False bonded=False` | ★**`paired=True bonded=True`** | ★**`b'BT4-OK'`** |
+| 2 | `jtag=GONE cp2102n=GONE` | `paired=False bonded=False` | ★**`paired=True bonded=True`** | ★**`b'BT4-OK'`** |
 
-（実測後に記入）
+⇒ ★**P_C0 的中（計装は健全セルを壊さない）**。
+
+### 4.1 ★★較正（陽性対照）＝ **3 カウンタすべて非0**（P_CAL 的中）
+
+**マーカー実測（run1・run2 とも «全レジスタ byte 一致»）**：
+
+| reg | 値 | 読み |
+|---|---|---|
+| STORE0 | `0x5ade51c0` | SYNC 到達 |
+| STORE2 | `0xad000000` | adv rc=0 |
+| ★**STORE3** | ★**`0x11010203`** | **RXTRACE 原機能も較正**：enc_chg=1・sm_enc_rx=1・暗号後 put=1/sm_tx=2/to_ll=3（鍵配布 2 PDU＝Identity Info/Addr と整合） |
+| ★★**STORE4** | ★★**`0xe2040407`** | **tag=0xE2（wrap 生存）・smp_rx_put=4・smp_rx_l2=4・smp_tx_ll=7** |
+| STORE5 | `0x00000000` | WRITE 未実施（ハーネスは書かない＝想定どおり） |
+| STORE6 | `0x5de00000` | ENC status=0・delta_s=0（暗号成立・即時） |
+| STORE8 / STORE9 | `0x604e0001` / `0xd15c1301` | CONNECT ok・切断はハーネス側（0x13） |
+
+★**カウント値は SC responder のプロトコル構造と完全整合**（値の «もっともらしさ» でなく構造で検算）：
+- **RX 4 個**＝Pairing Request・Public Key・Pairing Random・DHKey Check（central→peripheral の SC 全 4 PDU）
+- **TX 7 個**＝Pairing Response・Public Key・Confirm・Random・DHKey Check（暗号前 5）＋
+  Identity Info・Identity Address（暗号後 2＝**STORE3 の sm_tx delta=2 と独立に一致**）
+- **put==l2（4=4）**＝rx_q へ入った SMP は全て dispatch された（健全時の基準値）
+
+⇒ ★★**3 本のカウンタは «必ず通る» 経路で全て非0 を実測済**＝**失敗セルの «0» は «盲» ではなく
+«流れていない» と読んでよい**（各カウンタ個別に較正成立）。
+
+### 4.2 freshness（残留の制御）
+
+- **E1 計器の旧値 `0xe1000000` → 本ラウンド `0xe2040407`＝«タグの遷移» が今ブートの書込みを直接証明**
+  （第9再発の型：証拠は «存在» でなく «遷移»）。
+- 真 POR が LP_AON を消すことは同一個体で本日 sentinel 実測済（`evidence-c5-09 §8.4 c1`）。
+- カウンタ実体は `.bss`／`g_erx_*`（`408008e0-e8 B`）＝毎ブート 0 初期化＝前ブート値の混入は構造的に不可能。
+
+## 5. 失敗セル（C5 × Android・ユーザー実施）＝ **準備完了・ユーザー待ち**
+
+### 5.1 セルの状態（実測）
+
+| 項目 | 実測 |
+|---|---|
+| 個体 | `d0:cf:13:f0:a7:44`（MAC で同定・by-id でのみ操作） |
+| ビルド | `build/erx_c5_rxtrace`（RXTRACE=ON・PEND_DIAG=OFF・SM=ON・arm B toolchain `esp-14.2.0_20260121`） |
+| ★1セル1ボード | C3（port1）・C6（port2）電源断＝`Port 1: 0000 off`/`Port 2: 0000 off` 読み戻し＋**by-id 3 本とも GONE**＋**スキャンで他の `ASP3-*`/`IDFCTL-*` 不在を実測**（スキャナ較正＝5 デバイス見えている） |
+| ★真cold | `-p 3-4` off→`jtag=GONE cp2102n=GONE` 読み戻し→on。**広告 `ASP3-C5-BLE` をスキャンで実測** |
+| BlueZ | DUT の device object を `remove`・`Discovering: no`・接続 0＝セルを奪わない |
+| hub 1-5 | 一切触っていない |
+
+### 5.2 ユーザー手順（★Android のみ・iPhone は触らない）
+
+1. ★**Android と iPhone の «両方» で `ASP3-C5-BLE` を「登録解除（forget）」する**
+   （bond は RAM backed＝真cold でデバイス側の鍵は消えている。片側の古い bond が残ると
+   9時間型の事故になる。iPhone を忘れさせるのは «勝手に繋いでセルを消費させない» ため）。
+   その後 **両方の端末で BT を OFF→ON**。
+2. **Android の Bluetooth 設定から `ASP3-C5-BLE` をペアリングする。**
+3. **観測を逐語で報告**：ペアリング要求ポップアップが出たか／「登録済み」になったか
+   エラーか／切れたのは «すぐ» か «数秒» か «30秒くらい» か（体感で結構）。
+4. ★**iPhone は触らない**（カウンタは累積＝2 端末を同一ブートで混ぜない）。
+
+★**エージェントはユーザーが試す «前» にマーカーを読まない**（read-mem は download mode に
+落として広告が止まる）。**報告を受けてから** STORE0-9 を読み、**§2 の分岐をそのまま適用**する。
+
+（ユーザー実施後にここへ実測を記入）
