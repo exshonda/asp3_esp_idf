@@ -23,6 +23,36 @@
 set(TARGETDIR ${CMAKE_CURRENT_LIST_DIR})
 
 #
+#  ------------------------------------------------------------------
+#  ツールチェーン検証（「黙って汎用GCCへ落ちる」の検出）
+#  ------------------------------------------------------------------
+#
+#  実測：本リポジトリ build/ 配下 320 構成のうち 164 構成が
+#  /usr/bin/riscv64-unknown-elf-gcc（Ubuntu汎用GCC 13.2.0）でビルド
+#  されており，esp-idf submodule（真の v5.5.4）が指定する
+#  esp-14.2.0_20260121 を使った構成は **0** だった．
+#  原因は asp3_core の toolchain-riscv64.cmake が既定プレフィクス
+#  riscv64-unknown-elf- を PATH 経由で解決するため，
+#  -DRISCV64_TOOLCHAIN_PREFIX の渡し忘れが «ビルドは通るのに間違った
+#  コンパイラ» を生むこと．検証はここ（target.cmake＝本リポジトリ側）
+#  で行い，チップ非依存の実体は asp3/cmake/ に置く（C3/C6 も
+#  submodule を触らずに同じ2行で転写できる）．
+#
+#  推奨する configure：
+#    -DCMAKE_TOOLCHAIN_FILE=<repo>/asp3/cmake/toolchain-esp32-riscv32.cmake
+#
+#  -DASP3_ESP_EXPECTED_TOOLCHAIN=<tag> で意図的に別版を許可できるよう，
+#  素の set() ではなく «未定義のときだけ» 既定を与える．
+#  （素の set() だとコマンドラインの -D を黙って上書きしてしまい，
+#    esp_toolchain_check.cmake のエラーメッセージが案内する
+#    「-DASP3_ESP_EXPECTED_TOOLCHAIN=... で別版を受け入れる」が
+#    **効かない案内＝嘘** になる．実際に発火させて検出した．）
+if(NOT DEFINED ASP3_ESP_EXPECTED_TOOLCHAIN)
+    set(ASP3_ESP_EXPECTED_TOOLCHAIN esp-14.2.0_20260121)
+endif()
+include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_toolchain_check.cmake)
+
+#
 #  esp-hal-3rdparty（submodule）のパスとインクルードディレクトリ
 #
 #  B-0/B-1で使用するのはRTOS非依存の下層のみ：

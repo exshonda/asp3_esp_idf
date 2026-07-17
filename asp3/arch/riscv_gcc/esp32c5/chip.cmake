@@ -24,19 +24,85 @@ list(APPEND ASP3_INCLUDE_DIRS
 )
 
 #
-#  ESP32-C5コア（RV32IMC＋Zicsr/Zifencei．A拡張・FPU無し）
+#  ESP32-C5コア（RV32IMAC＋Zicsr/Zifencei．FPU無し）
 #
-#  ツールチェーンのマルチリブはrv32imcを持たないためrv32im/ilp32が
-#  リンクされる（ABI互換・C拡張の有無はコードサイズのみの差）。
+#  ------------------------------------------------------------------
+#  ISA／ABI の指定（ESP-IDF v5.5.4 標準に整合させたもの．実測に基づく）
+#  ------------------------------------------------------------------
 #
-#  【実機確認待ち】docs/c5-port-design.md §4「chip.cmake」の項。
-#  C5もC6と同じRV32IMC＋Zicsr/Zifencei前提で組んでいるが，CLIC拡張が
-#  要求する追加命令セット（もしあれば）の要否は未確認。ビルドが通れば
-#  少なくともツールチェーン側の要求は満たしている（本フェーズの完了
-#  条件）が，実機での動作は別途確認が必要。
+#  【ESP-IDF が esp32c5 に渡す実測値】
+#  esp-idf submodule（真の v5.5.4 タグ 735507283d）で hello_world を
+#  実際に configure し，build/toolchain/cflags（IDFはレスポンスファイル
+#  経由で渡すため compile_commands.json に -march は現れない）を読んだ：
+#      -march=rv32imac_zicsr_zifencei
+#  -mabi は **渡していない**（riscv32-esp-elf の既定が ilp32 のため．
+#  IDFはFPUを持つターゲットでのみ -mabi=ilp32f を明示する）。
+#  出典：esp-idf/components/soc/project_include.cmake
+#      C2/C3        → rv32imc_zicsr_zifencei
+#      C5/C6/C61/H2 → rv32imac_zicsr_zifencei   ← C5はA拡張を持つ
+#  esp-idf/tools/cmake/toolchain-clang-esp32c5.cmake も同じ
+#  rv32imac_zicsr_zifencei / ilp32 を与えており，GCC版と一致する。
+#  soc_caps.h に SOC_CPU_HAS_FPU/HWLOOP/PIE は無く，march の追加接尾辞
+#  （_xesploop/_xespv）やilp32fは付かない＝上記が最終値。
+#
+#  【★旧コメントの訂正（実測）】
+#  ここには「ツールチェーンのマルチリブはrv32imcを持たないため
+#  rv32im/ilp32がリンクされる」と書かれていたが，これは
+#  **汎用ツールチェーンを使っていたことに由来する記述**だった：
+#      /usr/bin/riscv64-unknown-elf-gcc 13.2.0（Ubuntu汎用）
+#        -march=rv32imc_zicsr_zifencei -print-multi-directory
+#          -> rv32im/ilp32          ← 旧コメントの言うとおり（C拡張なし）
+#      riscv32-esp-elf-gcc esp-14.2.0_20260121（IDF v5.5.4 指定版）
+#        -march=rv32imc_zicsr_zifencei  -> rv32imc_zicsr_zifencei/ilp32
+#        -march=rv32imac_zicsr_zifencei -> rv32imac_zicsr_zifencei/ilp32
+#  ＝Espressif版はどちらのマルチリブも実在し，指定ISAと一致するものが
+#  選ばれる。旧コメントの前提（マルチリブ不足）は正しいコンパイラでは
+#  消滅する。フラグ設計が «間違ったコンパイラ» に合わせて形作られていた
+#  ことの記録として，訂正の上で経緯を残す。
+#
+#  【blobが要求するISA（実測）】
+#  riscv32-esp-elf-readelf -A で C5 blob の Tag_RISCV_arch を読むと，
+#  libpp/libcore/libnet80211/libble_app/libcoexist はいずれも
+#      rv32i2p0_m2p0_c2p0   ＝ rv32imc（**A拡張なし**）
+#  libphy は .riscv.attributes セクション自体を持たない（ISA制約なし）。
+#  さらに全blobを逆アセンブルして lr.w/sc.w/amo* を数えると **0 個**＝
+#  blobはA拡張を要求も使用もしない。よってASP3側を rv32imac にしても
+#  blobとの整合は崩れない（blobはISAの部分集合＝リンカは属性を和集合に
+#  マージする）。逆に «blobがrv32imcだからASP3もrv32imcでなければ
+#  ならない» ということもない。
+#
+#  ESP32C5_IDF_STD_ISA=ON（既定）… IDF標準 rv32imac_zicsr_zifencei
+#  ESP32C5_IDF_STD_ISA=OFF        … 移行前の rv32imc_zicsr_zifencei
+#     （A/B比較・不具合時の完全な復帰用．挙動を旧に戻す）
+#
+option(ESP32C5_IDF_STD_ISA
+    "Use the ISA that ESP-IDF v5.5.4 specifies for esp32c5 (rv32imac_zicsr_zifencei, measured from esp-idf/components/soc/project_include.cmake). OFF reverts to the pre-migration rv32imc_zicsr_zifencei."
+    ON)
+
+if(ESP32C5_IDF_STD_ISA)
+    set(ESP32C5_MARCH rv32imac_zicsr_zifencei)
+else()
+    set(ESP32C5_MARCH rv32imc_zicsr_zifencei)
+endif()
+
+#
+#  【ASP3固有＝IDFと意図的に異なる項目】
+#  以下はIDFが渡していないが，ASP3側の要求として維持する：
+#    -mcmodel=medany  … IDFは指定せず riscv32-esp-elf 既定の medlow。
+#        ASP3はRP2350/PolarFire等と同じくmedanyで統一している。
+#        medlow/medanyはリンク互換（ABI差ではなくコード生成の差）。
+#    -fsigned-char    … RISC-Vの既定は unsigned char（実測：
+#        __CHAR_UNSIGNED__ が定義される）。IDFは -fsigned-char を
+#        渡さない＝IDFはunsigned charでビルドされる。ASP3/TOPPERSは
+#        signed char前提のコードを持つためこちらを維持する。
+#        （言語意味論の差であり，呼出規約＝ABIの差ではない。）
+#  以下はIDFが渡していないが，riscv32-esp-elf の **既定と同値** で
+#  あることを実測済み（-Q --help=target で確認）＝明示しても差は無い：
+#    -mabi=ilp32（既定 ilp32）／-msmall-data-limit=8（既定 8）／
+#    -mstrict-align（既定 enabled）／-mno-save-restore（既定 disabled）
 #
 list(APPEND ASP3_COMPILE_OPTIONS
-    -march=rv32imc_zicsr_zifencei
+    -march=${ESP32C5_MARCH}
     -mabi=ilp32
     -mcmodel=medany
     -msmall-data-limit=8
@@ -47,7 +113,7 @@ list(APPEND ASP3_COMPILE_OPTIONS
 )
 
 list(APPEND ASP3_LINK_OPTIONS
-    -march=rv32imc_zicsr_zifencei
+    -march=${ESP32C5_MARCH}
     -mabi=ilp32
 )
 
