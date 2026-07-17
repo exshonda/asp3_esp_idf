@@ -16,6 +16,42 @@
 set(TARGETDIR ${CMAKE_CURRENT_LIST_DIR})
 
 #
+#  ------------------------------------------------------------------
+#  ツールチェーン検証（C5 evidence-c5-08 §2.1 からの転写）
+#  ------------------------------------------------------------------
+#
+#  asp3_core の toolchain-riscv64.cmake は既定プレフィクス
+#  riscv64-unknown-elf- を PATH 経由で解決するため，
+#  -DRISCV64_TOOLCHAIN_PREFIX の渡し忘れが «ビルドは通るのに間違った
+#  コンパイラ» を生む（実測：build/ 配下 320 構成のうち 164 構成が
+#  Ubuntu汎用GCCでビルドされていた）．
+#
+#  ★本ラウンドで C6 でも実際に踏んだ：toolchain file を渡し忘れると
+#  C5（本検証あり）は configure 時に «-dumpmachine : x86_64-linux-gnu»
+#  と即座に落ちたのに対し，C6（本検証なし）は configure が通ってしまい，
+#  ビルド途中で «cc: error: unrecognized argument in option -mabi=ilp32»
+#  という原因の分かりにくいエラーで落ちた．＝この2行の有無がそのまま
+#  «診断可能な失敗» と «謎の失敗» の差になる．
+#
+#  検証はここ（target.cmake＝本リポジトリ側）で行い，チップ非依存の
+#  実体は asp3/cmake/ に置く．C6 の chip.cmake は asp3_core（submodule＝
+#  編集禁止）だが，target.cmake は本リポジトリなので submodule を
+#  触らずに転写できる．
+#
+#  推奨する configure：
+#    -DCMAKE_TOOLCHAIN_FILE=<repo>/asp3/cmake/toolchain-esp32-riscv32.cmake
+#
+#  -DASP3_ESP_EXPECTED_TOOLCHAIN=<tag> で意図的に別版を許可できるよう，
+#  素の set() ではなく «未定義のときだけ» 既定を与える（素の set() だと
+#  コマンドラインの -D を黙って上書きし，エラーメッセージが案内する
+#  退避先が «効かない案内＝嘘» になる．C5 で実際に発火させて検出した）．
+#
+if(NOT DEFINED ASP3_ESP_EXPECTED_TOOLCHAIN)
+    set(ASP3_ESP_EXPECTED_TOOLCHAIN esp-14.2.0_20260121)
+endif()
+include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_toolchain_check.cmake)
+
+#
 #  esp-hal-3rdparty（submodule）のパスとインクルードディレクトリ
 #
 #  Phase B-1で使用するのはRTOS非依存の下層のみ：
