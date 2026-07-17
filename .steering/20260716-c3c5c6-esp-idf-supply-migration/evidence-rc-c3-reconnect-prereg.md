@@ -542,3 +542,81 @@ DISC=0 は «リンクが supervision timeout で silent に死ぬ» 切断が h
 - **層＝我々の controller/LL（terminate は配送するが timeout は配送しない＋活動後にリンクが沈黙する）＝blob でも host ソフトでもない**（host は SMP を正しく出す・terminate 配送は生きている）。
 - **未解明＝«なぜ活動後 ~5-6s でリンクが supervision timeout で死ぬか»（間欠失敗の根）と «timeout 配送欠落の snoop-free 確認»。**
 - **成果物＝両側観測の型＋C3 で撮れた失敗記録＋DISC=0 の切断型依存性（terminate 8/8 配送・timeout 欠落）を snoop-free で特徴づけ。**
+
+---
+
+## 16. ★ラウンド rc-c3 クローズ（ユーザー決定：案 C）
+
+### 16.1 C3 × Android の到達点（確定）
+
+1. ★**間欠（3態）**：Step1=初回 bond 成功→再接続不着(F1)／Step2=初回ペアリング失敗(Pairing Response が host 下で消失)／
+   Step3=bond 成功→直後 supervision timeout 切断。**Step2→3 は BT 再起動すら挟まず病態が変わった＝間欠を実証。**
+2. ★**両側観測で失敗を «1回捕捉»**（Step2）：デバイス側カウンタ×phone snoop が «初回 Pairing Response が
+   host より下で消える» を本数一致で示した＝**C5 では «撮れなかった» 失敗記録**。
+3. ★**DISC=0 の正体（Step B・snoop-free で確定）**＝**«明示 terminate（LL_TERMINATE）は 8/8 配送»・
+   «DISC=0 は supervision timeout（silent link death）限定»**。
+   ★**«DISC=0＝全切断が構造的に届かない» は «偽»**——**コーディネータが一度 «全切断が届かない» と言い過ぎたのを、
+   本 Step の対照（能動切断 8/8 配送）が覆した**（＝«構造的欠落» 仮説の反証）。
+4. ★**局在＝«我々の controller/LL 駆動の層»**（blob でも host でもない）：host は 3/3 で SMP を正しく出し、
+   terminate 配送も 8/8 生きている。壊れているのは «活動後にリンクが沈黙する» ことと «timeout を配送しない» こと。
+5. ★**未解明の «根»**＝**«活動 5-6s 後にリンクが supervision timeout で沈黙死する理由»**
+   （Step2/3 とも両側が timeout を観測＝**RF が実際に沈黙**。我々の LL が維持を止めたか／phone／RF は分離不能）。
+
+### 16.2 ★将来の入口（提案・実装しない・案 E=JTAG より «安い» 候補）
+
+**«接続パラメータ / supervision timeout の扱い» を stock と比較する**：
+- **我々が «受け入れる» 接続パラメータ（特に supervision timeout 値・conn interval・slave latency）**、
+- **LL Connection Parameter Update 要求への «応答»**、
+を **stock ESP-IDF bleprph（evidence-stock-01 の型）と突き合わせる**。
+**「活動後にリンクが沈黙死する」は «supervision timeout 値が短い / conn param 更新が噛み合わない» で説明が付きうる**
+＝**HCI/GAP 層で観測でき、JTAG（案 E）より安い。** 次にやるならここが入口。
+
+### 16.3 ★全予測の成績（★登録の書き換えゼロ＝明記）
+
+| ラウンド | 登録 | 結果 |
+|---|---|---|
+| Step1 | **P_still_fails=55%** | ★的中（失敗側） |
+| Step1 | 失敗分岐 本命 **F4=35%** / F1=15% | ★**F1 が起きた（低確率側）・本命 F4 外れ** |
+| Step1 | P_TAG95 / P_CONNfix85 / P_TXSMP90 | ★全的中 |
+| Step1 | P_LTK=70%（成功条件下） | 評価不能（再接続が起きず） |
+| Step2 | **P2_heal=40%** | 消えず（むしろ病態が変わった＝C5 と逆） |
+| Step2 | S-cal=90% | ★的中 |
+| Step2 | S1/S2=各30% | ★枠外（再接続でなく初回ペアリング失敗＝登録前提が崩れた） |
+| Step3 | P3_repro50 / **P3_alt25** / P3_heal25 | ★«第4の顔»＝枠外（device 側は Step1 と一致＝P3_alt が最近） |
+| StepB | **P_poscontrol=55% / P_active_delivered=50%** | ★的中（8/8 配送・計器非盲確定） |
+| StepB | P_timeout_lost=75% | ★部分的中・枠外（Android 3/3 で成立・snoop-free 誘発は未達） |
+
+### 16.4 ★言えないこと／未測定（no silent caps・最終形）
+
+- ★**«リンク沈黙の根»（間欠失敗の真の原因）は未解明**（→ §16.2 が入口）。
+- ★**«timeout→DISC=0» の snoop-free 確認は未達**（sudo hciconfig down=NOPASSWD 外・BlueZ の他経路は全て terminate＝配送されてしまう）。Android 3/3 に依存。
+- **間欠の駆動要因**（RF／観測者効果／スマホ状態／タイミング）は区別できない（列挙のみ）。
+- **3態を «同一機序» と断定しない**（共通は DISC=0＋host 下の脆さ＋«リンク沈黙» まで）。
+- **PAIR store our=0/peer=0**（Step1/3）が原因か artifact か未確定。**BlueZ Connect が時々 False**（確立も不安定）。
+- **RX SMP の CID 分離ミラー無し**（put に ATT 混在）。**snoop/bugreport は scratchpad（repo 外・第三者 MAC 出現せず）。**
+
+### 16.5 成果物（畳んだ後に残るもの）
+
+- **両側観測の型**（デバイス側 FAST カウンタ＋phone btsnoop・本数一致で立証）＝C3 でも機能。
+- **C3 で «撮れた» 失敗記録**（Step2 の Pairing Response 消失・C5 では不可能だった）。
+- **DISC=0 の切断型依存性**（terminate 8/8 配送・timeout 限定）を snoop-free で特徴づけ。
+- **計器 `build/rc_c3_evt`**（EVT_TRACE+FAST_MAP・esp-idf GCC14）と手順一式（再発時に数分で両側観測を再開可能）。
+
+### 16.6 ベンチ復旧（実測・1セル1ボード解除）
+
+| ボード | 復元 | 検証 |
+|---|---|---|
+| C3 `60:55:F9:57:BA:BC` | ★**計器入り `rc_c3_evt` → 計器なし通常 `rb_B_ble`（clean esp-idf GCC14・md5 `c32536dc`）へ戻す** | verify-flash digest matched＋真cold→`ASP3-C3-BLE` 広告実測 |
+| C5 `D0:CF:13:F0:A7:44` | `-p 3-4` 再給電（flash 保持＝`c5_tc_A2_ble`） | by-id PRESENT 読み戻し |
+| C6 `14:C1:9F:E0:5A:9C` | `-p 2` 再給電（flash 保持＝`gd_c6_ble`） | by-id PRESENT 読み戻し |
+
+（実測値は §16.7 に追記）
+
+### 16.7 ベンチ復旧 実測（2026-07-18・1セル1ボード解除完了）
+
+- **C3**：`rc_c3_evt`（計器入り）→ **`rb_B_ble`（計器なし clean esp-idf GCC14）へ flash**・**verify-flash digest matched**・真cold（by-id 消滅読み戻し）→ 起動。**計器なし通常 ASP3 へ復元**（判断：計器 EVT_TRACE は passive だが «通常 ASP3» へ戻すのが復旧の趣旨＝instrument を外した）。
+- **C5** `D0:CF:13:F0:A7:44`・**C6** `14:C1:9F:E0:5A:9C`：`-p 3-4`/`-p 2` 再給電＝flash 保持（`c5_tc_A2_ble`/`gd_c6_ble`）。
+- **by-id PRESENT 読み戻し＝3ボードとも PRESENT**（C3 BA:BC / C5 A7:44 / C6 5A:9C）。
+- ★**新ベンチ機（我々でない JTAG `30:ED:A0:EA:98:0E`・`30:ED:A0:EA:B6:3E`・`F4:12:FA:5B:4A:58`）は不触。hub 1-5 不触。**
+
+**★ラウンド rc-c3 クローズ完了。** 修正コード 0（計器のみ）・submodule 不触・hub 1-5 不触・認証情報 0。
