@@ -57,6 +57,21 @@ extern esp_err_t esp_timer_start_periodic(esp_timer_handle_t timer,
 										  uint64_t period_us);
 extern esp_err_t esp_timer_stop(esp_timer_handle_t timer);
 
+/*
+ *  以下2本はBLE経路（bt/porting/npl/freertos/src/npl_os_freertos.c．
+ *  npl_freertos_callout_is_active／npl_freertos_callout_get_ticks）が
+ *  実際に呼ぶ＝到達可能．本スタブはinclude順で本物
+ *  （esp-idf/components/esp_timer/include/esp_timer.h）より前に来て
+ *  shadowするため，宣言を欠くとimplicit declarationになる
+ *  （GCC13では警告／GCC14+ではエラー）．
+ *  ★シグネチャは本物の逐語コピー（esp_timer.h:269／:322）．
+ *  esp_timer_is_activeの戻り値はintではなくbool＝暗黙宣言との差が
+ *  実際にコード生成へ出る（呼出側がboolへ変換するsnezの有無）．
+ */
+extern bool esp_timer_is_active(esp_timer_handle_t timer);
+extern esp_err_t esp_timer_get_expiry_time(esp_timer_handle_t timer,
+										   uint64_t *expiry);
+
 #ifdef __cplusplus
 }
 #endif
