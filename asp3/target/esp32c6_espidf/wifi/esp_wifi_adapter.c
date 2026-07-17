@@ -586,7 +586,15 @@ phy_enable_wrapper(void)
 	 *  直前に確実に有効化する．JTAGでnative(受信OK)=0x7 vs ASP3=0x0の
 	 *  差分として特定．I2C_MSTが立っていないとregi2c越しのRF較正が
 	 *  無応答で受信不能＝AP 0個になる． */
-	*(volatile uint32_t *)0x600af018U = 0x7U;
+	/*  ★evidence-c6-13：`= 0x7`（代入）→ `|= 0x7`（read-modify-write）へ。
+	 *  BT 側（bt/bt_shim.c）は `|= 0x1` で、そのコメント自身が
+	 *  「read-modify-write で bt.c が後段で立てる他ビットを温存する」と書いている
+	 *  ＝**温存が設計上の正**。代入だと **bit3 以上を潰す**——
+	 *  memory §12 は「LPCON 0x600af018 bit3 = LP_TIMER_EN は BT 正当」と実測記録して
+	 *  おり、WiFi/BT 同時運用時のハザードになる（現状は排他なので未顕在）。
+	 *  ★立てるビットは変えていない（bit0/1/2＝WIFIPWR/COEX/I2C_MST）。
+	 *  ★どのビットが実際に要るかの同定は «別実験» として申し送り。          */
+	*(volatile uint32_t *)0x600af018U |= 0x7U;
 	/*  追記10-b：広域JTAG diffで判明した残りのmodem LPclock差分も
 	 *  native値に合わせる（COEX_LP_CLK_CONF等．LP系だが検証のため）． */
 	*(volatile uint32_t *)0x600af008U = 0x314U;	/* MODEM_LPCON_COEX_LP_CLK_CONF */
@@ -743,7 +751,9 @@ wifi_clock_enable_wrapper(void)
 	 *  CONF(0x600af018)のWIFIPWR/COEX/I2C_MSTクロック(bit0/1/2)を明示的に
 	 *  有効化する．既存の_regi2c_ctrl_ll_master_enable_clock等だけでは
 	 *  実機で0x0のまま（JTAG実測）＝受信不能だった． */
-	*(volatile uint32_t *)0x600af018U = 0x7U;
+	/*  ★evidence-c6-13：`= 0x7` → `|= 0x7`（上の phy_enable_wrapper と同理由＝
+	 *  BT の bt_shim.c と同じ «温存» 形へ揃える）。                        */
+	*(volatile uint32_t *)0x600af018U |= 0x7U;
 }
 
 static void
