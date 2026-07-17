@@ -72,12 +72,14 @@ volatile uint32_t	g_rx_enc_tick;		/* Enc Change 到着時の tick        */
  *  ⇒ 本セクションは «SMP(L2CAP CID=0x0006) だけ» を «ブート起点の生カウンタ» で
  *  数え、タグ 0xE2 付きで STORE4 へミラーする。
  *
- *  ★ble_sm_tx の --wrap は «ble_sm.c 内部の 9 呼出し点には噛まない»
- *  （同一TU参照は undefined にならず --wrap 対象外＝GNU ld の仕様。
- *   Pairing Response／Pairing Failed／鍵配布 ble_sm_key_exch_exec が全部これ）。
- *  ⇒ 我々の SMP 送出は SM 層でなく «トランスポート層»
- *  （__wrap_ble_transport_to_ll_acl_impl＝全 host TX の漏斗・クロスTU実証済）で
- *  L2CAP CID を覗いて数える＝SM 内のどこから出た SMP でも必ず通る。
+ *  ★ble_sm_tx の --wrap の噛み方＝«実測で確定»（evidence-c5-10 §3）：
+ *  設計時は「同一TU（ble_sm.c 内部）の 9 呼出し点には噛まない」と予想したが、
+ *  逆アセンブルの実測は «15/15 呼出し点すべて __wrap_ble_sm_tx へ»
+ *  （real への jal は __real_ の戻り 1 本のみ）＝この toolchain
+ *  （esp-14.2.0 binutils）は同一TU参照にも噛む。予想は誤りだった。
+ *  ⇒ それでも我々の SMP 送出の一次計数は «トランスポート層»
+ *  （__wrap_ble_transport_to_ll_acl_impl＝全 host TX の漏斗）の CID 覗きに置く
+ *  ＝SM 層の実装詳細（どの TU から送るか）に依存しない計数。
  *
  *  覗き方（passive・8バイト copy のみ・hot path に dump は置かない）：
  *    - mqueue_put／to_ll_impl 時点の om は HCI ACL ヘッダ(4B)つき
@@ -105,7 +107,11 @@ volatile uint32_t	g_erx_smp_txll;		/* TX：SMP が controller へ渡った数   
 
 #define ERX_RTC			((volatile uint32_t *) 0x600B1010UL)	/* C5 LP_AON STORE4 */
 
-extern int os_mbuf_copydata(const void *om, int off, int len, void *dst);
+/*  porting ヘッダ（os/os_mbuf.h:435-436）は os_mbuf_copydata を
+    r_os_mbuf_copydata へ #define しており、実体シンボルは後者
+    （実測：e1_c5_pend/asp.elf に `4201cd42 T r_os_mbuf_copydata`）。  */
+extern int r_os_mbuf_copydata(const void *om, int off, int len, void *dst);
+#define os_mbuf_copydata	r_os_mbuf_copydata
 
 static void
 erx_pack(void)
