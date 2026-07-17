@@ -138,6 +138,26 @@ else()
     set(ESP_SUP_SDKCONFIG_DIR ${ESP_HAL_DIR}/nuttx/esp32c3/include)
 endif()
 
+#
+#  【重要】hal_stub/ は3チップ共有（C3専用ではない）
+#
+#  hal_stub/（libc互換ヘッダ．ツールチェーンにnewlib実体が無い環境で
+#  esp-hal／mbedtls／wpa_supplicantのincludeを満たすためのスタブ）は，
+#  パスがesp32c3_espidf/配下にあるがC3専用ではなく，**C5／C6のビルドも
+#  ${C3_TARGETDIR}/hal_stub/include として同じ実体を参照する**
+#  （esp32c5_espidf/target.cmake・esp32c6_espidf/target.cmakeを参照）．
+#  ⇒ここのヘッダを変更するとC5／C6のビルドにも波及する．C3固有の
+#  変更を入れてはならない（チップ非依存＝トゥールチェーンのギャップを
+#  埋めるだけ，という前提で3チップが共有している）．
+#  実測（ninja -t deps，LWIP=ONのwifi_dhcp）：C3=1471／C5=1338／
+#  C6=1489 depsがhal_stub/配下を参照．23ヘッダ中，C5=22・C6=23が実際に
+#  取込まれる（差分はnuttx/config.h＝C6のみ）．
+#
+#  名前について：hal_stubは**hal/（esp-hal-3rdparty submodule）のスタブ
+#  ではない**．hal供給を撤去したビルド（ASP3_ESPIDF_SUPPLY=ON＝hal/配下
+#  へのdeps実測0）でも上記のとおり全ヘッダが使われる＝供給元と無関係に
+#  必要なlibc側のギャップ埋めである．
+#
 list(APPEND ASP3_INCLUDE_DIRS
     ${TARGETDIR}/hal_stub/include
     ${ESP_SUP_SDKCONFIG_DIR}
@@ -345,6 +365,24 @@ include(${TARGETDIR}/esp_bt.cmake)
 #  NET_TSK（port/sys_arch.c参照）に割り当て，netif/配下のnetifドライバ
 #  （esp_wifi_internal_tx/reg_rxcb上のethernet netif）と組み合わせる．
 #  経緯・設計はdocs/tcpip-integration.md．
+#
+#  【重要】net/ は3チップ共有（C3専用ではない）
+#
+#  net/（sys_arch・netif・lwipopts・net.cfg）はパスがesp32c3_espidf/
+#  配下にあるがC3専用ではなく，**C5／C6のビルドも${C3_TARGETDIR}/net
+#  として同じ実体を参照する**（コピーは存在しない．esp32c5_espidf/
+#  target.cmake・esp32c6_espidf/target.cmakeの「TCP/IP統合」節を参照）．
+#  ⇒ここを変更するとC5／C6のTCP/IPにも波及する．チップ非依存（blob API
+#  のみに依存しチップ固有レジスタに触れない）という前提で共有している．
+#  ★netif_esp32c3.c／netif_esp32c3.h はファイル名に"esp32c3"を含むが
+#  C3専用ではない（命名が実態と合っていない．改名はしない＝ビルド波及）．
+#
+#  実測（ninja -t deps，LWIP=ONのwifi_dhcp）：C3／C5／C6とも114 depsが
+#  net/配下を参照し，netif_esp32c3.c.obj・port/sys_arch.c.objが3チップ
+#  すべてでコンパイルされる（取込むファイル集合はC5とC6で完全一致）．
+#  ★死活判定の注意：net/は**LWIP=OFFのビルドを測るとdeps 0**になる
+#  （C3／C5／C6とも実測0）．過去にこれを「net/は死んでいる」と誤断した
+#  事例がある．死活はLWIP=ONの構成で測ること．
 #
 option(ESP32C3_LWIP "Integrate lwIP (TCP/IP + BSD sockets, requires ESP32C3_WIFI)" OFF)
 if(ESP32C3_LWIP)

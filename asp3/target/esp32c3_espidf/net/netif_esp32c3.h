@@ -14,6 +14,10 @@
 /*
  *  ESP32-C3 Wi-Fi用lwIP netif（ASP3．NO_SYS=0．BSDソケット互換化）
  *
+ *  【重要】本ヘッダは3チップ共有＝C3専用ではない（ファイル名の
+ *  "esp32c3"は歴史的経緯＝C3が最初の移植先．実体はC3／C5／C6で共用．
+ *  詳細はnetif_esp32c3.c先頭コメント参照）．
+ *
  *  esp_wifi_internal_tx/reg_rxcb の上に薄いethernet netifを実装し，
  *  lwIP自身が生成するtcpip_thread（cfg生成のNET_TSK．port/
  *  sys_arch.c参照）にlwIPコア呼出しを集約する（設計・経緯は

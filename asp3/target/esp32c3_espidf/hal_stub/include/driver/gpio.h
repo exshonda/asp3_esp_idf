@@ -20,6 +20,12 @@
  *  gpio_mode_t／gpio_pullup_t／gpio_pulldown_t／gpio_int_type_t／
  *  gpio_num_tは実物のhal/gpio_types.h（esp_hal_gpio/include，
  *  target.cmakeで既にインクルードパス追加済み）からそのまま使う．
+ *
+ *  【重要】本ヘッダは3チップ共有＝C3専用ではない．esp32c3_espidf/
+ *  配下にあるが，C5／C6のtarget.cmakeも${C3_TARGETDIR}/hal_stub/include
+ *  として同じ実体を参照する（コピーは存在しない）．⇒変更は3チップの
+ *  ビルドに波及する．C3固有の内容を入れてはならない．
+ *  詳細はesp32c3_espidf/target.cmakeのhal_stub節（実測値つき）．
  */
 #ifndef TOPPERS_HAL_STUB_DRIVER_GPIO_H
 #define TOPPERS_HAL_STUB_DRIVER_GPIO_H

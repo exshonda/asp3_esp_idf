@@ -2,6 +2,12 @@
  *  esp-hal同梱のNuttX用sdkconfig.hスタブが要求するnuttx/config.hの
  *  ASP3用スタブ．NuttXのKconfig値のうち，sdkconfig.hが選択を必須と
  *  するもの（#error回避）だけを定義する．
+ *
+ *  【重要】本ヘッダは3チップ共有＝C3専用ではない．esp32c3_espidf/
+ *  配下にあるが，C5／C6のtarget.cmakeも${C3_TARGETDIR}/hal_stub/include
+ *  として同じ実体を参照する（コピーは存在しない）．⇒変更は3チップの
+ *  ビルドに波及する．C3固有の内容を入れてはならない．
+ *  詳細はesp32c3_espidf/target.cmakeのhal_stub節（実測値つき）．
  */
 #ifndef TOPPERS_HAL_STUB_NUTTX_CONFIG_H
 #define TOPPERS_HAL_STUB_NUTTX_CONFIG_H

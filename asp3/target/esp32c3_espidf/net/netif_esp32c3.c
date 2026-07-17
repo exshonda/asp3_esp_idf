@@ -14,6 +14,16 @@
 /*
  *  ESP32-C3 Wi-Fi用lwIP netif実装（ASP3．NO_SYS=0．BSDソケット互換化）
  *
+ *  【重要】本ファイルは3チップ共有＝C3専用ではない．
+ *  ファイル名とディレクトリ（esp32c3_espidf/net/）が"esp32c3"を名乗る
+ *  が，実体はC3／C5／C6の3チップすべてでコンパイルされる：C5／C6の
+ *  target.cmakeが${C3_TARGETDIR}/net/netif_esp32c3.cを直接参照する
+ *  （コピーは存在しない．実測＝ninja -t depsでC5／C6のビルドに本ファイル
+ *  の.objが出現）．⇒C3固有のレジスタ・アドレスに依存する変更を入れて
+ *  はならない（blob API＝esp_wifi_internal_tx/reg_rxcb・esp_read_mac
+ *  のみに依存させる）．名前は歴史的経緯（C3が最初の移植先）．改名は
+ *  ビルドへの波及が大きいため行わない．
+ *
  *  lwIP自身が生成するtcpip_thread（＝cfg生成のNET_TSK．port/
  *  sys_arch.c参照）だけがlwIPコアAPIを直接呼ぶ．
  *    - wifi_rx_cb（Wi-Fiドライバのタスク文脈）はpbuf_alloc/pbuf_take
