@@ -59,9 +59,42 @@ if(NOT DEFINED ESP_TOOLCHAIN_VERSION)
     set(ESP_TOOLCHAIN_VERSION esp-14.2.0_20260121)
 endif()
 
-#  Espressif の標準導入先（idf_tools.py install の既定）
+#
+#  Espressif の標準導入先．
+#
+#  ★導入先は $HOME 決め打ちではない．**IDF_TOOLS_PATH を尊重する**．
+#  実測（esp-idf submodule の tools/idf_tools.py．推測ではない）：
+#      :3576  g.idf_tools_path = os.environ.get('IDF_TOOLS_PATH') \
+#                                or os.path.expanduser(IDF_TOOLS_PATH_DEFAULT)
+#      :96    IDF_TOOLS_PATH_DEFAULT = os.path.join('~', '.espressif')
+#      :919   get_path()             -> join(g.idf_tools_path, 'tools', <tool名>)
+#      :925   get_path_for_version() -> join(get_path(), <version>)
+#  ＝ 実体は  <IDF_TOOLS_PATH>/tools/riscv32-esp-elf/<version>/riscv32-esp-elf/bin/
+#  （このPCの実体で確認：~/.espressif/tools/riscv32-esp-elf/esp-14.2.0_20260121/
+#    riscv32-esp-elf/bin/riscv32-esp-elf-gcc）．
+#
+#  ★これを見ないと «案内が嘘になる»：IDF_TOOLS_PATH を別の場所に設定した
+#  CI／開発機では，下の FATAL が案内する `./install.sh` は **成功する** のに
+#  cmake は $HOME を見て «見つからない» と言い続ける＝直しようが無くなる．
+#
+#  Python の `or` に合わせ **空文字列は «未設定» 扱い** にする（実測どおり：
+#  `os.environ.get(...) or ...` は空文字列で既定へ落ちる）．DEFINED ENV{} だと
+#  空文字列を «設定済み» と読んでしまい，挙動が idf_tools.py と食い違う．
+#
+if(NOT "$ENV{IDF_TOOLS_PATH}" STREQUAL "")
+    set(_esp_tools_base "$ENV{IDF_TOOLS_PATH}")
+    set(_esp_tools_base_origin "(from the IDF_TOOLS_PATH environment variable)")
+else()
+    set(_esp_tools_base "$ENV{HOME}/.espressif")
+    set(_esp_tools_base_origin "(not set; using the idf_tools.py default ~/.espressif)")
+endif()
+
 if(NOT DEFINED ESP_TOOLCHAIN_ROOT)
-    set(ESP_TOOLCHAIN_ROOT $ENV{HOME}/.espressif/tools/riscv32-esp-elf)
+    set(ESP_TOOLCHAIN_ROOT ${_esp_tools_base}/tools/riscv32-esp-elf)
+else()
+    #  -DESP_TOOLCHAIN_ROOT が明示された場合，導入先の由来は無関係になる
+    #  （下の FATAL で «IDF_TOOLS_PATH を直せ» と誤誘導しないため明示する）．
+    set(_esp_tools_base_origin "(overridden by -DESP_TOOLCHAIN_ROOT; not used)")
 endif()
 
 #  プレフィクス（絶対パス）．全体を手で与えることもできる．
@@ -82,6 +115,7 @@ if(NOT EXISTS ${ESP_TOOLCHAIN_PREFIX}gcc)
         "\n"
         "Expected version : ${ESP_TOOLCHAIN_VERSION}\n"
         "Searched under   : ${ESP_TOOLCHAIN_ROOT}\n"
+        "IDF_TOOLS_PATH   : ${_esp_tools_base} ${_esp_tools_base_origin}\n"
         "\n"
         "This is the version required by the esp-idf submodule (true v5.5.4 tag);\n"
         "it is declared in <repo>/esp-idf/tools/tools.json (riscv32-esp-elf).\n"

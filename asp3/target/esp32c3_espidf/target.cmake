@@ -162,6 +162,22 @@ option(ASP3_ESPIDF_SUPPLY
     "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (true v5.5.4 tag) instead of esp-hal-3rdparty. Default ON for ALL configs (WiFi and BT) = HAL-free, matching C5/C6. BLE bond WORKS on this supply provided the build uses the toolchain ESP-IDF specifies (esp-14.2.0_20260121, enforced by the guard at the top of target.cmake): measured true-cold A/B = 5/6 bond OK on esp-14.2.0_20260121 vs 0/5 on esp-15.2.0, same supply/source/blob (evidence-c3-10 4). This supersedes evidence-c3-03 5, which attributed the bond failure to the supply while holding the compiler at esp-15.2.0. Use -DASP3_ESPIDF_SUPPLY=OFF for the reversible hal fallback. ASP3_BT_IDF_V554 follows this so the base and the BT tree never mix"
     ${_asp3_espidf_supply_default})
 
+#
+#  ★既定を変更しても，既に configure 済みの build dir には届かない
+#  （option() はキャッシュを上書きしない）＝古い既定のまま黙って動く．
+#  実測：build/c3_dflt_ble は «既定» の名を持ちながら build.ninja で
+#  hal=9216／esp-idf=0＝hal で建っている（上の既定変更前に作られたまま）．
+#  FATAL にはしない（既存の通るビルドを落とすのは挙動変更＝ユーザー判断）．
+#
+#  ★C3 の案内には «両方渡せ» が要る（実測）：ASP3_BT_IDF_V554 は
+#  ASP3_ESPIDF_SUPPLY 追従の既定を持つが，それ自体もキャッシュ実体なので
+#  古い値に据え置かれ，-DASP3_ESPIDF_SUPPLY=ON «だけ» では esp_bt.cmake の
+#  混成禁止 FATAL に当たる（stale specimen で rc=1／両方渡すと rc=0）．
+#
+include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_supply_default_check.cmake)
+asp3_warn_if_cache_overrides_default(ASP3_ESPIDF_SUPPLY ${_asp3_espidf_supply_default}
+    "     On C3, ASP3_BT_IDF_V554 follows ASP3_ESPIDF_SUPPLY, so for a BT/BLE build dir pass BOTH (measured: ASP3_ESPIDF_SUPPLY alone fails with the mixed-supply FATAL in esp_bt.cmake):\n       cmake <build dir> -DASP3_ESPIDF_SUPPLY=ON -DASP3_BT_IDF_V554=ON\n")
+
 if(ASP3_ESPIDF_SUPPLY)
     set(ESP_SUP_DIR ${IDF_V554})
     #  供給元の版差を共有ソース（shim等）で吸収するためのガード。

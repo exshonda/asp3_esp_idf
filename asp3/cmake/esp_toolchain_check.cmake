@@ -34,8 +34,51 @@ option(ASP3_ESP_TOOLCHAIN_CHECK
     "Verify that the C compiler is the Espressif riscv32-esp-elf toolchain version that ESP-IDF specifies. OFF disables the check only (it never changes flags)."
     ON)
 
-#  期待版．include する側が事前に set していればそれを使う．
-if(NOT DEFINED ASP3_ESP_EXPECTED_TOOLCHAIN)
+#
+#  期待版の決定（優先順）．
+#
+#   1. -DASP3_ESP_EXPECTED_TOOLCHAIN=<tag>（明示）… 最優先（下の案内3）
+#   2. -DESP_TOOLCHAIN_VERSION=<tag>（明示）      … これに **追従** する（案内2）
+#   3. include する側（target.cmake）が set した値／ここの既定
+#
+#  【なぜ 2 が必要か＝実測に基づく．案内が «効かない» 事故の3例目】
+#  下の「Wrong Espressif toolchain version」は退避策を3択で案内するが，
+#  **案内2（toolchain file ＋ -DESP_TOOLCHAIN_VERSION）は単独では効かなかった**．
+#  toolchain file は指定版のコンパイラを選ぶのに，期待値がここの既定
+#  （esp-14.2.0_20260121）のまま据え置かれるので **同じ FATAL が再発** する．
+#  実測（本ファイル修正前，C5・ble_host_smoke_c5）：
+#      C0（素の既定）                      -> rc=0（ESP toolchain OK）
+#      案内2 «だけ»                        -> rc=1（同じ FATAL が再発＝案内が嘘）
+#      案内2＋案内3 の両方                 -> rc=0
+#  ＝「案内先が **存在する**」と「案内に **従うと直る**」は別物だった．
+#  （同型の事故2件が既に C5/C6 target.cmake のコメントに記録されている．
+#    素の set() が -D を黙って上書きして案内3を無効化していた件がそれ．）
+#
+#  【なぜ追従させても guard は骨抜きにならないか】
+#  guard の目的は «**意図せず** 別のコンパイラに落ちるのを防ぐ» こと．
+#   - 事故の実体（-DRISCV64_TOOLCHAIN_PREFIX 忘れ → /usr/bin の汎用GCC）は
+#     ESP_TOOLCHAIN_VERSION を **設定しない**．よって追従は発動せず，
+#     しかも汎用GCCは上の -dumpmachine 検査（riscv32-esp-elf．**無条件・不変**）
+#     で確実に落ちる．164構成型の事故は一切素通りしない．
+#   - -DESP_TOOLCHAIN_VERSION=<tag> は «明示的な意思表示» であり，
+#     «意図せず» ではない．案内3（-DASP3_ESP_EXPECTED_TOOLCHAIN）が
+#     既に同じ意思表示を受け付けている以上，これを拒む理由は無い．
+#   - 追従しても **実際のコンパイラは常に実測** される（下の --version）．
+#     宣言と実体が食い違えば FATAL は従来どおり発火する．
+#     ＝追従が変えるのは «どの版を正とするか» だけで，«実測するか» ではない．
+#
+#  「明示指定」は **キャッシュ変数として現れるか** で判定する（実測）：
+#  コマンドラインの -DX=... は必ずキャッシュ実体を作る（型 UNINITIALIZED）が，
+#  target.cmake の set() や toolchain file の set() は通常変数なので
+#  DEFINED CACHE{X} は FALSE．＝ «ユーザーが明示したか» を正確に切り分けられる．
+#
+if(DEFINED CACHE{ASP3_ESP_EXPECTED_TOOLCHAIN})
+    #  1. 明示指定が最優先．そのまま使う（何もしない）．
+elseif(DEFINED CACHE{ESP_TOOLCHAIN_VERSION})
+    #  2. toolchain file に渡した版へ期待値を追従させる．
+    set(ASP3_ESP_EXPECTED_TOOLCHAIN $CACHE{ESP_TOOLCHAIN_VERSION})
+elseif(NOT DEFINED ASP3_ESP_EXPECTED_TOOLCHAIN)
+    #  3. include する側が何も set していない場合の既定．
     set(ASP3_ESP_EXPECTED_TOOLCHAIN esp-14.2.0_20260121)
 endif()
 
@@ -125,6 +168,8 @@ if(ASP3_ESP_TOOLCHAIN_CHECK)
             "  2. Select an already-installed one explicitly:\n"
             "       -DCMAKE_TOOLCHAIN_FILE=<repo>/asp3/cmake/toolchain-esp32-riscv32.cmake \\\n"
             "       -DESP_TOOLCHAIN_VERSION=${_asp3_esp_tag}\n"
+            "     (this check follows an explicit -DESP_TOOLCHAIN_VERSION, so option 2\n"
+            "      works on its own -- you do NOT also need option 3)\n"
             "  3. Accept a different version for this target on purpose:\n"
             "       -DASP3_ESP_EXPECTED_TOOLCHAIN=${_asp3_esp_tag}\n"
             "\n"

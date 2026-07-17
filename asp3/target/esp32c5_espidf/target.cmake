@@ -109,9 +109,21 @@ endif()
 #  C5/C6 にガードは無い（実測：cross guard 0箇所）＝**黙って混成が通る**。
 #  ガード追加は «挙動変更» なのでユーザー判断（本ラウンドでは提案に留める）。
 #
+#  既定は ON（＝HAL-free）．変数に出すのは下の «古い既定のまま黙って動く»
+#  検出へ «計算された既定» を渡すため（値・挙動は従来と同一）．
+set(_asp3_espidf_supply_default ON)
+
 option(ASP3_ESPIDF_SUPPLY
     "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (true v5.5.4 tag) instead of esp-hal-3rdparty. Default ON = HAL-free. OFF = a true hal fallback ONLY for WiFi/plain builds (measured: hal 7357 / esp-idf 0). WARNING for ESP32C5_BT=ON: OFF reverts the BASE components only -- the BT tree independently follows ASP3_BT_IDF_V554 (default ON = esp-idf submodule), so -DASP3_ESPIDF_SUPPLY=OFF alone silently yields a MIXED build (measured: hal 1594 / esp-idf 119, of which 88 = components/bt). It does build, but it is NOT a hal fallback. There is no all-hal BT configuration for C5 at all (esp_bt.cmake references ESP_HAL_DIR 0 times); the BT supply choices are ASP3_BT_IDF_V554=ON (esp-idf submodule v5.5.4) or =OFF (external v6.1 via ESP_IDF61_DIR). Unlike C3 (esp_bt.cmake:133-145), C5 has no FATAL_ERROR guard against the mixture"
-    ON)
+    ${_asp3_espidf_supply_default})
+
+#  既定変更が既存 build dir に届かない件の検出（詳細は下記ファイルの冒頭）．
+#  C5 の既定は一貫して ON なので «既定変更に取り残された» dir は原理的に
+#  無い（実測：OFF は 4 dir ＝いずれも -D による意図的な hal 構成）．
+#  それでも入れるのは，機構が C3/C6 と同一（option() はキャッシュを
+#  上書きしない）で，将来 C5 の既定が動いたときに同じ穴が開くため．
+include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_supply_default_check.cmake)
+asp3_warn_if_cache_overrides_default(ASP3_ESPIDF_SUPPLY ${_asp3_espidf_supply_default})
 
 if(ASP3_ESPIDF_SUPPLY)
     set(ESP_SUP_DIR ${IDF_V554})

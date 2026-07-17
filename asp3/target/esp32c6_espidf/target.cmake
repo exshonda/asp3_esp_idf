@@ -149,9 +149,24 @@ endif()
 #  C6 にガードは無い（実測：cross guard 0箇所）＝**黙って混成が通る**。
 #  ガード追加は «挙動変更» なのでユーザー判断（本ラウンドでは提案に留める）。
 #
+#  既定は ON（＝HAL-free）．変数に出すのは下の «古い既定のまま黙って動く»
+#  検出へ «計算された既定» を渡すため（値・挙動は従来と同一）。
+set(_asp3_espidf_supply_default ON)
+
 option(ASP3_ESPIDF_SUPPLY
     "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (true v5.5.4 tag) instead of esp-hal-3rdparty. Default ON for ALL configurations (WiFi / BT / plain) = HAL-free. For ESP32C6_BT=ON this became the default in evidence-c6-08: the v5.5.4-submodule supply reaches D-1/D-2b/D-2c/D-2d at both warm and TRUE COLD, and the old 'shared_periph_module_t' wall was caused by *mixing* an esp-idf base with hal's esp_hw_support, which disappears once the BT tree itself is moved. OFF = a true hal fallback ONLY for WiFi/plain builds (measured: hal 7181 / esp-idf 0). WARNING for ESP32C6_BT=ON: OFF reverts the BASE components only -- the BT tree independently follows ASP3_BT_IDF_V554 (default ON = esp-idf submodule), so -DASP3_ESPIDF_SUPPLY=OFF alone silently yields a MIXED build (measured: hal 1932 / esp-idf 119, of which 88 = components/bt; evidence-c6-09 section 5). It does build, but it is NOT a hal fallback: the hal BT path was REMOVED in evidence-c6-09 (esp_bt.cmake references ESP_HAL_DIR 0 times), so no all-hal BT configuration exists for C6. The BT supply choices are ASP3_BT_IDF_V554=ON (esp-idf submodule v5.5.4) or =OFF (external v6.1 via ESP_IDF61_DIR). Unlike C3 (esp_bt.cmake:133-145), C6 has no FATAL_ERROR guard against the mixture"
-    ON)
+    ${_asp3_espidf_supply_default})
+
+#
+#  ★既定変更が既存 build dir に届かない件の検出（詳細は下記ファイルの冒頭）。
+#  ★C6 は C3 と **同型の実害** がある：evidence-c6-08（commit dafcc12）で
+#  `if(ESP32C6_BT) set(_asp3_espidf_supply_default OFF)` を撤去して既定を
+#  ON へ動かしたので，それ以前に作られた BT の build dir は OFF のまま
+#  黙って hal で建ち続ける（実測：C6 の build dir で SUPPLY=OFF は 58 個）。
+#  FATAL にはしない（既存の通るビルドを落とすのは挙動変更＝ユーザー判断）。
+#
+include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_supply_default_check.cmake)
+asp3_warn_if_cache_overrides_default(ASP3_ESPIDF_SUPPLY ${_asp3_espidf_supply_default})
 
 if(ASP3_ESPIDF_SUPPLY)
     set(ESP_SUP_DIR ${IDF_V554})
