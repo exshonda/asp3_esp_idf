@@ -369,13 +369,19 @@ if(ESP32C5_WIFI OR ESP32C5_BT)
             "ESP32C5_WIFI=ON was requested, but ${ESP32C5_WIFI_CMAKE_FILE} "
             "was not found. See docs/c5-port-design.md.")
     endif()
+    #  dedup Tier2：esp_shim.c の 3チップ 0-diff 共有コアは common_espidf/wifi/
+    #  esp_shim_core.c に集約（docs/dedup-tier2-plan.md）．縮小した C5 固有
+    #  wifi_v8/esp_shim.c と併せてコンパイルする．
+    get_filename_component(COMMON_ESPIDF ${CMAKE_CURRENT_LIST_DIR}/../common_espidf ABSOLUTE)
     list(APPEND ASP3_INCLUDE_DIRS
         ${ESP32C5_WIFI_SRCDIR}
         ${C3_TARGETDIR}
         ${C3_TARGETDIR}/wifi
+        ${COMMON_ESPIDF}/wifi
     )
     list(APPEND ASP3_CFG_FILES ${C3_TARGETDIR}/wifi/esp_shim.cfg)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${COMMON_ESPIDF}/wifi/esp_shim_core.c
         ${ESP32C5_WIFI_SRCDIR}/esp_shim.c
         #  esp_shim_blobglue.cはWiFi blob（net80211/pp/core）専用の
         #  グルーが大半だが，esp_sleep_pd_config／esp_sleep_clock_config／
