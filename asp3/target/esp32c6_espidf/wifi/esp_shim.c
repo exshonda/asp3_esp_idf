@@ -1270,18 +1270,44 @@ shim_timer_find(void *key, bool_t create)
 {
 	SHIM_TIMER	*t;
 
+	/*
+	 *  ★走査は SHIM_LOCK 下で行う．無ロックだと，別文脈の
+	 *  esp_shim_timer_done() がノードを unlink→esp_shim_free した瞬間に，
+	 *  走査中の t->next が解放済み領域参照になる（use-after-free）．
+	 *  SHIM_LOCK は MIE を落とし，単一コアではタスクプリエンプトも抑止する
+	 *  ため，走査中のリスト改変（挿入/削除/free）を防げる．
+	 */
+	SHIM_LOCK();
 	for (t = shim_timer_list; t != NULL; t = t->next) {
 		if (t->key == key) {
+			SHIM_UNLOCK();
 			return(t);
 		}
 	}
+	SHIM_UNLOCK();
+
 	if (!create) {
 		return(NULL);
 	}
+	/*
+	 *  確保はロック外で行う（calloc を割込み禁止下で回さない）．確保後は
+	 *  ロック下で «再走査» してから挿入する：アンロック中に他文脈が同じ key
+	 *  を生成し得るため，重複ノード挿入を防ぐ（旧実装はこのTOCTOUで重複
+	 *  し得た）．競合で既存があれば自分の確保を捨てて既存を返す．
+	 */
 	t = (SHIM_TIMER *)esp_shim_calloc(1U, sizeof(SHIM_TIMER));
 	if (t != NULL) {
-		t->key = key;
+		SHIM_TIMER	*e;
+
 		SHIM_LOCK();
+		for (e = shim_timer_list; e != NULL; e = e->next) {
+			if (e->key == key) {
+				SHIM_UNLOCK();
+				esp_shim_free(t);
+				return(e);
+			}
+		}
+		t->key = key;
 		t->next = shim_timer_list;
 		shim_timer_list = t;
 		SHIM_UNLOCK();
@@ -1463,22 +1489,31 @@ esp_shim_set_isr(int32_t cpu_intno, void *handler, void *arg)
 
 volatile uint32_t esp_shim_int_count[ESP_SHIM_MAX_WIFI_INTNO + 1];
 
+/*
+ *  ストーム診断フラグ（既定0＝不活性）．C3版（esp32c3_espidf/wifi/esp_shim.c）
+ *  と同じく，通常ビルドでは割込みホットパスの計装を走らせない．JTAG/debugger
+ *  から非0を書いた時だけ下記の実施59計装（MAC割込みイベント採取）を有効化する．
+ */
+volatile uint32_t esp_shim_isr_storm_probe;
+
 static void
 shim_int_dispatch(int intno)
 {
 	esp_shim_int_count[intno]++;
 	/*
-	 *  DIAGNOSTIC（実施59，一時的）：MAC割込み線（intno==1）が上がった
-	 *  瞬間に，blobのMAC ISRが読み出す前のMAC割込みイベント／ステータス
-	 *  レジスタ（0x600a4c48＝hal_mac_interrupt_get_eventが読む先）を採取
-	 *  し，どのビットで140/秒の割込みが上がっているのかを特定する．
-	 *  RTC固定番地（0x500000B0〜）にOR蓄積・最新値・非零回数・総数を残す
-	 *  （Direct BootはRTC RAMをゼロクリアしないため，JTAGでゼロクリア後に
-	 *  フリーランさせて差分／蓄積を読む）．あわせてRX制御（0x600a4080）・
-	 *  RX最終ディスクリプタ（0x600a408c）も最新値を残し，RX DMAが
-	 *  ディスクリプタを進めているかを見る．
+	 *  DIAGNOSTIC（実施59）：MAC割込み線（intno==1）が上がった瞬間に，
+	 *  blobのMAC ISRが読み出す前のMAC割込みイベント／ステータスレジスタ
+	 *  （0x600a4c48＝hal_mac_interrupt_get_eventが読む先）を採取し，どの
+	 *  ビットで割込みが上がっているのかを特定する．RTC固定番地（0x500000B0〜）
+	 *  にOR蓄積・最新値・非零回数・総数を残す（Direct BootはRTC RAMをゼロ
+	 *  クリアしないため，JTAGでゼロクリア後にフリーランさせて差分／蓄積を
+	 *  読む）．あわせてRX制御（0x600a4080）・RX最終ディスクリプタ（0x600a408c）
+	 *  も最新値を残し，RX DMAがディスクリプタを進めているかを見る．
+	 *  ★esp_shim_isr_storm_probeガード（既定0）：BTビルドでは線1がBT
+	 *  コントローラISRであり，クロックゲート状態のWiFi MACレジスタを毎割込み
+	 *  読むのを避ける．C3版と同じく既定不活性．
 	 */
-	if (intno == 1) {
+	if (esp_shim_isr_storm_probe != 0U && intno == 1) {
 		volatile uint32_t *rtc = (volatile uint32_t *)0x500000B0U;
 		uint32_t ev = *(volatile uint32_t *)0x600A4C48U;	/* MAC int event */
 		rtc[0] |= ev;						/* [B0] OR蓄積 */

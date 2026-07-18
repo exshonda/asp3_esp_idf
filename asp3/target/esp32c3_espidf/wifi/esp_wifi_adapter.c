@@ -577,15 +577,24 @@ static uint32_t
 slowclk_cal_get_wrapper(void)
 {
 	/*
-	 *  RTCスローклックの較正値（Q13固定小数点）．
-	 *  RTC_CNTL_STORE1に格納された値を返す（ROM/ブート時の設定を流用）．
-	 *  未設定（0）の場合は150kHz RCの公称値を返す．
+	 *  RTCスロークロックの較正値（Q13固定小数点）を返す．
+	 *
+	 *  ★以前は RTC_CNTL_STORE1（ROMのRTC_SLOW_CLK_CAL_REG）を「流用」する
+	 *  つもりで 0x600080B8 を読んでいたが，0x600080B8 は STORE1(0x60008054)
+	 *  ではなく STORE4(=ROMの RTC_XTAL_FREQ_REG)＝番地違いだった．加えて本
+	 *  ターゲットは Direct Boot（二段ローダ無し）でROMの較正ステップを踏まない
+	 *  ため，STORE1/STORE4 いずれにも有効な較正値は書かれない．さらに本リポは
+	 *  8個の RTC STORE を JTAG/esptool 事後診断のスクラッチとして使い回して
+	 *  おり（target_kernel_impl.c / bt_shim.c / netif_esp32c3.c 等），STORE を
+	 *  較正値として読むと診断値を拾う危険がある（例：COLD_DIAG は STORE4 に
+	 *  取得IPを書く）．
+	 *
+	 *  よって「保存済み較正値の流用」は Direct Boot では成立しないため行わず，
+	 *  150kHz RC の公称値を常に返す（従来もSTORE=0でこの値にフォールバック
+	 *  しており実効は不変）．将来ブートローダ/NVSで実較正を保存する経路を
+	 *  設けるなら，スクラッチと衝突しない専用レジスタ/変数から読むこと．
 	 */
-	uint32_t cal = sil_rew_mem((void *)0x600080B8U);	/* RTC_CNTL_STORE1 */
-	if (cal == 0U) {
-		cal = (uint32_t)((1000000ULL << 13) / 150000U);
-	}
-	return(cal);
+	return((uint32_t)((1000000ULL << 13) / 150000U));
 }
 
 /*

@@ -234,34 +234,49 @@ bt_timer_task(EXINF exinf)
 	(void) exinf;
 
 	for (;;) {
-		int64_t		now;
-		int64_t		nearest = -1;
-		uint_t		i;
-		TMO			tmo;
+		int64_t			now;
+		int64_t			nearest = -1;
+		uint_t			i;
+		TMO				tmo;
+		esp_timer_cb_t	cb = NULL;
+		void			*arg = NULL;
 
 		now = esp_shim_time_us();
+		/*
+		 *  ★プール走査は BT_LOCK 下で行う（deadline_us/active の読み書きを
+		 *  timer_start/stop/delete と直列化）．無ロックだと，(a) 「期限到来」
+		 *  判定後にプリエンプトされ host が stop→start で再 arm した直後に
+		 *  active=false を書いて再 arm タイマを黙って殺す，(b) RV32 では
+		 *  deadline_us(int64) の読みが2命令に割れ torn read になる．
+		 *  コールバックはロック外で呼ぶ（cb は timer API を再入し得るため）．
+		 *  1個処理したら continue で再走査（cb が他タイマを arm し得る）．
+		 */
+		BT_LOCK();
 		for (i = 0U; i < BT_TIMER_NUM; i++) {
 			struct esp_timer	*t = &bt_timer_pool[i];
 
 			if (t->used && t->active) {
 				if (t->deadline_us <= now) {
-					esp_timer_cb_t	cb = t->callback;
-					void			*arg = t->arg;
-
+					cb = t->callback;
+					arg = t->arg;
 					if (t->period_us != 0U) {
 						t->deadline_us += (int64_t) t->period_us;
 					}
 					else {
 						t->active = false;
 					}
-					if (cb != NULL) {
-						cb(arg);
-					}
+					break;
 				}
 				else if (nearest < 0 || t->deadline_us < nearest) {
 					nearest = t->deadline_us;
 				}
 			}
+		}
+		BT_UNLOCK();
+
+		if (cb != NULL) {
+			cb(arg);
+			continue;			/* 他の期限到来タイマを続けて処理 */
 		}
 
 		if (nearest < 0) {

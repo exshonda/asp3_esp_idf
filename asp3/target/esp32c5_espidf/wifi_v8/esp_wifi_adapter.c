@@ -683,7 +683,7 @@ phy_enable_wrapper(void)
 	 *  この2行を移植しない．C5で受信不成立が再現した場合の実機investigation
 	 *  候補としてのみ記録する（【実機確認待ち】）．
 	 */
-	*(volatile uint32_t *)0x600af018U = 0x7U;
+	*(volatile uint32_t *)0x600af018U |= 0x7U;	/* ★RMW（C6 evidence-c6-13 と整合）：代入だと bit3=LP_TIMER_EN（BT正当）以上を潰す．WIFIPWR/COEX/I2C_MST(bit0-2)のみ立てる */
 	esp_phy_enable(PHY_MODEM_WIFI);
 	phy_wifi_enable_set(1U);
 }
@@ -829,7 +829,7 @@ wifi_clock_enable_wrapper(void)
 	 *  この明示的な再アサートが必要だった．レジスタアドレス・ビット
 	 *  位置がC5でも同一であることを確認済みのためそのまま移植する
 	 *  （phy_enable_wrapper側のコメントも参照）。 */
-	*(volatile uint32_t *)0x600af018U = 0x7U;
+	*(volatile uint32_t *)0x600af018U |= 0x7U;	/* ★RMW（C6 evidence-c6-13 と整合）：代入だと bit3=LP_TIMER_EN（BT正当）以上を潰す．WIFIPWR/COEX/I2C_MST(bit0-2)のみ立てる */
 }
 
 static void

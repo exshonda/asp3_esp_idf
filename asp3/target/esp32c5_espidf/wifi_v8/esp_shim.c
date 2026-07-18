@@ -1335,18 +1335,44 @@ shim_timer_find(void *key, bool_t create)
 {
 	SHIM_TIMER	*t;
 
+	/*
+	 *  ★走査は SHIM_LOCK 下で行う．無ロックだと，別文脈の
+	 *  esp_shim_timer_done() がノードを unlink→esp_shim_free した瞬間に，
+	 *  走査中の t->next が解放済み領域参照になる（use-after-free）．
+	 *  SHIM_LOCK は MIE を落とし，単一コアではタスクプリエンプトも抑止する
+	 *  ため，走査中のリスト改変（挿入/削除/free）を防げる．
+	 */
+	SHIM_LOCK();
 	for (t = shim_timer_list; t != NULL; t = t->next) {
 		if (t->key == key) {
+			SHIM_UNLOCK();
 			return(t);
 		}
 	}
+	SHIM_UNLOCK();
+
 	if (!create) {
 		return(NULL);
 	}
+	/*
+	 *  確保はロック外で行う（calloc を割込み禁止下で回さない）．確保後は
+	 *  ロック下で «再走査» してから挿入する：アンロック中に他文脈が同じ key
+	 *  を生成し得るため，重複ノード挿入を防ぐ（旧実装はこのTOCTOUで重複
+	 *  し得た）．競合で既存があれば自分の確保を捨てて既存を返す．
+	 */
 	t = (SHIM_TIMER *)esp_shim_calloc(1U, sizeof(SHIM_TIMER));
 	if (t != NULL) {
-		t->key = key;
+		SHIM_TIMER	*e;
+
 		SHIM_LOCK();
+		for (e = shim_timer_list; e != NULL; e = e->next) {
+			if (e->key == key) {
+				SHIM_UNLOCK();
+				esp_shim_free(t);
+				return(e);
+			}
+		}
+		t->key = key;
 		t->next = shim_timer_list;
 		shim_timer_list = t;
 		SHIM_UNLOCK();
