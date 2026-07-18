@@ -1569,6 +1569,9 @@ esp_shim_timer_task(EXINF exinf)
 			if (wait < 1000) {
 				wait = 1000;
 			}
+			else if (wait > (int64_t) TMAX_RELTIM) {
+				wait = (int64_t) TMAX_RELTIM;	/* ★Low#6：>TMAX_RELTIM の busy-spin 回避 */
+			}
 			esp_shim_timer_task_wait_last = (uint32_t)wait;
 			if ((uint32_t)wait < esp_shim_timer_task_wait_min) {
 				esp_shim_timer_task_wait_min = (uint32_t)wait;
@@ -1597,6 +1600,14 @@ esp_shim_set_isr(int32_t cpu_intno, void *handler, void *arg)
 	syslog(LOG_NOTICE, "esp_shim: set_isr intno=%d handler=%p",
 		   (int_t)cpu_intno, handler);
 	if (cpu_intno >= 1 && cpu_intno <= ESP_SHIM_MAX_WIFI_INTNO) {
+		if (cpu_intno > ESP_SHIM_MAX_DEFINH_INTNO) {
+			/*  ★Low#9：esp_shim.cfg は inthdr 1〜ESP_SHIM_MAX_DEFINH_INTNO のみ
+			    DEF_INH する．これ超の線は登録できても静的入口が無く、有効化
+			    されると未dispatchで発火する＝将来 blob が線4+を使ったら大声で気づく．  */
+			syslog(LOG_WARNING,
+				   "esp_shim: set_isr intno=%d > %d: no static DEF_INH entry point",
+				   (int_t) cpu_intno, ESP_SHIM_MAX_DEFINH_INTNO);
+		}
 		SHIM_LOCK();
 		shim_isr_tbl[cpu_intno].fn = (void (*)(void *))handler;
 		shim_isr_tbl[cpu_intno].arg = arg;

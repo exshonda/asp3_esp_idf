@@ -1611,6 +1611,9 @@ esp_shim_timer_task(EXINF exinf)
 			if (wait < 1000) {
 				wait = 1000;
 			}
+			else if (wait > (int64_t) TMAX_RELTIM) {
+				wait = (int64_t) TMAX_RELTIM;	/* ★Low#6：>TMAX_RELTIM の busy-spin 回避 */
+			}
 			(void) twai_sem(SHIM_TIMER_SEM, (TMO)wait);
 		}
 	}
@@ -1635,6 +1638,14 @@ esp_shim_set_isr(int32_t cpu_intno, void *handler, void *arg)
 	syslog(LOG_NOTICE, "esp_shim: set_isr intno=%d handler=%p",
 		   (int_t)cpu_intno, handler);
 	if (cpu_intno >= 1 && cpu_intno <= ESP_SHIM_MAX_WIFI_INTNO) {
+		if (cpu_intno > ESP_SHIM_MAX_DEFINH_INTNO) {
+			/*  ★Low#9：esp_shim.cfg は inthdr 1〜ESP_SHIM_MAX_DEFINH_INTNO のみ
+			    DEF_INH する．これ超の線は登録できても静的入口が無く、有効化
+			    されると未dispatchで発火する＝将来 blob が線4+を使ったら大声で気づく．  */
+			syslog(LOG_WARNING,
+				   "esp_shim: set_isr intno=%d > %d: no static DEF_INH entry point",
+				   (int_t) cpu_intno, ESP_SHIM_MAX_DEFINH_INTNO);
+		}
 		SHIM_LOCK();
 		shim_isr_tbl[cpu_intno].fn = (void (*)(void *))handler;
 		shim_isr_tbl[cpu_intno].arg = arg;
@@ -1665,44 +1676,11 @@ volatile uint32_t esp_shim_isr_storm_probe;
 static void
 shim_int_dispatch(int intno)
 {
+	/*  ★Low#3：C5 の storm 診断（旧 C3 コピー）は C3 番地 0x6001108C/0x600C2110/
+	    0x60008058 等を叩いていた＝C5 では無意味な MMIO のため除去．C5 で storm
+	    調査が要る場合は C5 の INTMTX/BB 番地で作り直すこと（esp_shim_isr_storm_probe
+	    フラグ宣言は互換のため残置）．  */
 	esp_shim_int_count[intno]++;
-	if (esp_shim_isr_storm_probe != 0U && intno == 2) {
-		/*  （D-2b再開ラウンド）source多重登録修正（bt_shim.c）で2個目の
-		    BTソース（予測=source5:BT_BB）を線2へ分離した．線2の発火数を
-		    STORE2(0x60008058)へミラー＝esptool read-memで事後読み．
-		    線2が実際にディスパッチされる＝INTMTXルーティング着弾の
-		    機能的証拠（INTMTXレジスタ自体はusb-resetで初期化されるため
-		    事後読み不可）．  */
-		sil_wrw_mem((uint32_t *) 0x60008058UL, esp_shim_int_count[2]);
-	}
-	if (esp_shim_isr_storm_probe != 0U && intno == 1) {
-		/*  （D-2b(1)(a) BBステータス計装）BT_BB(source5)割込みの原因を判定
-		    する blob ISR（r_bt_bb_isr_hack）が読むBB割込みステータス
-		    レジスタ 0x6001108c を，ISR実行**前**（再アサートされた生の原因）に
-		    読んでRTCへ記録．どのビットが立ち続けるか＝ストームの原因．
-		      STORE4(0xB8)=ストーム累積回数
-		      STORE6(0xC0)=BB status 0x6001108c（ISR入口の生値）
-		      STORE7(0xC4)=これまで観測した全statusのsticky OR（取りこぼし防止）
-		    ※0xBC(STORE5)はROMがusb-reset時に上書きするため使用不可．  */
-		/*  ストームは99.997%がBB status(0x6001108c)=0のspurious＝真の源は
-		    blobの0x6001108cハンドラ外の低レベルBB線．blob ISR実行**後**に
-		    INTMTX EIP_STATUS(0x600C2110)のbit1(線1)が残るか＝BT_BB線が
-		    ack不能で立ちっぱなしか(=ハード/クロック要因)を判定する．
-		      0xB8=総ディスパッチ数
-		      0xC0=blob ISR実行後EIP_STATUSのsticky OR（bit1残存＝ack不能）
-		      0xC4=入口BB status 0x6001108c のsticky OR（原因bit）  */
-		uint32_t bbst = sil_rew_mem((const uint32_t *) 0x6001108CUL);
-		sil_wrw_mem((uint32_t *) 0x600080B8UL, esp_shim_int_count[1]);
-		sil_wrw_mem((uint32_t *) 0x600080C4UL,
-					sil_rew_mem((const uint32_t *) 0x600080C4UL) | bbst);
-		if (shim_isr_tbl[intno].fn != NULL) {
-			shim_isr_tbl[intno].fn(shim_isr_tbl[intno].arg);
-		}
-		sil_wrw_mem((uint32_t *) 0x600080C0UL,
-					sil_rew_mem((const uint32_t *) 0x600080C0UL)
-					| sil_rew_mem((const uint32_t *) 0x600C2110UL));
-		return;
-	}
 	if (shim_isr_tbl[intno].fn != NULL) {
 		shim_isr_tbl[intno].fn(shim_isr_tbl[intno].arg);
 	}

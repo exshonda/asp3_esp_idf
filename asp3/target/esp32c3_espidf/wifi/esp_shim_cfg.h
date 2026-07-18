@@ -64,6 +64,7 @@
  *  のみ＝blobが使う線はcfg（esp_shim.cfg）に列挙する．
  */
 #define ESP_SHIM_MAX_WIFI_INTNO   15  /* 1〜15をblob用に開放 */
+#define ESP_SHIM_MAX_DEFINH_INTNO 3   /* ★Low#9：esp_shim.cfg が DEF_INH する線数（inthdr_1..3）．これ超の線は静的入口が無い */
 
 /*
  *  cfg（esp_shim.cfg）から参照する関数（実体はesp_shim.c）

@@ -531,8 +531,17 @@ bt_timer_task(EXINF exinf)
 			tmo = TMO_FEVR;
 		}
 		else {
+			int64_t	d;
+
 			now = esp_shim_time_us();
-			tmo = (nearest > now) ? (TMO)(nearest - now) : (TMO) 0;
+			d = nearest - now;
+			if (d < 0) {
+				d = 0;
+			}
+			else if (d > (int64_t) TMAX_RELTIM) {
+				d = (int64_t) TMAX_RELTIM;	/* ★Low#6：>TMAX_RELTIM は twai_sem が E_PAR→busy-spin．clamp */
+			}
+			tmo = (TMO) d;
 		}
 		(void) twai_sem(BT_TIMER_SEM, tmo);
 	}

@@ -702,6 +702,16 @@ if(ESP32C3_BT_NIMBLE)
         list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_BT_PVCY_FILTER)
     endif()
 
+    #  ★Low#5：これらの診断 --wrap は同一シンボルを定義＝同時 ON で multiple definition
+    #  （ACL_TRACE∩EVT_TRACE=__wrap_ble_mqueue_put/get・__wrap_ble_l2cap_rx／
+    #   ACL_TRACE∩PVCY_FILTER=__wrap_esp_vhci_host_send_packet）．早期に FATAL で弾く．
+    if(ESP32C3_BT_ACL_TRACE AND ESP32C3_BT_EVT_TRACE)
+        message(FATAL_ERROR "ESP32C3_BT_ACL_TRACE と ESP32C3_BT_EVT_TRACE は同一 --wrap シンボル(__wrap_ble_mqueue_put/get・__wrap_ble_l2cap_rx)を定義＝相互排他．片方だけ ON にすること．")
+    endif()
+    if(ESP32C3_BT_ACL_TRACE AND ESP32C3_BT_PVCY_FILTER)
+        message(FATAL_ERROR "ESP32C3_BT_ACL_TRACE と ESP32C3_BT_PVCY_FILTER は __wrap_esp_vhci_host_send_packet を両方定義＝相互排他．片方だけ ON にすること．")
+    endif()
+
 endif()
 
 endif()
