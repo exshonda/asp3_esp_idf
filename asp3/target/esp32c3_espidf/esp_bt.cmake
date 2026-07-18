@@ -414,6 +414,14 @@ if(ESP32C3_BT_NIMBLE)
     #  （可逆）．
     option(ESP32C3_BT_SM "Enable NimBLE SMP pairing/bonding (Phase D-2d, tinycrypt)" ON)
 
+    #  rc-c3 P1-3b：接続 stale watchdog（既定 OFF＝出荷ビルドは不変）．
+    #  host が接続を保持しているのにコントローラが当該 conn handle を知らない
+    #  状態を HCI Read RSSI で検出し ble_gap_terminate で畳む（→広告が戻る）．
+    #  実機で確定した L1 障害（切断イベント欠落→広告停止→「見えない・エラー無し」）
+    #  の緩和と，DISC=0 の «層» の判定を兼ねる。
+    #  evidence: .steering/…/evidence-rc-c3-P1-wedge-mbuf-exhaustion.md
+    option(ESP32C3_BT_CONN_WD "Detect+terminate stale connection (rc-c3 P1-3b)" OFF)
+
     #  ---- コンパイル定義 ----
     #  ESP_PLATFORM：syscfg.h が esp_nimble_cfg.h を読むための分岐キー．
     #  SECURITY off：sync に暗号は不要．NIMBLE_BLE_SM = SM_LEGACY||SM_SC を
@@ -463,6 +471,9 @@ if(ESP32C3_BT_NIMBLE)
         #  有効化する識別子．NIMBLE_BLE_SM は bt_nimble_config.h の
         #  CONFIG_BT_NIMBLE_SM_LEGACY/SC=1 から自動で 1 になる（蓋をしない）．
         list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_BT_SM)
+        if(ESP32C3_BT_CONN_WD)
+            list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_BT_CONN_WD)
+        endif()
     else()
         #  D-2c まで：SECURITY off．NIMBLE_BLE_SM=SM_LEGACY||SM_SC を 0 に落とし
         #  （nimble_opt_auto.h），ble_sm*.c を near-empty 化して tinycrypt/mbedTLS

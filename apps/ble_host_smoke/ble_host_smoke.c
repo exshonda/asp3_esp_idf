@@ -196,6 +196,84 @@ raw_systimer_lo(void)
 
 static int gap_event_cb(struct ble_gap_event *event, void *arg);
 
+#ifdef TOPPERS_ESP32C3_BT_CONN_WD
+/*
+ *  ★接続 stale watchdog（rc-c3 P1-3b．evidence-rc-c3-P1-wedge-mbuf-exhaustion.md）
+ *
+ *  実機で確定した障害 L1：リンクが静かに死んだ際の supervision-timeout 由来の
+ *  切断イベントが host に配送されず（DISC=0），host が接続を保持し続ける．
+ *  すると広告を再開しないため «スマホから見えない＝connect できない・エラーも
+ *  出ない» という最悪の UX になり，reset でしか復帰しない（実測で再現）．
+ *
+ *  対処：接続保持中は毎秒 HCI Read RSSI を «コントローラへ» 撃ち，コントローラが
+ *  その conn handle を知らない（rc!=0）状態が連続 WD_FAIL_THRESHOLD 回続いたら，
+ *  host 側だけが stale と判断して ble_gap_terminate() で畳む（→広告が戻る）．
+ *
+ *  ★この probe は «修正» であると同時に «未解明の本丸への計測» でもある：
+ *    - rc!=0（unknown handle 等）⇒ コントローラは既に接続を捨てている
+ *      ＝ host へのイベント配送«だけ»が落ちている，と層が確定する．
+ *    - rc==0 が返り続ける      ⇒ コントローラも «接続が生きている» と思っている
+ *      ＝ LL レベルで死に気づいていない，と層が確定する．
+ *  どちらでも DISC=0 の層が決まるので，rc は必ず記録する（JTAG で読む）．
+ */
+volatile uint32_t	g_wd_probe_count;		/* RSSI probe 実施回数（診断） */
+volatile int32_t	g_wd_probe_last_rc;		/* 直近 probe の rc（診断） */
+volatile uint32_t	g_wd_idle_ticks;		/* GAP 事象が動かないまま経過した秒数 */
+volatile uint32_t	g_wd_term_count;		/* watchdog による terminate 実行回数 */
+volatile int32_t	g_wd_term_last_rc;		/* その rc */
+volatile int32_t	g_wd_last_rssi;			/* 直近の RSSI（★嘘の値でも記録する） */
+
+/*
+ *  ★トリガ設計の訂正（実機実測に基づく）
+ *  当初は「HCI Read RSSI が失敗したら stale」で検出する設計だったが、実機で
+ *  **コントローラは死んだリンクに対しても rc=0 と RSSI=-50 を返す**ことが判明した
+ *  （＝コントローラ自身がリンク喪失を検出していない＝DISC=0 の正体）。
+ *  よって RSSI は **検出器として使えない**。診断値としてのみ記録し、
+ *  トリガは「接続を保持しているのに GAP 事象が一定時間まったく動かない」に変更する。
+ */
+#define WD_IDLE_LIMIT		45U		/* 秒。これを超えたら stale とみなして畳む */
+
+static void
+conn_watchdog_tick(void)
+{
+	static uint32_t	wd_last_evt;
+	int8_t			rssi = 0;
+	int				rc;
+
+	if (g_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+		g_wd_idle_ticks = 0U;
+		wd_last_evt = g_gap_event_count;
+		return;
+	}
+
+	/*  診断：コントローラに «その接続はまだ在るか» を訊く（嘘でも記録する）  */
+	g_wd_probe_count++;
+	rc = ble_gap_conn_rssi(g_conn_handle, &rssi);
+	g_wd_probe_last_rc = (int32_t) rc;
+	if (rc == 0) {
+		g_wd_last_rssi = (int32_t) rssi;
+	}
+
+	/*  トリガ：GAP 事象が動いていれば生きているとみなす  */
+	if (g_gap_event_count != wd_last_evt) {
+		wd_last_evt = g_gap_event_count;
+		g_wd_idle_ticks = 0U;
+		return;
+	}
+	if (++g_wd_idle_ticks < WD_IDLE_LIMIT) {
+		return;
+	}
+	syslog(LOG_ERROR,
+		   "ble_host_smoke: WD stale conn h=%u idle=%us rssi_rc=%d rssi=%d -> terminate",
+		   (unsigned) g_conn_handle, (unsigned) g_wd_idle_ticks,
+		   (int_t) rc, (int_t) rssi);
+	g_wd_term_count++;
+	/*  0x13 = Remote User Terminated Connection（定数は public header に無い）  */
+	g_wd_term_last_rc = (int32_t) ble_gap_terminate(g_conn_handle, 0x13);
+	g_wd_idle_ticks = 0U;
+}
+#endif /* TOPPERS_ESP32C3_BT_CONN_WD */
+
 /*
  *  自前GATTサービス（0xABF0：READ/NOTIFY/WRITE(+暗号READ)）は3チップ逐語
  *  同一のため共有 .inc に集約（dedup Tier2c）．契約シンボル
@@ -857,6 +935,9 @@ main_task(EXINF exinf)
 			}
 			sub = 0U;
 			notify_tick();
+#ifdef TOPPERS_ESP32C3_BT_CONN_WD
+			conn_watchdog_tick();	/* ★stale 接続の検出と解消（P1-3b） */
+#endif
 #ifdef TOPPERS_ESP32C3_BT_SM
 			bt5_security_tick();	/* 接続5秒後に slave SecReq（S3 BT-5移植） */
 #endif

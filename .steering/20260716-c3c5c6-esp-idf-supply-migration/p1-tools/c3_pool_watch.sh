@@ -23,11 +23,20 @@ NFAIL=$(sym g_notify_fail)
 GCONN=$(sym g_gap_conn_count)
 GDISC=$(sym g_gap_disc_count)
 
+# P1-3b watchdog のカウンタ（WD=ON ビルドのときだけ存在）
+WDP=$(sym g_wd_probe_count); WDRC=$(sym g_wd_probe_last_rc)
+WDT=$(sym g_wd_term_count);  WDTRC=$(sym g_wd_term_last_rc); WDRSSI=$(sym g_wd_last_rssi)
+WDARGS=()
+if [ -n "$WDP" ]; then
+  WDARGS=( -c "mdw $WDP 1" -c "mdw $WDRC 1" -c "mdw $WDT 1" -c "mdw $WDTRC 1" -c "mdw $WDRSSI 1" )
+fi
+
 OUT=$("$OOCD_DIR/bin/openocd" -s "$OOCD_DIR/share/openocd/scripts" \
   -c "adapter serial $SERIAL" -f board/esp32c3-builtin.cfg \
   -c init -c halt \
   -c "mdw $MP1 3" -c "mdw $MP2 3" -c "mdw $CONN 1" \
   -c "mdw $NSENT 1" -c "mdw $NFAIL 1" -c "mdw $GCONN 1" -c "mdw $GDISC 1" \
+  "${WDARGS[@]}" \
   -c resume -c shutdown 2>&1)
 
 python3 - "$LABEL" <<PY
@@ -44,8 +53,13 @@ if len(w) >= 11:
     mf1 = w[2] & 0xffff
     nb2, nf2 = w[4] & 0xffff, (w[4] >> 16) & 0xffff
     conn = w[6] & 0xffff
-    print(f"[{lab}] msys_1 free={nf1}/{nb1} (min={mf1})   msys_2 free={nf2}/{nb2}   "
-          f"conn_handle={conn:#06x}  notify_sent={w[7]} fail={w[8]}  gap_conn={w[9]} gap_disc={w[10]}")
+    line = (f"[{lab}] msys_1 free={nf1}/{nb1} (min={mf1})   msys_2 free={nf2}/{nb2}   "
+            f"conn_handle={conn:#06x}  notify_sent={w[7]} fail={w[8]}  gap_conn={w[9]} gap_disc={w[10]}")
+    if len(w) >= 16:
+        def s32(v): return v - (1 << 32) if v >> 31 else v
+        line += (f"\n        WD: probe={w[11]} last_rc={s32(w[12])} term={w[13]} "
+                 f"term_rc={s32(w[14])} rssi={s32(w[15])}")
+    print(line)
 else:
     print(f"[{lab}] 読み出し失敗 (words={len(w)})")
 PY
