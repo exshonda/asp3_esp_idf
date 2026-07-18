@@ -234,3 +234,103 @@ C5#2（`C8:94`）には不接触。
 C5・C3 の2チップで esp-15.2 との動作差が見つからなかったことから，
 **asp3_esp_idf 全体としてもesp toolchainへの切替は技術的には可能**という
 所見が補強された（C6 は BT ハンドオフ決着待ちで未実測）。
+
+## C6 Espressif esp-15.2.0 実測（2026-07-15，追加ラウンド・toolchain統一の完成）
+
+**目的**＝C3/C5 で確認したエコシステム整合パターンをC6でも実測確認する
+（BT ハンドオフ調査で port1 を占有していたため保留になっていた最後の
+1チップ）。C6 の正典（現行）＝xpack `riscv-none-elf-gcc` 15.2.0
+（`tmp/c6ble.sh`）。
+
+**board**：C6 board C（`14:C1:9F:E0:5A:9C`，port1，by-id
+`usb-Espressif_USB_JTAG_serial_debug_unit_14:C1:9F:E0:5A:9C-if00`）のみ使用。
+C5#1(port2・latch中)／C5#2(port3)／C3(port4)には不接触。
+
+### 動作表（C6・実測追加）
+
+| コンパイラ | prefix | WiFi（`wifi_scan`） | BLE（`ble_host_smoke_c6`，v6.1/idf61+SM） |
+|---|---|---|---|
+| **xpack riscv-none-elf-gcc 15.2.0**（正典） | `riscv-none-elf-` | ビルドPASS・boot到達（既存） | ビルドPASS・boot到達（既存，D-1〜D-2d実績） |
+| **Espressif riscv32-esp-elf 15.2.0** | `riscv32-esp-elf-` | **PASS**（ビルド壁ゼロ・RAM 89.48%＝xpackと同一値・boot到達） | **PASS**（ビルド壁ゼロ・RAM 72.36%＝xpackと同一値・boot到達，本ラウンドはadvまで到達） |
+
+### 詳細
+
+- toolchain: `/home/honda/tools/espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/bin`
+  （C3/C5実測と同一配布）。
+- ヘルパ：`tmp/c6ble_esp15.sh`（正典 `tmp/c6ble.sh` からの差分は3点のみ＝
+  GCC_BIN／`-DRISCV64_TOOLCHAIN_PREFIX=riscv32-esp-elf-`／別 BUILD dir
+  `build/c6ble_esp15`。C3/C5と同じ3点差分パターン）。
+- **march/mabi**：C6 chip.cmake 固定 `-march=rv32imc_zicsr_zifencei
+  -mabi=ilp32` が esp-15.2 の multilib（`riscv32-esp-elf-gcc
+  -print-multi-lib`）に厳密一致で存在（`rv32imc_zicsr_zifencei/ilp32`
+  ＝C3/C5と同一パターン）。march/mabi起因のビルド壁なし。
+- **ビルド壁＝両アプリともゼロ**：`wifi_scan`（`-DESP32C6_WIFI=ON`）・
+  `ble_host_smoke_c6`（`-DESP32C6_BT=ON -DESP32C6_BT_IDF61=ON
+  -DESP32C6_BT_IDF61_SM=ON`）とも xpackと同一の対処
+  （`-Wno-error=implicit-function-declaration` のみ）でリンク完走。
+  RAM使用率は両アプリともxpack実測と完全一致（wifi_scan 89.48%・
+  BLE 72.36%）＝挙動差なし。
+- **CMakeCache機械確認**：両ビルドとも
+  `CMakeFiles/3.28.3/CMakeCCompiler.cmake` の `CMAKE_C_COMPILER` が
+  esp-15.2の実パス（`.../esp-15.2.0_20251204/riscv32-esp-elf/bin/
+  riscv32-esp-elf-gcc`）であることを確認（PATH推測ではない実証）。
+- **BLE 実機boot**：flash→RTS reset後，`rts_boot_capture.py`で採取した
+  コンソールのバナー`TOPPERS/ASP3 Kernel Release 3.7.2 for ESP32-C6
+  (Jul 15 2026, 18:09:08)`が`build/c6ble_esp15/asp.elf`の`strings`
+  出力と完全一致＝esp-15.2ビルドそのものが起動している直接証拠
+  （C3/C5と同じ手法）。続けて`System logging task is started`→
+  `esp_bt_controller_init OK`→`esp_bt_controller_enable OK`→
+  `ble_hs SYNC, host up`→`advertising started as 'ASP3-C6-BLE'`→
+  `Phase D-2a milestone reached (sync)`まで到達（RF synth PLLロックも
+  含め完走）。
+  ★**注意（早合点回避）**：`memory/c6-ble-phyinit-hang-not-fixed.md`は
+  xpackで同一アプリが cold/RTS 8/8 で`register_chipv7_phy`のPLLロック
+  待ち（`0x600a00cc` bit8）でハングすると記録している。本ラウンドの
+  board Cは本セッション中に複数回のflash/reset（BTハンドオフ調査・
+  wifi_scan等）を経た**warm状態**であり，真のcold power-cycle検証では
+  ない。したがって本結果は「esp-15.2がPLLロック問題を解決した」ことの
+  証拠には**しない**——単に「ビルド壁ゼロ＋kernel/アプリ起動到達」という
+  本ラウンドの合否基準を，PLLロックも含め上回って満たした，という記録に
+  留める。PLLロック問題自体はcold電源断でのtoolchain非依存の既知の壁
+  （本タスクのスコープ外）。
+- **WiFi 実機boot**：同様にバナー`(Jul 15 2026, 18:09:30)`一致を確認。
+  `System logging task`→`wifi_scan: initializing shim`→
+  `esp_wifi_init -> 0`→`esp_event: WIFI_EVENT id=43`→
+  `11ax coex: WDEVAX_PTI0(...)`→`wifi_adapter: set_intr src=2/src=0`まで
+  到達した後，`esp_shim: set_isr intno=1 handler=...`直後に
+  `Illegal instruction`（`pc=0x00000000`のnullジャンプ）で停止。
+  **これはesp-15.2固有ではない**：同一board・同一セッションで xpack
+  正典ビルド（`build/c6wifi_xpack_ctrl`）を直接flash→bootして control
+  実験した結果，**バイト単位で同一のクラッシュ**（同じ`set_isr
+  intno=1 handler=420636e2`直後・同じレジスタ値・`pc=0x00000000`）が
+  再現した＝toolchain非依存の既存事象（本ラウンドで新規発見・原因未調査・
+  スコープ外）。カーネル・アプリの起動自体（banner〜esp_wifi_init完走〜
+  イベント配送）は両toolchainで同一に到達しており，本ラウンドの合否
+  基準（ビルド壁ゼロ＋kernel/アプリ起動到達）は満たしている。
+  ★念のため「A（build hygiene修正）が原因ではないか」も実測で切り分け
+  済み：C6 target.cmake をA適用前（commit`f39a3cf`）の内容へ**同一絶対
+  パス上で**一時的に差し戻し，xpackで`wifi_scan`を再ビルドしたところ
+  FLASH使用量がバイト単位で一致（538288B）し，`objdump -d`の逆アセンブル
+  差分は埋め込みビルド時刻文字列以外ゼロ＝コード生成に差分なし。よって
+  このクラッシュはA-2のtarget.cmake変更が原因でもない（既存事象）。
+- **結論**：C6 も esp-15.2（crosstool-NG，ESP公式配布）で WiFi・BLE
+  いずれもビルド壁ゼロ・xpack15と同一のRAM使用率・同一の起動到達点
+  （BLEはadvまで完走・WiFiはesp_wifi_init完走後の既存クラッシュ点まで
+  同一）で動作する。march/mabi完全一致のため移植コストはゼロ。
+  **C6もエコシステム整合のためesp toolchainへ切替可能**（xpack15を
+  正典として維持しつつ）。これで C3/C5/C6 の3チップとも esp-15.2 実測
+  PASS＝toolchain統一の完成。
+
+### エコシステム整合（最終更新）
+
+| プロジェクト/ターゲット | メインtoolchain | 実測状況 |
+|---|---|---|
+| 本プロジェクト C5 | xpack riscv-none-elf-gcc 15.2.0（正典） | WiFi/BLE両方PASS（esp-15.2もPASS） |
+| 本プロジェクト C3 | xpack riscv-none-elf-gcc 15.2.0（正典） | BLE PASS（esp-15.2もPASS・kernel QEMU 8/8も同一） |
+| 本プロジェクト C6 | xpack riscv-none-elf-gcc 15.2.0（正典） | WiFi/BLE両方PASS（esp-15.2もPASS，本ラウンド） |
+| P4 | Espressif riscv32-esp-elf esp-14.2.0 | Ethernet動作実証済み |
+| S31 | Espressif riscv32-esp-elf esp-15.2.0 | （姉妹プロジェクト側で使用中） |
+
+C3/C5/C6 の3チップすべてで esp-15.2 との動作差が見つからなかったことから，
+**asp3_esp_idf 全体としてesp toolchainへの切替は技術的に可能**という所見が
+確定した（xpack15は正典として維持，esp-15.2は測定済みの代替として選択可能）。

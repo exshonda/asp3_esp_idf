@@ -523,9 +523,24 @@ get_free_heap_size_wrapper(void)
 /*
  *		イベント（esp_event_shim.cの最小実装へ）
  */
+#ifndef TOPPERS_ESPIDF_SUPPLY
+/*
+ *  hal（esp-hal-3rdparty）供給時：esp_private/wifi.h が esp_event.h を
+ *  includeしないため，ここで局所externを置く．
+ */
 extern int esp_event_post(const char *event_base, int32_t event_id,
 						  void *event_data, size_t event_data_size,
 						  uint32_t ticks_to_wait);
+#else
+/*
+ *  esp-idf（v5.5.4）供給時：esp_private/wifi.h が esp_event.h を
+ *  includeする（＝本物の宣言が既に見えている）ため局所externは置かない．
+ *  版差（実測）：event_data が hal=`void *` / esp-idf=`const void *` で
+ *  あり，局所externを残すと "conflicting types" になる（C5と同一事象）．
+ *  esp_event.h の宣言をそのまま使う（実体は esp_event_shim.c）．
+ */
+#include "esp_event.h"
+#endif
 
 static int32_t
 event_post_wrapper(const char *event_base, int32_t event_id,
@@ -571,7 +586,15 @@ phy_enable_wrapper(void)
 	 *  直前に確実に有効化する．JTAGでnative(受信OK)=0x7 vs ASP3=0x0の
 	 *  差分として特定．I2C_MSTが立っていないとregi2c越しのRF較正が
 	 *  無応答で受信不能＝AP 0個になる． */
-	*(volatile uint32_t *)0x600af018U = 0x7U;
+	/*  ★evidence-c6-13：`= 0x7`（代入）→ `|= 0x7`（read-modify-write）へ。
+	 *  BT 側（bt/bt_shim.c）は `|= 0x1` で、そのコメント自身が
+	 *  「read-modify-write で bt.c が後段で立てる他ビットを温存する」と書いている
+	 *  ＝**温存が設計上の正**。代入だと **bit3 以上を潰す**——
+	 *  memory §12 は「LPCON 0x600af018 bit3 = LP_TIMER_EN は BT 正当」と実測記録して
+	 *  おり、WiFi/BT 同時運用時のハザードになる（現状は排他なので未顕在）。
+	 *  ★立てるビットは変えていない（bit0/1/2＝WIFIPWR/COEX/I2C_MST）。
+	 *  ★どのビットが実際に要るかの同定は «別実験» として申し送り。          */
+	*(volatile uint32_t *)0x600af018U |= 0x7U;
 	/*  追記10-b：広域JTAG diffで判明した残りのmodem LPclock差分も
 	 *  native値に合わせる（COEX_LP_CLK_CONF等．LP系だが検証のため）． */
 	*(volatile uint32_t *)0x600af008U = 0x314U;	/* MODEM_LPCON_COEX_LP_CLK_CONF */
@@ -728,7 +751,9 @@ wifi_clock_enable_wrapper(void)
 	 *  CONF(0x600af018)のWIFIPWR/COEX/I2C_MSTクロック(bit0/1/2)を明示的に
 	 *  有効化する．既存の_regi2c_ctrl_ll_master_enable_clock等だけでは
 	 *  実機で0x0のまま（JTAG実測）＝受信不能だった． */
-	*(volatile uint32_t *)0x600af018U = 0x7U;
+	/*  ★evidence-c6-13：`= 0x7` → `|= 0x7`（上の phy_enable_wrapper と同理由＝
+	 *  BT の bt_shim.c と同じ «温存» 形へ揃える）。                        */
+	*(volatile uint32_t *)0x600af018U |= 0x7U;
 }
 
 static void
@@ -999,6 +1024,33 @@ extern uint8_t coex_schm_flexible_period_get(void);
 extern void *coex_schm_get_phase_by_idx(int idx);
 
 /*
+ *  ★★訂正（2026-07-17・実測．evidence-c6-01 §3．C5版
+ *  wifi_v8/esp_wifi_adapter.c の同一訂正を転写）：
+ *
+ *  旧記述は「wifi_os_adapter.h（v5.5.4版．idf_v554_override/経由）は
+ *  SOC_WIFI_HE_SUPPORT=1のC6向けに`_wifi_disable_ac_ax`を持つ」として
+ *  `CONFIG_SOC_WIFI_HE_SUPPORT && ASP3_WIFI_BLOB_V554` でガードしていたが
+ *  **前提が誤り**だった。**真のv5.5.4タグ**（submodule esp-idf＝
+ *  735507283d）の wifi_os_adapter.h は当該フィールドを持たない
+ *  （halのヘッダとバイト同一）。持つのは release/v5.5 先端（+1169）だけ。
+ *
+ *  ＝チップのHEサポート有無（SOC_WIFI_HE_SUPPORT）ではなく
+ *  **ヘッダ供給元の版**で決まる。よってガードは供給元版を表す
+ *  ASP3_WIFI_OSI_HAS_DISABLE_AC_AX（esp_wifi.cmake．既定OFF）へ改める。
+ *  ONにするのは `-DIDF_V554=~/tools/esp-idf`（+1169）でA/Bする時だけ。
+ *
+ *  実装は実ESP-IDF（esp_wifi/esp32c6/esp_adapter.c）に倣い
+ *  「11ac/11axの無効化は未サポート」＝falseを返す。
+ */
+#if ASP3_WIFI_OSI_HAS_DISABLE_AC_AX
+static bool
+wifi_disable_ac_ax_wrapper(void)
+{
+	return false;
+}
+#endif
+
+/*
  *		osiテーブル本体
  */
 wifi_osi_funcs_t g_wifi_osi_funcs = {
@@ -1123,5 +1175,8 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 	._coex_schm_flexible_period_set = coex_schm_flexible_period_set,
 	._coex_schm_flexible_period_get = coex_schm_flexible_period_get,
 	._coex_schm_get_phase_by_idx = coex_schm_get_phase_by_idx,
+#if ASP3_WIFI_OSI_HAS_DISABLE_AC_AX
+	._wifi_disable_ac_ax = wifi_disable_ac_ax_wrapper,
+#endif
 	._magic = ESP_WIFI_OS_ADAPTER_MAGIC,
 };

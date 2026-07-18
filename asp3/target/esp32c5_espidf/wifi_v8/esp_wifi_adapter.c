@@ -600,9 +600,24 @@ get_free_heap_size_wrapper(void)
 /*
  *		イベント（esp_event_shim.cの最小実装へ）
  */
+#ifndef TOPPERS_ESPIDF_SUPPLY
+/*
+ *  hal（esp-hal-3rdparty）供給時：esp_private/wifi.h が esp_event.h を
+ *  includeしないため，ここで局所externを置く．
+ */
 extern int esp_event_post(const char *event_base, int32_t event_id,
 						  void *event_data, size_t event_data_size,
 						  uint32_t ticks_to_wait);
+#else
+/*
+ *  esp-idf（v5.5.4）供給時：esp_private/wifi.h が esp_event.h を
+ *  includeする（＝本物の宣言が既に見えている）ため局所externは置かない．
+ *  版差（実測）：event_data が hal=`void *` / esp-idf=`const void *` で
+ *  あり，局所externを残すと "conflicting types" になる．
+ *  esp_event.h の宣言をそのまま使う（実体は esp_event_shim.c）．
+ */
+#include "esp_event.h"
+#endif
 
 static int32_t
 event_post_wrapper(const char *event_base, int32_t event_id,
@@ -668,7 +683,7 @@ phy_enable_wrapper(void)
 	 *  この2行を移植しない．C5で受信不成立が再現した場合の実機investigation
 	 *  候補としてのみ記録する（【実機確認待ち】）．
 	 */
-	*(volatile uint32_t *)0x600af018U = 0x7U;
+	*(volatile uint32_t *)0x600af018U |= 0x7U;	/* ★RMW（C6 evidence-c6-13 と整合）：代入だと bit3=LP_TIMER_EN（BT正当）以上を潰す．WIFIPWR/COEX/I2C_MST(bit0-2)のみ立てる */
 	esp_phy_enable(PHY_MODEM_WIFI);
 	phy_wifi_enable_set(1U);
 }
@@ -745,7 +760,18 @@ wifi_clock_enable_wrapper(void)
 	 *  適用にはPMU即時反映パルス2本（update_dig_icg_modem_code／
 	 *  update_dig_icg_switch）の両方が必要（関数内で実施済み）。
 	 *  詳細はdocs/c5-bringup.md 実施13。 */
+#ifndef TOPPERS_ESP32C5_NO_MODEM_ICG_SHIM
 	esp_shim_modem_icg_init();
+#else
+	/*
+	 *  【evidence-c5-04 §5】シム除去A/B用。target.cmake の
+	 *  `-DASP3_C5_NO_MODEM_ICG_SHIM=ON`（診断専用．既定OFF）で，本シムだけを
+	 *  無効化して「stock の pmu_init() がこの手当てを置き換えられるか」を
+	 *  実機で判定する。**1実験1機構**：無効化するのは本シムのみで，
+	 *  直後の modem_clock_select_lp_clock_source()（WIFIPWRドメイン＝
+	 *  別系統のクロックゲート．実施6）はそのまま残す。
+	 */
+#endif
 
 	/*
 	 *  esp_perip_clk_init()（esp-hal-3rdpartyのesp_system/port/soc/
@@ -803,7 +829,7 @@ wifi_clock_enable_wrapper(void)
 	 *  この明示的な再アサートが必要だった．レジスタアドレス・ビット
 	 *  位置がC5でも同一であることを確認済みのためそのまま移植する
 	 *  （phy_enable_wrapper側のコメントも参照）。 */
-	*(volatile uint32_t *)0x600af018U = 0x7U;
+	*(volatile uint32_t *)0x600af018U |= 0x7U;	/* ★RMW（C6 evidence-c6-13 と整合）：代入だと bit3=LP_TIMER_EN（BT正当）以上を潰す．WIFIPWR/COEX/I2C_MST(bit0-2)のみ立てる */
 }
 
 static void
@@ -1076,6 +1102,30 @@ extern uint8_t coex_schm_flexible_period_get(void);
 extern void *coex_schm_get_phase_by_idx(int idx);
 
 /*
+ *  ★訂正（2026-07-16・実測）：`_wifi_disable_ac_ax`フィールドは
+ *  **v5.5.4タグにもhalにも存在しない**（release/v5.5の先端＝+1169版の
+ *  wifi_os_adapter.hのみが持つ）。旧版は`~/tools/esp-idf`（実体は
+ *  v5.5.4-1169-gbb2188bf）のヘッダをoverrideで被せていたため本フィールドを
+ *  埋めており，その結果`_magic`が484→488へずれてv5.5.4タグblobの
+ *  osi登録検査に落ち，esp_wifi_initが0x102を返していた。
+ *  （blob実測：libnet80211.a `wifi_osi_funcs_register`は`_magic`を
+ *   v5.5.4タグ/hal=offset484／+1169=offset488で直読みし，不一致なら
+ *   return 258=0x102。詳細はesp_wifi_v8.cmakeの§訂正コメント。）
+ *  よって既定（v5.5.4タグ／hal）ではこのラッパを«持たない»。
+ *  `-DIDF_V554=~/tools/esp-idf`（+1169 ABI）へ差し戻す時だけ
+ *  -DASP3_WIFI_OSI_HAS_DISABLE_AC_AX=ON で有効化する。
+ *  意味論は実ESP-IDF（esp_wifi/esp32c5/esp_adapter.c）に倣い
+ *  「11ac/11axの無効化は未サポート」＝falseを返す。
+ */
+#if ASP3_WIFI_OSI_HAS_DISABLE_AC_AX
+static bool
+wifi_disable_ac_ax_wrapper(void)
+{
+	return false;
+}
+#endif
+
+/*
  *		osiテーブル本体
  */
 wifi_osi_funcs_t g_wifi_osi_funcs = {
@@ -1200,5 +1250,8 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 	._coex_schm_flexible_period_set = coex_schm_flexible_period_set,
 	._coex_schm_flexible_period_get = coex_schm_flexible_period_get,
 	._coex_schm_get_phase_by_idx = coex_schm_get_phase_by_idx,
+#if ASP3_WIFI_OSI_HAS_DISABLE_AC_AX
+	._wifi_disable_ac_ax = wifi_disable_ac_ax_wrapper,
+#endif
 	._magic = ESP_WIFI_OS_ADAPTER_MAGIC,
 };

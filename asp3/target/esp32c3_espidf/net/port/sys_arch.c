@@ -14,6 +14,12 @@
 /*
  *  lwIP sys_arch実装（ASP3用．NO_SYS=0）
  *
+ *  【重要】本ファイルは3チップ共有＝C3専用ではない．
+ *  esp32c3_espidf/net/配下にあるが，C5／C6のtarget.cmakeが
+ *  ${C3_TARGETDIR}/net/port/sys_arch.cを直接参照し，C3／C5／C6の3チップ
+ *  すべてでコンパイルされる（コピーは存在しない）．⇒変更は3チップに
+ *  波及する．内容はチップ非依存（ASP3のセマフォ／データキューのみに依存）．
+ *
  *  sys_sem_t／sys_mbox_tはcfg（net.cfg）で静的生成したASP3セマフォ／
  *  データキューのプールから割り当てる（Wi-Fi shim＝wifi/esp_shim.cの
  *  静的プール方式を踏襲．設計はdocs/tcpip-integration.md）．

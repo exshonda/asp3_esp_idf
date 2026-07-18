@@ -88,6 +88,12 @@ extern void esp_shim_queue_flush_pending(void);
  *  （キューの pend_ring と同型．exit_critical/機会的flushから呼ぶ）．  */
 extern void esp_shim_sem_flush_pending(void);
 
+/*  #5：タイマ再計算起床の «critical外必達» 救済（sig_sem が E_CTX なら semID を
+ *  保留し，esp_shim_exit_critical / 機会flush で精算）．タイマ arm 経路から
+ *  sig_sem(*_TIMER_SEM) の代わりに esp_shim_signal_or_pend を呼ぶ．  */
+extern void esp_shim_signal_or_pend(ID semid);
+extern void esp_shim_wakeup_flush_pending(void);
+
 /*
  *  タスク（CRE_TSKプール．共通エントリ＋関数ポインタ渡し）
  */

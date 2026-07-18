@@ -12,9 +12,9 @@
 
 #include "esp_wifi.h"
 #include "esp_event.h"
-#ifdef TOPPERS_ESP32C6_WIFI
+#ifdef TOPPERS_ESP32C6_WIFI_TRACE
 #include "wifi_trace.h"	/* C6 AGC調査専用の診断計装（wifi_trace.c／esp32c6_espidfのみ） */
-#endif /* TOPPERS_ESP32C6_WIFI */
+#endif /* TOPPERS_ESP32C6_WIFI_TRACE */
 #ifdef TOPPERS_ESP32C5_WIFI_REGI2C_TRACE
 #include "wifi_trace.h"	/* 実施16：C5 regi2cトレース（wifi_trace.c／esp32c5_espidfのみ） */
 #endif /* TOPPERS_ESP32C5_WIFI_REGI2C_TRACE */
@@ -550,12 +550,12 @@ main_task(EXINF exinf)
 
 	syslog(LOG_NOTICE, "wifi_scan: initializing shim");
 	esp_shim_initialize();
-#ifdef TOPPERS_ESP32C6_WIFI
+#ifdef TOPPERS_ESP32C6_WIFI_TRACE
 	wifi_trace_reset();
 	wifi_regi2c_reset();	/* DIAGNOSTIC (temporary，実施23／Priority 2) */
 	wifi_regi2c_patch_install();	/* DIAGNOSTIC（実施23）：PHY初期化前に必ずインストール */
 	wifi_taskdelay_reset();	/* DIAGNOSTIC（実施26／タイミング感度調査） */
-#endif /* TOPPERS_ESP32C6_WIFI */
+#endif /* TOPPERS_ESP32C6_WIFI_TRACE */
 
 	(void) esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
 									  (void *)wifi_event_handler, NULL);
@@ -719,10 +719,10 @@ main_task(EXINF exinf)
 
 #ifndef HANDOFF_SKIP_WIFI_INIT
 	(void) esp_wifi_set_mode(WIFI_MODE_STA);
-#ifdef TOPPERS_ESP32C6_WIFI
+#ifdef TOPPERS_ESP32C6_WIFI_TRACE
 	syslog(LOG_NOTICE, "wifi_scan: DIAG post-set_mode g_ic[497]=%d g_ic[499]=%d",
 		   (int_t)diag_g_ic_byte(497), (int_t)diag_g_ic_byte(499));
-#endif /* TOPPERS_ESP32C6_WIFI */
+#endif /* TOPPERS_ESP32C6_WIFI_TRACE */
 	(void) esp_wifi_set_storage(WIFI_STORAGE_RAM);
 #ifdef WIFI_SCAN_PS_MIN_MODEM
 	/*
@@ -756,12 +756,12 @@ main_task(EXINF exinf)
 
 	err = esp_wifi_start();
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_start -> %d", (int_t)err);
-#ifdef TOPPERS_ESP32C6_WIFI
+#ifdef TOPPERS_ESP32C6_WIFI_TRACE
 	syslog(LOG_NOTICE, "wifi_scan: DIAG post-start g_ic[497]=%d g_ic[499]=%d",
 		   (int_t)diag_g_ic_byte(497), (int_t)diag_g_ic_byte(499));
 	syslog(LOG_NOTICE, "wifi_scan: DIAG post-start nvs_ptr=%x nvs[0]=%d",
 		   (int_t)diag_wifi_nvs_ptr(), (int_t)diag_wifi_nvs_byte0());
-#endif /* TOPPERS_ESP32C6_WIFI */
+#endif /* TOPPERS_ESP32C6_WIFI_TRACE */
 	if (err != 0) {
 		return;
 	}
@@ -798,14 +798,16 @@ main_task(EXINF exinf)
 	}
 #endif /* HANDOFF_SKIP_WIFI_INIT */
 
-#ifdef TOPPERS_ESP32C6_WIFI
+#ifdef TOPPERS_ESP32C6_WIFI_TRACE
 	wifi_regsnap_reset();	/* DIAGNOSTIC (temporary, Priority 2) */
-	/*  ★根本原因テスト（追記10）：JTAGでnative(受信OK)=0x7 vs ASP3=0x0の
-	 *  差分が判明した MODEM_LPCON_CLK_CONF(0x600af018) を強制的に0x7へ．
-	 *  bit0=WIFIPWR bit1=COEX bit2=I2C_MST(RF regi2c用)クロック．これで
-	 *  APが検出できれば，shimのクロックenable欠落が0 APの根因と確定． */
-	*(volatile uint32_t *)0x600af018U = 0x7U;
-#endif /* TOPPERS_ESP32C6_WIFI */
+	/*  ★evidence-c6-12：ここに在った
+	 *      *(volatile uint32_t *)0x600af018U = 0x7U;
+	 *  （「根本原因テスト（追記10）」）は **削除した**＝**shim 側の恒久修正と重複**
+	 *  していたため（wifi/esp_wifi_adapter.c の phy_enable_wrapper():589 と
+	 *  wifi_clock_enable_wrapper():746 が同じ値を書く．両方 live＝ELF 実在）。
+	 *  ∴ app 側の «テスト» は不要。恒久修正は shim 側が担う（BT の bt_shim.c と同じ形）。
+	 */
+#endif /* TOPPERS_ESP32C6_WIFI_TRACE */
 	err = esp_wifi_scan_start(NULL, false);
 	syslog(LOG_NOTICE, "wifi_scan: esp_wifi_scan_start -> %d", (int_t)err);
 
@@ -820,14 +822,10 @@ main_task(EXINF exinf)
 		int sec;
 		for (sec = 0; sec < 20 && !scan_done; sec++) {
 #ifdef TOPPERS_ESP32C6_WIFI
-			/*  0x600af018=MODEM_LPCON_CLK_CONF_REGはC6(H2/H4/H21/C61等の
-			 *  新modem系統)にのみ存在する周辺で，C3のペリフェラルバスには
-			 *  対応レジスタが存在しない（hal/esp32c3のreg_base.hに該当
-			 *  ベースなし）．無guardのままC3でも毎秒書込みしていたが，
-			 *  未使用領域への書込みでクラッシュはしないため今回のIllegal
-			 *  instruction本体とは無関係——ただし同種のguard漏れなのでC6
-			 *  専用にguardする（docs/wifi-scan-c3-crash.md 実施1）．*/
-			*(volatile uint32_t *)0x600af018U = 0x7U;	/* 追記10：クロック再アサート */
+			/*  ★evidence-c6-12：ここに在った «毎秒の» クロック再アサート
+			 *      *(volatile uint32_t *)0x600af018U = 0x7U;
+			 *  は **削除した**＝shim の恒久修正と重複（上記参照）。
+			 *  スキャンループ内で毎秒 MMIO を書く理由は無い。*/
 #endif /* TOPPERS_ESP32C6_WIFI */
 			(void) tslp_tsk(1000000);	/* 1秒 */
 			syslog(LOG_NOTICE,
@@ -875,7 +873,7 @@ main_task(EXINF exinf)
 		}
 		*(volatile uint32_t *)0x5000002CU = wsum;	/* [11]=Wi-Fi int総数 */
 	}
-#ifdef TOPPERS_ESP32C6_WIFI
+#ifdef TOPPERS_ESP32C6_WIFI_TRACE
 	/*
 	 *  DIAGNOSTIC（C6専用，実施(追記12)）：C6の固定ROM PHYFUNS表アドレス
 	 *  (0x4087f954)のidx23=read_mask関数ポインタを直接呼ぶ．
@@ -906,9 +904,22 @@ main_task(EXINF exinf)
 			}
 		}
 	}
-#endif /* TOPPERS_ESP32C6_WIFI */
+#endif /* TOPPERS_ESP32C6_WIFI_TRACE */
 	syslog(LOG_NOTICE, "wifi_scan: %d APs found (err=%d)",
 		   (int_t)num, (int_t)err);
+#ifdef TOPPERS_C3_COLD_DIAG
+	/*
+	 *  真cold の scan 物証（既定OFF・非回帰．evidence-c3-02）．
+	 *  ★C3はUARTブリッジが無く**コンソールのopenがDUTをリセットする**
+	 *  ため，真coldのscan結果はコンソールでは観測できない＝RTC STORE
+	 *  マーカへ出す（判定はconsole非依存＝esptool read-mem 直読み）。
+	 *    STORE4(0x600080B8) = 0x5CA0_0000 | (err&0xFF)<<8 | (AP件数&0xFF)
+	 *  ★SSIDは載せない（認証情報・環境情報の混入0を維持）。
+	 *  ★本アプリはC3/C5/C6共用のため必ずガード内に置く。
+	 */
+	(*(volatile uint32_t *)0x600080B8U) =
+		0x5CA00000U | (((uint32_t)err & 0xFFU) << 8) | ((uint32_t)num & 0xFFU);
+#endif /* TOPPERS_C3_COLD_DIAG */
 	for (i = 0; i < num; i++) {
 		syslog(LOG_NOTICE, "  [%d] %s (rssi=%d ch=%d)",
 			   (int_t)i, (const char *)recs[i].ssid,

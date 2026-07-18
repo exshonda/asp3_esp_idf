@@ -28,6 +28,12 @@
  *  ディスパッチではないため割込み契機のタスク切替えで発生し得る）。
  *  本タスクの対象外のため、per-task errno化は行わずこの制限を明記するに
  *  留める．
+ *
+ *  【重要】本ヘッダは3チップ共有＝C3専用ではない．esp32c3_espidf/
+ *  配下にあるが，C5／C6のtarget.cmakeも${C3_TARGETDIR}/hal_stub/include
+ *  として同じ実体を参照する（コピーは存在しない）．⇒変更は3チップの
+ *  ビルドに波及する．C3固有の内容を入れてはならない．
+ *  詳細はesp32c3_espidf/target.cmakeのhal_stub節（実測値つき）．
  */
 #ifndef TOPPERS_HAL_STUB_ERRNO_H
 #define TOPPERS_HAL_STUB_ERRNO_H

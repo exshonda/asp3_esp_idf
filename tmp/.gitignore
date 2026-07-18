@@ -6,3 +6,8 @@ c6_handoff_source/managed_components/
 c6_handoff_source/dependencies.lock
 min_uart_target/*.elf
 min_uart_target/*.bin
+
+# stock ESP-IDF bleprph control experiment (regeneratable via tmp/stock_bleprph_setup.sh)
+stock_bleprph/
+# full-flash ASP3 backups (binary, large)
+asp3_flash_backup/

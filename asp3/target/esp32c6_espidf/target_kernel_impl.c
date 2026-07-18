@@ -277,7 +277,24 @@ hardware_init_hook(void)
 	 */
 	esp32c6_r87_apm_unblock();
 
-#ifdef TOPPERS_ESP32C6_BT
+#ifdef TOPPERS_ESP32C6_PMU_DIAG
+	/*
+	 *  【evidence-c6-04・診断専用（既定OFF）】hardware_init_hook 時点
+	 *  （＝.data 初期化 «前»）の PMU_instance()->hal を LP_AON STORE8
+	 *  （0x600B1020）へ無条件ミラーする．post-.data の値は
+	 *  software_init_hook 側で STORE9（0x600B1024）へ記録する．
+	 *  両者が食い違えば「hardware_init_hook から pmu_init() を呼ぶと
+	 *  .data 未初期化のゴミポインタで走る」が実測で確定する．
+	 *  ★hal を «deref しない»（ゴミなら不正アドレスになるため）．
+	 *  ★bt_smoke_c6 は STORE8/9 を使わない＝衝突しない．
+	 */
+	{
+		extern void esp_shim_bt_pmu_diag(uint32_t slot);
+		esp_shim_bt_pmu_diag(8U);
+	}
+#endif /* TOPPERS_ESP32C6_PMU_DIAG */
+
+#if defined(TOPPERS_ESP32C6_BT_PMU_INIT) && !defined(TOPPERS_ESP32C6_PMU_INIT_LATE)
 	/*
 	 *  ★§20：C6 BT «cold RF-synth-PLL ロック» 修正．stock IDF が起動
 	 *  シーケンスで呼ぶ pmu_init()（PMU HP_ACTIVE 電源/クロック/アナログ
@@ -288,16 +305,140 @@ hardware_init_hook(void)
 	 *  カーネル/タイマ起動前（stock の pmu_init 呼出しと同じ «早期» 位相）
 	 *  で呼ぶことで，HP_ACTIVE 電源記述子の適用が稼働中カーネルを撹乱
 	 *  しない。実体は bt/bt_pmu_init_c6.c（hal 非編集＝リンクのみ）。
+	 *
+	 *  ★ガードを TOPPERS_ESP32C6_BT → TOPPERS_ESP32C6_BT_PMU_INIT へ変更
+	 *  （2026-07-17．docs/blob-unify-v554-review.md ★B3(iii)／★B2．
+	 *   evidence-c6-01 §5）：
+	 *   §20（2c39cad）は本呼出しを TOPPERS_ESP32C6_BT で無条件化した一方，
+	 *   実体 bt_pmu_init_c6.c を **esp_bt_idf61.cmake にしか追加しなかった**。
+	 *   ∴ hal 版（ESP32C6_BT_IDF61=OFF）は 2026-07-15 以降
+	 *   `undefined reference to esp_shim_bt_pmu_init` で **リンク不能**
+	 *   だった（実測．＝★B1「素の -DESP32C6_BT=ON が hal に着地」は
+	 *   «ハングする構成に着地» ではなく «そもそもビルドできない» が正確）。
+	 *   本マクロは実体を積む esp_bt_idf61.cmake だけが定義する＝
+	 *   v6.1／v5.5.4 経路の挙動は**不変**（非回帰），hal 経路は §20 以前の
+	 *   挙動（pmu_init を呼ばない）に戻ってリンク可能になる＝★B2 の可逆性回復。
 	 */
 	extern void esp_shim_bt_pmu_init(void);
 	esp_shim_bt_pmu_init();
-#endif /* TOPPERS_ESP32C6_BT */
+#endif /* TOPPERS_ESP32C6_BT_PMU_INIT && !TOPPERS_ESP32C6_PMU_INIT_LATE */
 }
 
 void
 software_init_hook(void)
 {
 	diag_mark(1U);	/* DIAGNOSTIC: software_init_hook入口＝bss/dataクリア通過（PMP fix確認済） */
+
+#if defined(TOPPERS_ESP32C6_COLD_SETTLE_MS) && (TOPPERS_ESP32C6_COLD_SETTLE_MS > 0)
+	/*
+	 *  【evidence-c6-04・判別実験】真cold(POR) 直後の «アナログ整定待ち» を
+	 *  模擬する busy wait．
+	 *
+	 *  ★動機（実測された非対称）：stock は phy_init に **t≈477ms**（app 相対）
+	 *  で到達するのに対し，ASP3 の Direct Boot は **t≈83ms** で到達する
+	 *  （evidence-c6-03 §4.1．stock は 2nd-stage bootloader＋IDF フル startup を
+	 *  経るぶん遅い）＝**ASP3 は POR から約 1/6 の時刻で PHY 較正を始めている**．
+	 *  ∴「POR 直後はアナログ（bandgap／レギュレータ／XTAL／BBPLL 較正）が
+	 *  未整定で，phy_init の RF synth PLL がロックできない」という仮説
+	 *  （H3）が立つ．warm では前ブートから電源が切れていない＝整定済み
+	 *  なので通る，と cold/warm 分岐も説明できる．
+	 *
+	 *  ★本オプションは «時間» という単一変数だけを動かす判別器：
+	 *   - 通れば ⇒ 欠けているのは «初期化動作» ではなく «時刻»（H3 の側）．
+	 *   - 通らなければ ⇒ H3 は反証され，«やっていない初期化動作» の側
+	 *     （recalib_bbpll 等）に絞れる．
+	 *  ★どちらに転んでも探索空間が半分になる＝先に走らせる価値がある
+	 *   （rigor 標準「安い判別実験を先に」）．
+	 *
+	 *  esp_rom_delay_us は hardware_init_hook の
+	 *  esp_rom_set_cpu_ticks_per_us(CORE_CLK_MHZ) 済みなので正確（実施48）．
+	 *  ここは .data 初期化後・sta_ker 前・sio 初期化前＝誰も撹乱しない．
+	 */
+	{
+		extern void esp_rom_delay_us(uint32_t us);
+		uint32_t	i;
+
+		for (i = 0U; i < (uint32_t) TOPPERS_ESP32C6_COLD_SETTLE_MS; i++) {
+			esp_rom_delay_us(1000U);
+		}
+	}
+#endif /* TOPPERS_ESP32C6_COLD_SETTLE_MS > 0 */
+
+#ifdef TOPPERS_ESP32C6_PMU_DIAG
+	/*
+	 *  【evidence-c6-04・診断専用（既定OFF）】.data 初期化 «後» の
+	 *  PMU_instance()->hal を LP_AON STORE9（0x600B1024）へミラー．
+	 *  hardware_init_hook 側（STORE8）との差が «未初期化 .data» の物証．
+	 */
+	{
+		extern void esp_shim_bt_pmu_diag(uint32_t slot);
+		esp_shim_bt_pmu_diag(9U);
+	}
+#endif /* TOPPERS_ESP32C6_PMU_DIAG */
+
+#ifdef TOPPERS_ESP32C6_COLD_CPU_PLL
+	/*
+	 *  ★★evidence-c6-04【真cold ハングの真因の修正】CPU/SOC ルートクロックを
+	 *  PLL@160MHz へ明示設定する（stock の 2nd-stage bootloader の
+	 *  rtc_clk_init() 相当）．真cold では ROM が **XTAL@40MHz** のまま渡して
+	 *  くることを実機で確定した（STORE5=0xbb110280＝src=0(XTAL)/40MHz）．
+	 *  ASP3 の「ROM が SPLL/160MHz 設定済みだから触らない」という前提は
+	 *  **warm でしか成立していなかった**．実体＝bt/bt_pmu_init_c6.c．
+	 *  ★.bss/.data 初期化後でなければならない（rtc_clk.c の s_cur_pll_freq）．
+	 */
+	{
+		extern void esp_shim_cold_cpu_clk_init(void);
+		esp_shim_cold_cpu_clk_init();
+	}
+#endif /* TOPPERS_ESP32C6_COLD_CPU_PLL */
+
+#ifdef TOPPERS_ESP32C6_COLD_RECALIB_BBPLL
+	/*
+	 *  ★evidence-c6-04：stock の recalib_bbpll() 相当（BBPLL を止めて
+	 *  再較正）．実体＝bt/bt_pmu_init_c6.c．.data 初期化後・カーネル起動前・
+	 *  sio 初期化前＝クロックを揺らしても誰も撹乱しない位置で呼ぶ
+	 *  （stock も esp_rtc_init＝.data 初期化後に呼ぶ）．
+	 *  ★rtc_clk.c の static（s_cur_pll_freq＝.bss）を使うので
+	 *  **.bss クリア後でなければならない**＝hardware_init_hook では駄目．
+	 */
+	{
+		extern void esp_shim_cold_recalib_bbpll(void);
+		esp_shim_cold_recalib_bbpll();
+	}
+#endif /* TOPPERS_ESP32C6_COLD_RECALIB_BBPLL */
+
+#if defined(TOPPERS_ESP32C6_BT_PMU_INIT) && defined(TOPPERS_ESP32C6_PMU_INIT_LATE)
+	/*
+	 *  ★evidence-c6-04：pmu_init() を «.data 初期化後» に呼ぶ．
+	 *
+	 *  §20 は本呼出しを hardware_init_hook に置いたが，start.S（riscv_gcc
+	 *  共通）は
+	 *      jal hardware_init_hook → .bss クリア → .data コピー
+	 *      → jal software_init_hook → j sta_ker
+	 *  の順であり（実機バイナリの逆アセンブルで確認済），
+	 *  hardware_init_hook は **.data 初期化より前** に走る．
+	 *  stock の PMU_instance()（hal/…/esp32c6/pmu_init.c）は
+	 *      static DRAM_ATTR pmu_hal_context_t pmu_hal = { .dev = &PMU };
+	 *      static DRAM_ATTR pmu_context_t pmu_context = { .hal = &pmu_hal, … };
+	 *  ＝**初期化子つき static＝.data 配置**（nm 実測：`d pmu_context.0`）で，
+	 *  pmu_hp_system_init() は `ctx->hal->dev` を辿って PMU 記述子を書く
+	 *  （逆アセンブル：`lw a4,0(a0)` → `lw a0,0(a4)` → `sw t3,0(a5)`）．
+	 *  ∴ hardware_init_hook から呼ぶと **真cold では .data がゴミ＝
+	 *  dev が PMU(0x600B0000) を指さず，PMU が一切設定されない**．
+	 *  warm では前ブートが初期化した .data が SRAM に残っているため
+	 *  «たまたま» 正しく動く＝これが cold/warm 分岐の機序（evidence-c6-04）．
+	 *
+	 *  software_init_hook は **.data 初期化後・カーネル起動(sta_ker)前**
+	 *  ＝§20 が求めた «稼働中カーネルを撹乱しない早期» を保ったまま
+	 *  ゴミポインタ問題だけを解消する（stock も .data 初期化後に
+	 *  esp_rtc_init→pmu_init を呼ぶ＝stock により近い）．
+	 */
+	{
+		extern void esp_shim_bt_pmu_init(void);
+		esp_shim_bt_pmu_init();
+	}
+#endif /* TOPPERS_ESP32C6_BT_PMU_INIT && TOPPERS_ESP32C6_PMU_INIT_LATE */
+
 	/* Initialize sio for fput */
 #ifdef TOPPERS_OMIT_TECS
 	sio_initialize(0);

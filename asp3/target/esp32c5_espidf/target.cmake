@@ -23,6 +23,36 @@
 set(TARGETDIR ${CMAKE_CURRENT_LIST_DIR})
 
 #
+#  ------------------------------------------------------------------
+#  ツールチェーン検証（「黙って汎用GCCへ落ちる」の検出）
+#  ------------------------------------------------------------------
+#
+#  実測：本リポジトリ build/ 配下 320 構成のうち 164 構成が
+#  /usr/bin/riscv64-unknown-elf-gcc（Ubuntu汎用GCC 13.2.0）でビルド
+#  されており，esp-idf submodule（真の v5.5.4）が指定する
+#  esp-14.2.0_20260121 を使った構成は **0** だった．
+#  原因は asp3_core の toolchain-riscv64.cmake が既定プレフィクス
+#  riscv64-unknown-elf- を PATH 経由で解決するため，
+#  -DRISCV64_TOOLCHAIN_PREFIX の渡し忘れが «ビルドは通るのに間違った
+#  コンパイラ» を生むこと．検証はここ（target.cmake＝本リポジトリ側）
+#  で行い，チップ非依存の実体は asp3/cmake/ に置く（C3/C6 も
+#  submodule を触らずに同じ2行で転写できる）．
+#
+#  推奨する configure：
+#    -DCMAKE_TOOLCHAIN_FILE=<repo>/asp3/cmake/toolchain-esp32-riscv32.cmake
+#
+#  -DASP3_ESP_EXPECTED_TOOLCHAIN=<tag> で意図的に別版を許可できるよう，
+#  素の set() ではなく «未定義のときだけ» 既定を与える．
+#  （素の set() だとコマンドラインの -D を黙って上書きしてしまい，
+#    esp_toolchain_check.cmake のエラーメッセージが案内する
+#    「-DASP3_ESP_EXPECTED_TOOLCHAIN=... で別版を受け入れる」が
+#    **効かない案内＝嘘** になる．実際に発火させて検出した．）
+if(NOT DEFINED ASP3_ESP_EXPECTED_TOOLCHAIN)
+    set(ASP3_ESP_EXPECTED_TOOLCHAIN esp-14.2.0_20260121)
+endif()
+include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_toolchain_check.cmake)
+
+#
 #  esp-hal-3rdparty（submodule）のパスとインクルードディレクトリ
 #
 #  B-0/B-1で使用するのはRTOS非依存の下層のみ：
@@ -35,6 +65,96 @@ set(TARGETDIR ${CMAKE_CURRENT_LIST_DIR})
 get_filename_component(ESP_HAL_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../hal ABSOLUTE)
 
 #
+#  ------------------------------------------------------------------
+#  供給元（supply root）の選択＝HAL依存撤去
+#  （.steering/20260716-c3c5c6-esp-idf-supply-migration）
+#  ------------------------------------------------------------------
+#
+#  ASP3_ESPIDF_SUPPLY=ON（既定）＝ESP-IDF submodule（v5.5.4タグ＝
+#  735507283d）から全ESPコンポーネント（ヘッダ・ソース・blob・ROM ld）を
+#  供給する。OFF＝従来のesp-hal-3rdparty（hal submodule）＝可逆fallback。
+#
+#  ★実測に基づく前提（evidence-c5-02）：esp-hal-3rdpartyは
+#  **ESP-IDFの再パッケージ**であり，本ターゲットが参照する75パスのうち
+#  **72パスがesp-idf v5.5.4へ1:1で対応**する（差は下記2点のみ）：
+#    1. halは IDF の単体`hal`コンポーネントを`esp_hal_*`へ**分割**している
+#       （esp_hal_clock/timg/rtc_timer/pmu/gpio/security/ana_conv/usb）。
+#       esp-idf側では全て `components/hal` に集約＝下の ESP_SUP_HAL_* で吸収。
+#    2. mbedtls が **4.0.0(tf-psa-crypto分離) → 3.6.5(classic)** の版差
+#       （esp_wifi_v8.cmake §3で吸収）。
+#  加えて hal の nuttx/（NuttXシムconfig）はesp-idfに存在しない＝
+#  ESP-IDF本来の mbedtls port（esp_config.h）へ寄せる。
+#
+#  ★ヘッダとソースは**必ず揃えて**同じ供給元から取る。片方だけ移すと
+#  esp-hal-3rdpartyのリネーム（実測：`hal/lp_timer_hal.h`→`rtc_timer_hal.h`，
+#  `hal/timer_ll.h`→`timg_ll.h`，`soc/clkout_channel.h`→`hal/clkout_channel.h`）
+#  が未解決参照として噴出する。逆に揃えれば**リネーム問題は消滅する**
+#  （両ツリーの当該ソースは実測でリネーム以外同一）。
+#
+if(NOT DEFINED IDF_V554)
+    #  外部ターゲット規約（PORTING_GUIDE.md §6）に従い CMAKE_CURRENT_LIST_DIR 相対。
+    #  A/B用に -DIDF_V554=<path> で別treeへ差し戻せる（可逆）。
+    get_filename_component(IDF_V554 ${CMAKE_CURRENT_LIST_DIR}/../../../esp-idf ABSOLUTE)
+endif()
+
+#
+#  ★2026-07-17：docstring の「OFF = hal fallback」は **BT ビルドでは嘘だった**ので
+#  «実測された挙動» へ書き換えた（挙動そのものは変えていない）。実測：
+#    C5 WiFi + OFF : hal 7357 / esp-idf    0            ＝真の hal fallback（docstring は真）
+#    C5 BT   + OFF : hal 1594 / esp-idf  119（うち BT 88）＝**混成（MIXED）**（docstring は偽）
+#  ＝OFF が戻すのは **基盤だけ**で，BT ツリーは `ASP3_BT_IDF_V554`（既定 ON）に従い
+#  esp-idf のまま残る。しかも C5 の `esp_bt.cmake` に `ESP_HAL_DIR` は **0箇所**
+#  ＝**hal の BT 経路はそもそも存在しない**ので「BT を hal へ戻す」は不可能。
+#  ★C3 は同じ混成を **両方向の FATAL_ERROR で禁止**している（`esp_bt.cmake:133-145`）が，
+#  C5/C6 にガードは無い（実測：cross guard 0箇所）＝**黙って混成が通る**。
+#  ガード追加は «挙動変更» なのでユーザー判断（本ラウンドでは提案に留める）。
+#
+#  既定は ON（＝HAL-free）．変数に出すのは下の «古い既定のまま黙って動く»
+#  検出へ «計算された既定» を渡すため（値・挙動は従来と同一）．
+set(_asp3_espidf_supply_default ON)
+
+option(ASP3_ESPIDF_SUPPLY
+    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (true v5.5.4 tag) instead of esp-hal-3rdparty. Default ON = HAL-free. OFF = a true hal fallback ONLY for WiFi/plain builds (measured: hal 7357 / esp-idf 0). WARNING for ESP32C5_BT=ON: OFF reverts the BASE components only -- the BT tree independently follows ASP3_BT_IDF_V554 (default ON = esp-idf submodule), so -DASP3_ESPIDF_SUPPLY=OFF alone silently yields a MIXED build (measured: hal 1594 / esp-idf 119, of which 88 = components/bt). It does build, but it is NOT a hal fallback. There is no all-hal BT configuration for C5 at all (esp_bt.cmake references ESP_HAL_DIR 0 times); the BT supply choices are ASP3_BT_IDF_V554=ON (esp-idf submodule v5.5.4) or =OFF (external v6.1 via ESP_IDF61_DIR). Unlike C3 (esp_bt.cmake:133-145), C5 has no FATAL_ERROR guard against the mixture"
+    ${_asp3_espidf_supply_default})
+
+#  既定変更が既存 build dir に届かない件の検出（詳細は下記ファイルの冒頭）．
+#  C5 の既定は一貫して ON なので «既定変更に取り残された» dir は原理的に
+#  無い（実測：OFF は 4 dir ＝いずれも -D による意図的な hal 構成）．
+#  それでも入れるのは，機構が C3/C6 と同一（option() はキャッシュを
+#  上書きしない）で，将来 C5 の既定が動いたときに同じ穴が開くため．
+include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_supply_default_check.cmake)
+asp3_warn_if_cache_overrides_default(ASP3_ESPIDF_SUPPLY ${_asp3_espidf_supply_default})
+
+if(ASP3_ESPIDF_SUPPLY)
+    set(ESP_SUP_DIR ${IDF_V554})
+    #  供給元の版差を共有ソース（C3/C6と共用のshim等）で吸収するための
+    #  ガード。S3(LX6/LX7)の同名ガードと同じ役割・命名。
+    #  既知の版差（実測）：
+    #    esp_event_post() の event_data が hal=`void *` /
+    #    esp-idf v5.5.4=`const void *`（esp_event.h）。
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESPIDF_SUPPLY=1)
+else()
+    set(ESP_SUP_DIR ${ESP_HAL_DIR})
+endif()
+
+#
+#  esp-hal-3rdpartyが分割した`esp_hal_<x>`コンポーネントの供給元別パス。
+#  esp-idfでは全て`components/hal`に集約されている（実測：
+#  esp_hal_*配下から実際にincludeされるヘッダ16本はすべて
+#  esp-idfの components/hal/{include,esp32c5/include} 及び
+#  components/soc/esp32c5/include で解決する）。
+#  いずれの供給元でも `${ESP_SUP_HAL_<x>}/include` と
+#  `${ESP_SUP_HAL_<x>}/esp32c5/include` の2パターンで参照できる形に揃える。
+#
+foreach(_esp_hal_c clock timg rtc_timer pmu gpio security ana_conv usb)
+    if(ASP3_ESPIDF_SUPPLY)
+        set(ESP_SUP_HAL_${_esp_hal_c} ${ESP_SUP_DIR}/components/hal)
+    else()
+        set(ESP_SUP_HAL_${_esp_hal_c} ${ESP_HAL_DIR}/components/esp_hal_${_esp_hal_c})
+    endif()
+endforeach()
+
+#
 #  hal_stub（libc互換ヘッダ．ツールチェーンにnewlib実体が無い環境向け）
 #  はESP32-C3用のものをそのまま再利用する（チップ非依存＝トゥール
 #  チェーンのギャップを埋めるだけの内容）。
@@ -44,23 +164,23 @@ get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf 
 list(APPEND ASP3_INCLUDE_DIRS
     ${C3_TARGETDIR}/hal_stub/include
     ${TARGETDIR}/sdkconfig_stub
-    ${ESP_HAL_DIR}/components/hal/esp32c5/include
-    ${ESP_HAL_DIR}/components/hal/include
-    ${ESP_HAL_DIR}/components/hal/platform_port/include
-    ${ESP_HAL_DIR}/components/esp_hal_usb/esp32c5/include
-    ${ESP_HAL_DIR}/components/esp_hal_usb/include
-    ${ESP_HAL_DIR}/components/soc/esp32c5/include
-    ${ESP_HAL_DIR}/components/soc/esp32c5/register
-    ${ESP_HAL_DIR}/components/soc/include
-    ${ESP_HAL_DIR}/components/esp_common/include
+    ${ESP_SUP_DIR}/components/hal/esp32c5/include
+    ${ESP_SUP_DIR}/components/hal/include
+    ${ESP_SUP_DIR}/components/hal/platform_port/include
+    ${ESP_SUP_HAL_usb}/esp32c5/include
+    ${ESP_SUP_HAL_usb}/include
+    ${ESP_SUP_DIR}/components/soc/esp32c5/include
+    ${ESP_SUP_DIR}/components/soc/esp32c5/register
+    ${ESP_SUP_DIR}/components/soc/include
+    ${ESP_SUP_DIR}/components/esp_common/include
     #  esp_rom_sys.h（esp_rom_set_cpu_ticks_per_us宣言．
     #  target_kernel_impl.cが使用）。C6版のtarget.cmakeはこれを
     #  Wi-Fi限定（esp_wifi.cmake内）でしか積んでおらず，Wi-Fi無し
     #  ビルドでは本来ここが欠落する潜在バグだった（本ポートで気付いた
     #  ため無条件で積む．C5固有の問題ではなくC6にも共通する既存の
     #  ギャップ）。
-    ${ESP_HAL_DIR}/components/esp_rom/include
-    ${ESP_HAL_DIR}/components/esp_rom/esp32c5/include
+    ${ESP_SUP_DIR}/components/esp_rom/include
+    ${ESP_SUP_DIR}/components/esp_rom/esp32c5/include
 )
 
 #
@@ -116,10 +236,34 @@ list(APPEND ASP3_LINK_OPTIONS
     -Wl,--print-memory-usage
     -Wl,--gc-sections
     -Wl,--build-id=none
-    -L${ESP_HAL_DIR}/components/soc/esp32c5/ld
+    -L${ESP_SUP_DIR}/components/soc/esp32c5/ld
 )
 
-set(ASP3_LDSCRIPT ${TARGETDIR}/esp32c5.ld)
+#
+#  ブート方式（既定＝Direct Boot．evidence-c5-03参照）
+#
+#  OFF（既定）＝Direct Boot XIP：ROMがflashをセルフマップしてASP3の
+#               エントリへ直行する（2nd-stage bootloader無し）。
+#               scan 20AP・W1（GOT IP＋ping×30）を実機達成済みの構成。
+#  ON          ＝seam：実ESP-IDF v5.5.4 の C5用 2nd-stage bootloader を
+#               経由してASP3自前エントリへ入る（FreeRTOS非リンクのまま）。
+#               ★C5のbootloaderオフセットは 0x2000（0x0ではない．
+#               Kconfig.projbuild:11「default 0x2000 if IDF_TARGET_ESP32P4
+#               || IDF_TARGET_ESP32C5 || IDF_TARGET_ESP32H4」＝先頭2セクタは
+#               key manager用に予約）。ptable@0x8000／app@0x10000。
+#
+#  可逆：ON/OFFの切替はld・app_desc・イメージ生成だけに閉じており，
+#  カーネル／arch／チップ依存部／Wi-Fi供給には一切触れない。
+#
+option(ASP3_SEAM_BOOT
+    "Boot via the real ESP-IDF v5.5.4 2nd-stage bootloader (seam) instead of ASP3's Direct Boot. Default OFF = Direct Boot (the only configuration with scan/W1 hardware evidence)"
+    OFF)
+
+if(ASP3_SEAM_BOOT)
+    set(ASP3_LDSCRIPT ${TARGETDIR}/esp32c5_seam.ld)
+else()
+    set(ASP3_LDSCRIPT ${TARGETDIR}/esp32c5.ld)
+endif()
 
 #
 #  ターゲット依存部のソース
@@ -129,6 +273,29 @@ list(APPEND ASP3_TARGET_C_FILES
     ${TARGETDIR}/target_timer.c
     ${TARGETDIR}/flash_header.S
 )
+
+#
+#  seam では esp_app_desc（segment #0先頭）が要る．Direct Boot では
+#  未参照＝リンクされない（非回帰）．理由は seam_appdesc.c の冒頭コメント．
+#
+if(ASP3_SEAM_BOOT)
+    list(APPEND ASP3_TARGET_C_FILES
+        ${TARGETDIR}/seam_appdesc.c
+    )
+    #
+    #  ★-u が必須：ASP3_TARGET_C_FILES は静的ライブラリ（libasp3.a）へ
+    #  入るため，どこからも参照されない app_desc は**アーカイブメンバごと
+    #  ロードされない**（ldスクリプトの KEEP はロード済みセクションの
+    #  gc を止めるだけで，未ロードのメンバは救えない）。実測：-u 無しでは
+    #  nm に asp3_seam_app_desc が現れず，.flash.appdesc の先頭が rodata に
+    #  なって elf2image が
+    #    「Contents of segment at SHA256 digest offset 0xb0 are not zero」
+    #  で停止した（0xb0 = ファイル先頭0x20 + app_elf_sha256 offset 144）。
+    #
+    list(APPEND ASP3_LINK_OPTIONS
+        -Wl,-u,asp3_seam_app_desc
+    )
+endif()
 
 #
 #  チップ依存部のインクルード（submodule外．docs/c5-port-design.md §2.2）
@@ -202,13 +369,19 @@ if(ESP32C5_WIFI OR ESP32C5_BT)
             "ESP32C5_WIFI=ON was requested, but ${ESP32C5_WIFI_CMAKE_FILE} "
             "was not found. See docs/c5-port-design.md.")
     endif()
+    #  dedup Tier2：esp_shim.c の 3チップ 0-diff 共有コアは common_espidf/wifi/
+    #  esp_shim_core.c に集約（docs/dedup-tier2-plan.md）．縮小した C5 固有
+    #  wifi_v8/esp_shim.c と併せてコンパイルする．
+    get_filename_component(COMMON_ESPIDF ${CMAKE_CURRENT_LIST_DIR}/../common_espidf ABSOLUTE)
     list(APPEND ASP3_INCLUDE_DIRS
         ${ESP32C5_WIFI_SRCDIR}
         ${C3_TARGETDIR}
         ${C3_TARGETDIR}/wifi
+        ${COMMON_ESPIDF}/wifi
     )
     list(APPEND ASP3_CFG_FILES ${C3_TARGETDIR}/wifi/esp_shim.cfg)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${COMMON_ESPIDF}/wifi/esp_shim_core.c
         ${ESP32C5_WIFI_SRCDIR}/esp_shim.c
         #  esp_shim_blobglue.cはWiFi blob（net80211/pp/core）専用の
         #  グルーが大半だが，esp_sleep_pd_config／esp_sleep_clock_config／
@@ -276,6 +449,175 @@ if(ESP32C5_LWIP)
         ${C3_TARGETDIR}/net/port/sys_arch.c
         ${C3_TARGETDIR}/net/netif_esp32c3.c
     )
+endif()
+
+#
+#  esp_rom_set_cpu_ticks_per_us フォールバック（WiFi/BT両OFF時のリンク不可修正）
+#
+#  target_kernel_impl.c の hardware_init_hook が無条件で呼ぶROM関数
+#  esp_rom_set_cpu_ticks_per_us()（実体はROM関数ets_update_cpu_frequency
+#  へのPROVIDEエイリアス．esp32c5.rom.ld＋esp32c5.rom.api.ldが供給）は，
+#  従来 ESP32C5_WIFI/ESP32C5_BT ON時のみesp_wifi_v8.cmake/esp_bt.cmake経由
+#  で-Wl,-T注入されていたため，素の sample1／test_porting（WiFi/BT両OFF）
+#  が未定義参照でリンク不可だった（C3と共通の既存不具合．target.cmake
+#  上部のESP_ROM_SYS.H includeコメント参照——インクルードパスは既に無
+#  条件化済みだったが，リンク側は未修正だった）．WiFi/BT両OFF時に限り
+#  同じ2ファイルを直接注入する（ON時は既にesp_wifi_v8.cmake/esp_bt.cmake
+#  が積むため二重処理を避ける）．
+#
+if(NOT (ESP32C5_WIFI OR ESP32C5_BT))
+    list(APPEND ASP3_LINK_OPTIONS
+        -Wl,-T,${ESP_SUP_DIR}/components/esp_rom/esp32c5/ld/esp32c5.rom.ld
+        -Wl,-T,${ESP_SUP_DIR}/components/esp_rom/esp32c5/ld/esp32c5.rom.api.ld
+    )
+endif()
+
+#
+#  ------------------------------------------------------------------
+#  ASP3_C5_PMU_INIT：stock ESP-IDF の pmu_init() を**そのまま積む**
+#  （.steering/20260716-c3c5c6-esp-idf-supply-migration/
+#    evidence-c5-04-pmu-init-*.md）
+#  ------------------------------------------------------------------
+#
+#  背景（evidence-c5-03 §4 で実機確定）：`pmu_init()` の唯一の呼出し元は
+#  IDFの**app起動層** `esp_system/port/cpu_start.c:566 → esp_rtc_init()
+#  → pmu_init()` であり，2nd-stage bootloader ではない。ASP3は自前起動
+#  なので **ブート方式（Direct Boot／seam）に関係なく pmu_init が走らない**
+#  ——seam A/B で PMU レジスタがビット単位同一だったことが証拠。
+#  ∴ 正しい方向は「ブート方式の変更」ではなく「pmu_init 相当の実行」。
+#
+#  ★方式＝**移植/縮約ではなく stock ソースをそのままコンパイル**する。
+#  供給が esp-idf submodule(v5.5.4) へ全面移行済（evidence-c5-02，
+#  `ninja -t deps` の hal 参照 0）であるため，構造上これが可能になった
+#  ＝供給移行の直接の成果。過去ラウンド（実施35 候補3/4）が採った
+#  「stock実測値の固定定数注入」（`esp32c5_r35_pmu_hp_*_bank_fixed()`）は
+#  eFuse由来のボード固有電圧トリムを他基板へ焼き付ける副作用があり，
+#  かつ実機でrefute済み。本オプションはその**正攻法の置き換え**。
+#
+#  依存（v5.5.4・C5でのコンパイル対象．実測で確定）：
+#    - pmu_init.c   … pmu_hp/lp_system_init_default＋power_domain_force_default
+#                      ＋（POWERON時）esp_ocode_calib_init()
+#    - pmu_param.c  … HP/LP各モードの power/clock/digital/analog/retention
+#                      記述子（`get_act_hp_dbias()` は eFuse から実読み）
+#    - ocode_init.c … esp_ocode_calib_init()の実体
+#    - regi2c_ctrl.c… ocode_init.c の REGI2C_WRITE_MASK 実体
+#  ★CONFIG_ESP_ENABLE_PVT は C5 では **n**（Kconfig:321 `depends on
+#    SOC_PMU_PVT_SUPPORTED`＝C5のsoc_caps.hに当該マクロ無し＝実測）なので
+#    pmu_pvt.c は stock でもコンパイルされない＝本移植でも不要。
+#  ★efuse_hal.c／rtc_clk.c／rtc_time.c／esp_clk.c／esp_clk_tree*.c は
+#    ESP32C5_WIFI/BT 時に esp_wifi_v8.cmake が既に積んでいるため，
+#    二重登録を避けて WiFi/BT 両OFF時のみここで積む。
+#
+#  既定 OFF：実機で非回帰（scan／W1）を確認するまで昇格しない
+#  （C5 Wi-Fi は現状 `esp_shim_modem_icg_init()` 等の自前シムで**動いて
+#  いる**＝本オプションは「動かすため」ではなく「その場しのぎを正攻法へ
+#  置き換え stock 相当の電源状態にするため」のもの。壊さないことが最優先）。
+#
+option(ASP3_C5_PMU_INIT
+    "Run stock ESP-IDF pmu_init() (esp_hw_support/port/esp32c5/pmu_init.c, compiled verbatim) from hardware_init_hook(). Default OFF until hardware non-regression (scan/W1) is confirmed"
+    OFF)
+
+if(ASP3_C5_PMU_INIT)
+    if(NOT ASP3_ESPIDF_SUPPLY)
+        message(FATAL_ERROR
+            "ASP3_C5_PMU_INIT=ON requires ASP3_ESPIDF_SUPPLY=ON "
+            "(pmu_init.c/pmu_param.c are supplied by the esp-idf submodule; "
+            "esp-hal-3rdparty does not ship the esp_hw_support port sources)")
+    endif()
+    #
+    #  ★ESP32C5_WIFI 必須（実測に基づく制限．黙って壊れる構成を作らない）
+    #
+    #  WiFi/BT 両OFF（素の sample1／test_porting）で ON にすると、stock の
+    #  pmu_init 系ソースが要求する土台がまるごと欠ける——実測で確認した
+    #  未解決include＝`soc/rtc.h`（pmu_init.c:22／ocode_init.c:8）・
+    #  `freertos/FreeRTOS.h`（regi2c_ctrl.c:10）・`rom/efuse.h`
+    #  （efuse_ll.h:15）。これらは esp_wifi_v8.cmake が積む include パス群と
+    #  shim の FreeRTOS スタブが供給しており、WiFi無しビルドには存在しない。
+    #  ＝pmu_init は「モデム/RFの電源を立てる」ためのものでWiFi/BT無しでは
+    #  そもそも用途が無いので、**未検証のまま依存ブランチを増やすより
+    #  明示的に弾く**方が安全（BT単体は別途 pre-existing なビルド不良が
+    #  あり本オプションとは無関係＝evidence-c5-04 §6）。
+    #
+    #  ★evidence-c5-05 §6：BT 供給の submodule 移行で **BT 単体ビルドが
+    #  復旧した**ため、evidence-04 §7.3 の「次の一手2＝BT が直れば BT でも
+    #  pmu_init の A/B ができ、既定 ON 昇格の判断材料が揃う」が実行可能に
+    #  なった。esp_bt.cmake も（esp_wifi_v8.cmake と同様に）
+    #  esp_hw_support の include 群と FreeRTOS スタブ（C3 bt/stub/include）を
+    #  供給するため、WiFi と同じ土台が BT 構成でも揃う＝実測でビルド成立を
+    #  確認した上で BT を受理側に加える（WiFi/BT 両OFF は従来どおり弾く）。
+    if(NOT ESP32C5_WIFI AND NOT ESP32C5_BT)
+        message(FATAL_ERROR
+            "ASP3_C5_PMU_INIT=ON currently requires ESP32C5_WIFI=ON or ESP32C5_BT=ON. "
+            "The stock pmu_init/ocode/regi2c sources need the include paths and "
+            "FreeRTOS shim that esp_wifi_v8.cmake / esp_bt.cmake supply (measured "
+            "unresolved includes without either: soc/rtc.h, freertos/FreeRTOS.h, "
+            "rom/efuse.h). "
+            "See .steering/20260716-c3c5c6-esp-idf-supply-migration/"
+            "evidence-c5-04-pmu-init-port.md")
+    endif()
+
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_PMU_INIT)
+
+    list(APPEND ASP3_INCLUDE_DIRS
+        ${ESP_SUP_DIR}/components/esp_hw_support/include        # esp_private/esp_pmu.h, ocode_init.h
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/include   # esp_hw_log.h
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/private_include  # pmu_param.h, pmu_bit_defs.h
+        #  IDF本体の esp_hw_support は `PRIV_INCLUDE_DIRS port/include
+        #  include/esp_private`（CMakeLists.txt:209）で自分の私有ヘッダを
+        #  ディレクトリ名なしで解決する。pmu_init.c:18 の
+        #  `#include "regi2c_ctrl.h"` がこれに当たる（実測：無いと fatal error）。
+        ${ESP_SUP_DIR}/components/esp_hw_support/include/esp_private
+    )
+
+    #  ★PMU_instance() の strong 上書き（stock は weak 定義＝上書き前提の
+    #  拡張点）。stock の PMU_instance() は初期化子つき DRAM_ATTR static を
+    #  返すが，ASP3 の hardware_init_hook() は **.data 初期化より前**に走る
+    #  （start.S:120 → :127 bssクリア → :143 data初期化）ため，そのままだと
+    #  未初期化ポインタで Load access fault になる（実機実測．pmu_instance.c
+    #  の冒頭コメント／evidence-c5-04 §4 参照）。
+    #  ASP3_TARGET_C_FILES 側（libasp3.a）ではなく SYSSVC 側へ置く＝
+    #  stock の weak シンボルより確実に優先させるため。
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${TARGETDIR}/pmu_instance.c
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/pmu_init.c
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/pmu_param.c
+        ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/ocode_init.c
+        ${ESP_SUP_DIR}/components/esp_hw_support/regi2c_ctrl.c
+        #  regi2c_ctrl.c が呼ぶ esp_rom_regi2c_{read,write}[_mask]() は
+        #  **C5ではROMに無い**（esp_rom/esp32c5/Kconfig.soc_caps.in:74
+        #  `ESP_ROM_WITHOUT_REGI2C`＝どの esp32c5.rom*.ld にもシンボルが
+        #  無いことを実測で確認）。stock も esp_rom/CMakeLists.txt:29-33 の
+        #  `if(CONFIG_ESP_ROM_HAS_REGI2C_BUG OR CONFIG_ESP_ROM_WITHOUT_REGI2C)`
+        #  でこのソフト実装パッチを積む＝stock 忠実。
+        ${ESP_SUP_DIR}/components/esp_rom/patches/esp_rom_hp_regi2c_esp32c5.c
+        #  rtc_time.c の rtc_time_get()（ocode_init.c の calibrate_ocode()
+        #  経路が参照．本チップでは実行時に通らないがリンクには要る）が
+        #  参照する。stock も hal/CMakeLists.txt:21 の
+        #  `if(CONFIG_SOC_LP_TIMER_SUPPORTED)` で積む。
+        ${ESP_SUP_DIR}/components/hal/lp_timer_hal.c
+    )
+
+    #  efuse_hal.c／rtc_clk.c／rtc_time.c／esp_clk.c／esp_clk_tree*.c は
+    #  ESP32C5_WIFI 必須（上の FATAL_ERROR）なので esp_wifi_v8.cmake が
+    #  必ず積んでいる＝ここで重ねない（二重登録の回避）。
+endif()
+
+#
+#  ASP3_C5_NO_MODEM_ICG_SHIM（**診断専用**．既定OFF）
+#
+#  `esp_wifi_adapter.c` の `wifi_clock_enable_wrapper()` が呼ぶ
+#  自前シム `esp_shim_modem_icg_init()`（＝PMU HP_ACTIVE の icg_modem コード
+#  ＋MODEM_SYSCON/MODEM_LPCON の ICG ビットマップを叩いて MODEM ブロックを
+#  叩き起こす「その場しのぎ」．実施13）だけを無効化する。
+#  `ASP3_C5_PMU_INIT=ON` と組み合わせ、「stock の pmu_init() がこのシムを
+#  置き換えられるか」を実機で判定するためのもの（evidence-c5-04 §5）。
+#  **1実験1機構**：無効化するのは本シムのみ。
+#
+option(ASP3_C5_NO_MODEM_ICG_SHIM
+    "DIAGNOSTIC ONLY: disable the ad-hoc esp_shim_modem_icg_init() shim, to A/B whether stock pmu_init() replaces it. Default OFF"
+    OFF)
+if(ASP3_C5_NO_MODEM_ICG_SHIM)
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_NO_MODEM_ICG_SHIM)
 endif()
 
 #

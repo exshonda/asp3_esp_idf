@@ -14,6 +14,16 @@
 /*
  *  ESP32-C3 Wi-Fi用lwIP netif実装（ASP3．NO_SYS=0．BSDソケット互換化）
  *
+ *  【重要】本ファイルは3チップ共有＝C3専用ではない．
+ *  ファイル名とディレクトリ（esp32c3_espidf/net/）が"esp32c3"を名乗る
+ *  が，実体はC3／C5／C6の3チップすべてでコンパイルされる：C5／C6の
+ *  target.cmakeが${C3_TARGETDIR}/net/netif_esp32c3.cを直接参照する
+ *  （コピーは存在しない．実測＝ninja -t depsでC5／C6のビルドに本ファイル
+ *  の.objが出現）．⇒C3固有のレジスタ・アドレスに依存する変更を入れて
+ *  はならない（blob API＝esp_wifi_internal_tx/reg_rxcb・esp_read_mac
+ *  のみに依存させる）．名前は歴史的経緯（C3が最初の移植先）．改名は
+ *  ビルドへの波及が大きいため行わない．
+ *
  *  lwIP自身が生成するtcpip_thread（＝cfg生成のNET_TSK．port/
  *  sys_arch.c参照）だけがlwIPコアAPIを直接呼ぶ．
  *    - wifi_rx_cb（Wi-Fiドライバのタスク文脈）はpbuf_alloc/pbuf_take
@@ -30,6 +40,9 @@
 #include <t_syslog.h>
 #include <string.h>
 #include "kernel_cfg.h"
+#ifdef TOPPERS_C3_COLD_DIAG
+#include <sil.h>				/* sil_wrw_mem（真cold W1 マーカ用） */
+#endif
 
 #include "lwip/opt.h"
 #include "lwip/tcpip.h"
@@ -169,6 +182,46 @@ net_ping_result(int ok)
 #ifdef TOPPERS_ESP32C5_NETSTALL_TRACE
 	netstall_trace_ping_result(ok);
 #endif /* TOPPERS_ESP32C5_NETSTALL_TRACE */
+
+#ifdef TOPPERS_C3_COLD_DIAG
+	/*
+	 *  ------------------------------------------------------------------
+	 *  真cold W1 の物証（既定OFF・非回帰．evidence-c3-02）
+	 *  ------------------------------------------------------------------
+	 *
+	 *  ★C3はUARTブリッジを持たず，**コンソールのopen自体がDUTをリセット
+	 *  する**（＝真coldの観測ができない．memory「CDC HAZARD」）。∴W1
+	 *  （GOT IP + ping）の成否も**RTC STOREマーカ直読み**で判定する。
+	 *
+	 *  STORE割当（★本ラウンドで実測した空き．C3のROM rtc.hは STORE1 を
+	 *  RTC_SLOW_CLK cal・STORE4 を XTAL freq と «宣言» しているが，
+	 *  それらを使うのはESP-IDFの rtc_clk であって **ASP3 Direct Boot では
+	 *  誰も走らせない**。実測：真cold起動後に STORE1/STORE4 とも 0 のまま
+	 *  ＝ROMは書かない（一方 STORE5=0x600080BC は 0x13121312 が入る
+	 *  ＝ROMが上書きする既知事実を独立に再確認）。
+	 *
+	 *    STORE4(0x600080B8) = 取得したIPv4アドレス（0 なら未取得）
+	 *    STORE1(0x60008054) = 0x77 << 24 | ping_ok << 8 | ping_ng
+	 *
+	 *  ★SSID/パスワードは**一切マーカに載せない**（混入0を維持）。
+	 */
+	{
+		static uint32_t	c3_ping_ok = 0U;
+		static uint32_t	c3_ping_ng = 0U;
+
+		if (ok) {
+			c3_ping_ok++;
+		}
+		else {
+			c3_ping_ng++;
+		}
+		sil_wrw_mem((void *)0x600080B8U,
+					ip4_addr_get_u32(netif_ip4_addr(&s_netif)));
+		sil_wrw_mem((void *)0x60008054U,
+					0x77000000U | ((c3_ping_ok & 0xFFU) << 8)
+					| (c3_ping_ng & 0xFFU));
+	}
+#endif /* TOPPERS_C3_COLD_DIAG */
 }
 
 void

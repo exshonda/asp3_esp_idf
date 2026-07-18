@@ -27,6 +27,11 @@
  *  一切変更しない（strictly additive．docs/ble-c5c6.md「BLE実施02」）．
  */
 #if defined(TOPPERS_ESP32C3_BT_NIMBLE) || defined(TOPPERS_ESP32C6_BT_NIMBLE) || defined(TOPPERS_ESP32C5_BT_NIMBLE)
+/*  ★dedup Tier2：チップ非依存の中立マクロ．共有コア（common_espidf/wifi/
+    esp_shim_core.c）の配列初期化子は，チップ名を含む TOPPERS_ESP32Cx_BT_NIMBLE
+    ではなく本マクロで NimBLE 拡張分（+4）をガードする（common に
+    #ifdef TOPPERS_ESP32Cx を持ち込まないため．docs/dedup-tier2-plan.md §5）．  */
+#define ESP_SHIM_BT_NIMBLE  1
 #define ESP_SHIM_NUM_SEM    28    /* 24→28：NimBLE分+4 */
 #define ESP_SHIM_NUM_MTX    12    /* 8→12：NimBLE分+4 */
 #define ESP_SHIM_NUM_DTQ    8     /* 4→8：NimBLE eventq分+4 */
@@ -64,6 +69,7 @@
  *  のみ＝blobが使う線はcfg（esp_shim.cfg）に列挙する．
  */
 #define ESP_SHIM_MAX_WIFI_INTNO   15  /* 1〜15をblob用に開放 */
+#define ESP_SHIM_MAX_DEFINH_INTNO 3   /* ★Low#9：esp_shim.cfg が DEF_INH する線数（inthdr_1..3）．これ超の線は静的入口が無い */
 
 /*
  *  cfg（esp_shim.cfg）から参照する関数（実体はesp_shim.c）

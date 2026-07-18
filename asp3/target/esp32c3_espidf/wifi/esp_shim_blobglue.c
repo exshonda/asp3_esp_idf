@@ -30,6 +30,7 @@
 #include <t_syslog.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <sil.h>
 #include "esp_shim.h"
 #include "esp_err.h"
@@ -363,3 +364,76 @@ coex_condition_set(uint32_t type, bool_t dissatisfy)
 {
 	(void) type; (void) dissatisfy;
 }
+
+/*
+ *  ------------------------------------------------------------------
+ *  11. v5.5.4統一（docs/blob-unify-v554.md）：wpa_supplicant/esp_supplicant
+ *      が「blobが実装する想定」で宣言している関数（esp_wifi_driver.h）の
+ *      うち，hal（esp-hal-3rdparty submodule，新しめのNuttX同期スナップ
+ *      ショット）の net80211.a/pp.a には実装されているが，ESP-IDF
+ *      v5.5.4（`~/tools/esp-idf`）の同blobには**存在しない**3関数．
+ *      （実測：riscv-none-elf-nmでhal側libnet80211.aにT定義あり，
+ *      v5.5.4側は3関数ともU/未定義すら無し＝そもそも無い）。
+ *      WPA3互換モード・RSNXE override・PMKキャッシュskip制御という
+ *      比較的新しいwpa_supplicant機能で，hal同梱のwpa_supplicant
+ *      ソース（差し替えていない．hal/asp3_core非編集の禁則によりhal
+ *      配下は不変）はこれを無条件に呼ぶが，v5.5.4のblob世代では
+ *      そもそもこの機能自体が存在しない（older世代）．
+ *      wifi_scanは素のopen scanのみ（WPA関連分岐は実行時に到達しない）
+ *      ため，リンク解決のためのno-op／機能無効化スタブで足りる：
+ *        - esp_wifi_skip_supp_pmkcaching：false（PMKキャッシュを
+ *          スキップしない＝この制御が存在しなかった旧世代の暗黙の
+ *          既定動作と同じ）
+ *        - esp_wifi_sta_get_ie：NULL（override IE無し．呼び出し元
+ *          （wpa.c/esp_wpa3.c）はNULL時は通常のRSN/RSNXE解析へ
+ *          フォールバックする設計）
+ *        - esp_wifi_is_wpa3_compatible_mode_enabled：false（WPA3
+ *          互換モードという概念自体が無かった旧世代のblobと同じ
+ *          挙動＝厳格WPA3のみ）
+ *      いずれも実行時未到達（wifi_scanはSTA接続・AP機能を使わない）
+ *      だが，wpa_supplicantソース全体を積む方針（Wireless.mk踏襲）の
+ *      ためリンク解決だけは必要。プロトタイプはesp_wifi_driver.h
+ *      （wpa_supplicant/esp_supplicant/src．__NuttX__非定義のため
+ *      本ファイルではu8型が見えず素のuint8_tで揃える＝ABI上u8は
+ *      typedef uint8_tのため同一）。
+ *
+ *      ASP3_WIFI_BLOB_V554（esp_wifi.cmake．v5.5.4 blob選択時のみ
+ *      定義）でガード＝hal blob使用時（ASP3_WIFI_BLOB_HAL=ON）は
+ *      hal blob自身がこの2関数を提供する（nm確認済み）ため，本shimを
+ *      二重定義しない。
+ *
+ *      ★esp_wifi_skip_supp_pmkcaching のスタブは撤去した（2026-07-17．
+ *      C6 が先行実施した同一修正の転写）。理由＝上の「v5.5.4のblob世代
+ *      ではそもそもこの機能自体が存在しない」という前提が**実測で誤り**
+ *      だったため：
+ *
+ *        tree                       skip_supp_pmkcaching の定義
+ *        -------------------------  --------------------------
+ *        esp-idf submodule(v5.5.4)  **有り**（T）
+ *        hal(b90b1837)              **有り**（T）
+ *        ~/tools/esp-idf(v5.5.0)    **有り**（T）
+ *        v6.1-beta1                 無し
+ *
+ *      ＝当該シンボルを欠くのは **v6.1系のみ**。∴どの v5.5.x blob を
+ *      選んでもスタブは `multiple definition` になる（本PCの移行前
+ *      既定ビルドが実際にこれでリンク不能だった＝evidence-c3-01 §3）。
+ *      元の前提が正しかったのは，当時 `IDF_V554` が指していた
+ *      **v5.5.4-1169（≡v6.1系）** に対してのみ＝**「v5.5.4」という
+ *      名前の嘘がソースの #if ガードにまで伝播していた**事例。
+ *  ------------------------------------------------------------------
+ */
+#if ASP3_WIFI_BLOB_V554
+uint8_t *
+esp_wifi_sta_get_ie(uint8_t *bssid, uint8_t elem_id)
+{
+	(void) bssid; (void) elem_id;
+	return NULL;
+}
+
+bool
+esp_wifi_is_wpa3_compatible_mode_enabled(uint8_t if_index)
+{
+	(void) if_index;
+	return false;
+}
+#endif /* ASP3_WIFI_BLOB_V554 */

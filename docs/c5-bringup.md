@@ -10598,3 +10598,100 @@ xpack15 で両方成功したため，Espressif `riscv32-esp-elf` 14.2.0/15.2.0 
   ヘルパ。console サブコマンドは pyserial dtr/rts=False 読み取りを実装）。
 - 新規 `docs/c5-toolchain.md`（正典コンパイラ・動作表の正本）。
 - ソース非変更（`asp3/`・`hal/` 不接触）。認証情報は不要（wifi_scan はopen scanのみ）。
+
+## 実施54：★asp3_core共通部をFMP3同等のCLIC対応（出口正規化型）へ移行完了——synthetic mret（実施28）撤去，実機で凍結非再発・wifiタスク起動を実証（`docs/c5-clic-exit-fix-review.md`【決定事項】の実行）
+
+### 背景・目的
+
+`docs/c5-clic-exit-fix-review.md`【決定事項】（2026-07-13ユーザー決定）の
+長期方針を実行：asp3_core共通部（submoduleだが実体はasp3_coreリポジトリ・
+正規に編集可）の割込み出口を，C5チップ層に閉じた「入口解除型」（synthetic
+mret，実施28）から，FMP3（esp32p4/CLIC）と同じ「出口正規化型」へ変更し，
+その後C5チップ層のsynthetic mretを撤去する。目的はASP3/FMP3間の保守コスト
+低減（同一設計＝修正の相互移植が容易）。
+
+### asp3_core側の変更（`arch/riscv_gcc/common/`）
+
+FMP3 `core_support.S:603-616`（idle復帰）・`:677-689`（遅延ディスパッチ）を
+参照実装として，ASP3共通部の同型2経路（`j dispatcher_0`／`j dispatcher`）を
+「mepc設定＋MPP=M＋MPIEクリア＋mret」の素のmretへ変換（`riscv.h`に
+`MSTATUS_MPP_M`追加）。mcause.mpil=0の強制はチップ依存の`irc_end_int`側の
+役割とし（非CLICチップのirc_end_intはmcauseに触れないため無害＝FMP3が
+PolarFire SoCで実証済みの設計），非CLICチップ（C3/C6/polarfire/rp2350）の
+既存挙動は不変。test_portingに割込み出口での遅延ディスパッチ／idle復帰
+ディスパッチを踏む2項目（`isr_delayed_dispatch`／`wake_from_idle`）を追加
+（6項目→8項目．`# 6/6 passed`→`# 8/8 passed`）——旧6項目はこの2経路を
+構造的に検出できなかった（実施28の申し送り）ことへの対応。asp3_core側
+commit `a888d48`（`feat/esp32c6`ブランチ）。
+
+### 検証：非CLIC回帰ゼロ
+
+- QEMU esp32c3：8/8 passed
+- 実機ESP32-C3（`/dev/ttyACM1`）・ESP32-C6（`/dev/ttyACM2`）：いずれも8/8 passed
+- POSIX linux：8/8 passed + ctest 1/1 Passed
+- pico2_riscv（rp2350）・esp32c6：build 0エラー（実機pico2は本セッションで
+  未接続のためbuildのみ）。rp2350チップ層は`irc_end_int`側で「ASP3は
+  mretを通らずにタスクへ戻る経路があるため，優先度スタックのpopをソフト
+  ウェアで行う（MRETEIRQ=0でHWの自動popを抑止）」という既存設計（本チップ
+  依存コメント参照）があり，本変更で2経路がmretを実際に通るようになった
+  影響を精査した：MRETEIRQ=0はirc_end_int（全出口で必ず先に実行）が既に
+  設定済みのため，追加されたmretはMRETEIRQ=0下の標準mret（優先度スタック
+  に無関係）として働くはずだが，**pico2/rp2350実機での実測はできていない
+  （本セッションはボード未接続）＝次回rp2350実機アクセス時に要追加確認**。
+
+### C5チップ層の変更（`asp3/arch/riscv_gcc/esp32c5/chip_support.S`）
+
+`irc_begin_int`のsynthetic mret（実施28実装）を撤去。代わりに`irc_end_int`
+でmcause.mpil(bits23:16)=0を強制（FMP3 `esp32p4/chip_support.S:166-180`と
+同型，マスク`0xFF00FFFF`はRV32 mcauseレイアウト共通）。irc_end_intは
+core_int_entry_2で全出口分岐より必ず先に呼ばれるため，以後どの出口のmret
+（idle復帰・遅延ディスパッチ・通常復帰のいずれも）もmcause.MPIL=0を読み，
+milは一律0へ復帰する。撤去前の設計・弱点検証（§5：mepc/MPIE/MPP整合性・
+フォールト非再発窓・mnxti非互換等）は`docs/c5-clic-exit-fix-review.md`に
+経緯として保存（書き換えない）。
+
+### 実機等価性確認（決定実験＝実施28のPASS基準を再確認）
+
+board=C5#2（`d0:cf:13:f0:c8:94`／`/dev/ttyACM4`）。**C5#1
+（`d0:cf:13:f0:a7:44`／`/dev/ttyACM3`）は本ラウンド開始時点で既に
+board latch状態**（`rst:0x7 TG0_WDT_HPSYS`ループ，`Core0 Saved PC:
+0x40038598`）——反証実験として本変更前のsample1（無改造ビルド）を同ボード
+へ書込んでも同一WDTループを確認＝**本変更由来ではない既知の症状**
+（memory `c5-latched-board-state`）。物理電源再投入が必要＝**親に依頼**
+（usbhub権限拒否のため本セッションでは実施不可）。
+
+C5#2で以下を実測（xpack riscv-none-elf-gcc 15.2.0，usbjtagコンソール）：
+
+1. **test_porting（新規8項目版）＝独立3ブート全て`# 8/8 passed`**
+   （`ok 7 isr_delayed_dispatch`・`ok 8 wake_from_idle`が実施28で凍結して
+   いた2経路そのものを実機で踏み，PASS）。
+2. **wifi_scan（`ESP32C5_WIFI=ON`・hal v8・IDF非依存）＝凍結非再発＋wifi
+   タスク起動を大幅に上回る結果**：`wifi_adapter: set_intr`〜
+   `esp_shim: set_isr`〜`wifi_scan: esp_wifi_start -> 0`〜
+   **`wifi_scan: 20 APs found (err=0)`**（<SSID-EDU>/<SSID-INST>等の実SSID・
+   2.4/5GHz混在）に到達し，以後`RESCAN`が継続（59/60/64 APs等）して
+   割込み配送が途切れず，WDT/panicなし。実施28の決定実験(i)（72ms凍結の
+   消滅）・(ii)（wifiタスク起動）の基準を実測で満たす（(iii)PHY較正
+   ハングは実施28で「凍結と独立」と確定済みの別問題であり，本ラウンドの
+   結果はこれが解消済みであることも示す——ただし較正ハング自体の原因
+   究明は本ラウンドの対象外）。
+
+### 判定
+
+**等価性確認PASS**。CLIC実機（C5）で出口正規化型＋synthetic mret撤去の
+組合せが実施28のPASS基準を満たし，かつ非CLIC実機（C3/C6）・QEMU（C3）・
+POSIXで8/8回帰ゼロを確認したため，本移行は達成（`docs/
+c5-clic-exit-fix-review.md`【決定事項】完了）。rp2350実機のみ未確認
+（次回申し送り）。
+
+### 変更ファイル（実施54）
+
+- asp3_core（submodule，`feat/esp32c6`ブランチ，commit `a888d48`）：
+  `arch/riscv_gcc/common/core_support.S`・`riscv.h`（出口正規化2経路）・
+  `test/porting/test_porting.{c,cfg}`・`test_porting_cfg.h`・`README.md`
+  （項目7・8追加）・`CMakeLists.txt`（ctest正規表現）・`DIVERGENCE_MAP.md`・
+  `docs/dev/porting-test.md`・`docs/dev/README.md`（経緯追記）。
+- `asp3/arch/riscv_gcc/esp32c5/chip_support.S`：synthetic mret撤去＋
+  irc_end_intへのmcause.mpil=0追加＋ファイル冒頭コメント更新。
+- `docs/c5-bringup.md`：本節（実施54）。
+- submodule bump：`asp3/asp3_core` ef1f1c8→a888d48（本コミットで反映）。

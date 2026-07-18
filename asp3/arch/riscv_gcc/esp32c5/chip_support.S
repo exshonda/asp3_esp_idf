@@ -81,8 +81,27 @@
  *    の真因。なおtest_porting(6/6 PASS)はビジーポーリング構造のため
  *    この経路（割込みからの遅延ディスパッチ／wake-from-idle）を一度も
  *    通らず，凍結を検出できていなかった。
- *  - 対策＝irc_begin_int内のsynthetic mretによるmilの即時降格
- *    （実施28で実装。詳細は当該コード のコメント参照）。
+ *  - 対策（実施28〜．暫定）＝irc_begin_int内のsynthetic mretによる
+ *    milの即時降格（chip層に閉じた入口解除型．詳細はdocs/
+ *    c5-clic-exit-fix-review.md §4参照）。
+ *
+ *  ■ ★2026-07-15：恒久対策へ移行＝FMP3と同じ「出口正規化型」
+ *  上記synthetic mretはchip層に閉じた「入口解除」型の対処だったが，
+ *  ASP3/FMP3間のメンテコスト低減のため，asp3_core共通部
+ *  （arch/riscv_gcc/common/core_support.S）側の(a)(b)2経路を
+ *  FMP3同様「mepc設定＋MPP=M＋MPIEクリア＋mret」の素のmretへ変換
+ *  （asp3_core commit参照．FMP3 esp32p4/core_support.S:603-616／
+ *  677-689が参照実装）。これに伴い，本ポートのsynthetic mretは不要に
+ *  なったため撤去し，代わりにirc_end_int側でmcause.mpil(bits23:16)
+ *  =0を強制する（FMP3 esp32p4/chip_support.S:166-180と同型）。
+ *  irc_end_intは全出口分岐より前（core_int_entry_2）で必ず1回呼ばれる
+ *  ため，以後どの出口のmretが読むmcause.MPILも0＝milは常に0へ復帰する。
+ *  「(a)(b)以外の出口（dispatch_r／start_r．タスクコンテキストからの
+ *  自発的dispatch()で到達）はmretを一度も経由しない」という実施28の
+ *  分析自体は変わらないが，(a)(b)自身がmret化されたことで，そこに
+ *  到達する前に当該トラップのmilは既に片付いている＝どの経路へ続いても
+ *  安全（docs/c5-clic-exit-fix-review.md §6「B案」・asp3_esp_idf/
+ *  docs/c5-bringup.md該当実施を参照）。
  */
 
 #define TOPPERS_MACRO_ONLY
@@ -151,17 +170,18 @@ ALABEL(irc_begin_int)
 #ifdef ESP32C5_CLIC_DEBUG_RING
     /*
      *  【診断用（既定無効）．実施28で追加，実施33でsynthetic mretの
-     *  前へ移動（docs/c5-clic-exit-fix-review.md §5-#8指摘の反映）】
+     *  前へ移動．2026-07-15：synthetic mret撤去に伴い当該コメントの
+     *  「demote前」の前提は消滅したが，記録内容・位置とも従来のまま
+     *  有効（本関数の入口＝割込み受付直後の生の状態を記録する診断で
+     *  あることに変わりはない）】
      *  割込み受付リングバッファ記録（begin側）。ASP3_EXTRA_COMPILE_DEFS=
      *  ESP32C5_CLIC_DEBUG_RINGで有効化し，JTAGでc5dbg_ring/c5dbg_idxを
      *  回収して解析する（回収スクリプトの例はdocs/c5-bringup.md実施28
      *  参照）。mcause（exccode=CLIC線番号，MPIL[23:16]=受付直前のmil＝
-     *  直前の割込み出口後のmil値），mepc（割込まれた地点．synthetic
-     *  mretのmepc上書き前なので実施28時点の「常にdemoteラベル」問題は
-     *  解消済み），mintstatus（synthetic mretによる降格前＝受付直後の
-     *  昇格後の値），hrtcntを記録する。t4〜t6はcore_int_entryが保存済み
-     *  のため自由に使える（a0/a1/t0〜t3は後続のsynthetic mret・ハンドラ
-     *  アドレス取得で引き続き使うため触らない）。
+     *  直前の割込み出口後のmil値），mepc（割込まれた地点），mintstatus
+     *  （受付直後の昇格後の値），hrtcntを記録する。t4〜t6はcore_int_entry
+     *  が保存済みのため自由に使える（a0/a1/t0〜t3は後続のハンドラアドレス
+     *  取得で引き続き使うため触らない）。
      */
     la   t4, c5dbg_idx
     lw   t5, 0(t4)
@@ -175,7 +195,7 @@ ALABEL(irc_begin_int)
     sw   t6, 0(t5)
     csrr t6, mepc
     sw   t6, 4(t5)
-    csrr t6, 0xFB1         /* mintstatus（降格前） */
+    csrr t6, 0xFB1         /* mintstatus（受付直後） */
     sw   t6, 8(t5)
     la   t6, _kernel_current_hrtcnt
     lw   t6, 0(t6)
@@ -183,67 +203,19 @@ ALABEL(irc_begin_int)
 #endif /* ESP32C5_CLIC_DEBUG_RING */
 
     /*
-     *  mintstatus.milの即時降格（synthetic mret）【実施28で追加】
-     *
-     *  CLIC（mnlbits=3）は割込み受付時にハードウェアがmintstatus.milを
-     *  受け付けた割込みのCTLレベル（本符号化では0x5f等）へ自動昇格し，
-     *  mret（mcause.MPILからの復元）でしか降格できない。一方ASP3共通部
-     *  （core_support.S）の割込み出口にはmretを経由しない経路が2つある
-     *  （idle復帰の`j dispatcher_0`と，dispatcher経由で切替先タスクの
-     *  TCB_pc＝dispatch_r/start_rへ`jr`する遅延ディスパッチ）。そこを
-     *  通るとmilが昇格されたまま固着し，同レベル以下＝本ポートの全割込み
-     *  が永久ブロックされる（実施27/28実測：wifi_scan冷間ブートで起動後
-     *  約72ms＝最初のwake-from-idleのdispatch_r復帰で凍結2/2。25ラウンド
-     *  追跡した「PHY較正ハング」の真因）。
-     *
-     *  対策として，mintthresh昇格の直後にここでmretを1回実行し，milを
-     *  受付前のレベル（受付時にハードウェアがmcause.MPILへ保存済み．
-     *  無変更のまま使う）へ即時降格する。以後は割込み出口がどの経路を
-     *  通ってもmilは昇格されたまま残らない。同一優先度以下のブロックは
-     *  直前に昇格したmintthreshが担う（C6のPLIC_MX threshと同じ意味論）
-     *  ため，milは実質常時ベースレベルに保たれ二重マスクが解消される。
-     *
-     *  mretの副作用の整合性：
-     *   - pc←mepc：直後の継続点ラベルを書いてから実行する。受付時の
-     *     mepc（割込まれた地点）はcore_int_entryが既にスタックへ保存済み
-     *     （本関数はjal呼出しのため保存後にしか到達しない）で破壊可。
-     *   - mstatus.MIE←MPIE：受付時のHW動作でMPIE=1（割込み許可中でしか
-     *     受け付けないため）だが，ここはCPUロック相当（MIE=0）を維持す
-     *     べき区間のため，事前にMPIEを0にしてからmretする（mret後も
-     *     MIE=0のまま．MIEはcore_int_entry側のunlock_cpuが再許可する）。
-     *     MPIE自体は次のトラップ受付時にHWがMIEから再設定するため，
-     *     mretがMPIE←1とすることの影響はない（is_kernel_exception_asm
-     *     のMPIE参照も各トラップ入口でのHW設定値を見る）。
-     *   - 特権モード←mstatus.MPP：受付時のHW設定＝M（3）のためMを維持。
-     *   - 多重割込み：この区間はMIE=0のためプリエンプト不可＝mcause／
-     *     mepcがこのシーケンス中に書き換わることはない。より高優先度の
-     *     割込みがハンドラ本体（unlock後）で受け付けられた場合も，その
-     *     入口で同様に即時降格されるため整合する。
+     *  【2026-07-15撤去】mintstatus.milの即時降格（synthetic mret，
+     *  実施28で追加）はここに存在したが，asp3_core共通部
+     *  （core_support.S）側の出口正規化（idle復帰／遅延ディスパッチの
+     *  2経路を素のmret経由へ変換）により不要になったため撤去した。
+     *  milの降格は，以後どの出口が実行するmretも共通してirc_end_int
+     *  （本ファイル下方）が強制するmcause.mpil=0を読むことで一律に
+     *  達成される（FMP3 esp32p4方式．詳細はirc_end_intのコメント，
+     *  ファイル冒頭コメント「2026-07-15：恒久対策へ移行」，
+     *  docs/c5-clic-exit-fix-review.md §6を参照）。撤去前の設計・
+     *  弱点検証（mepc/MPIE/MPP整合性・フォールト非再発窓・mnxti
+     *  非互換等）はdocs/c5-clic-exit-fix-review.md §5に記録済み
+     *  （経緯保存のためレビュー文書側は書き換えない）。
      */
-    /*
-     *  【保守上の制約，docs/c5-clic-exit-fix-review.md §5-#6/#4/#10】
-     *   - 「HW受付〜mret」の本区間（`csrr mcause`から直下の`mret`まで）は
-     *     MIE=0のため割込みではプリエンプトされないが，同期例外（フォー
-     *     ルト）はMIE=0でもトラップし，その時点のmilをmcause.MPILへ
-     *     書いてしまう＝mil固着バグの静かな再発条件になる。この区間へ
-     *     フォールトし得る命令を追加してはならない（現状はレジスタ操作
-     *     とCLIC_INT_CTRL_REGへのlbuのみ＝M-mode/PMPロック無しのDirect
-     *     Bootでは常時アクセス可，実機長時間動作で実害なしを確認済み）。
-     *   - 本ポートはmcauseをスタックに保存/復元しない（core_int_entry_5
-     *     はmepc/mstatusのみ復元）。これが正当なのは「受付時は常にmil≡0
-     *     （＝mcause.MPIL≡0）」という本synthetic mret方式の不変量に
-     *     依存しているため——この方式を外す場合はmcauseの保存/復元も
-     *     同時に追加する必要がある。
-     *   - CLICのmnxti CSR（テールチェイン最適化）はアクセス自体がmilを
-     *     再昇格する副作用を持つため，本方式とは非互換。mnxtiは本ポート
-     *     未使用（今後も導入する場合は本方式の見直しが必要）。
-     */
-    la   t1, irc_begin_int_demote
-    csrw mepc, t1
-    li   t1, MSTATUS_MPIE
-    csrc mstatus, t1       /* MPIE=0：mret後もMIE=0（CPUロック相当）を維持 */
-    mret                   /* mil ← mcause.MPIL（受付前レベル）へ降格 */
-ALABEL(irc_begin_int_demote)
 
     /*
      *  割込みハンドラアドレスの取得
@@ -295,6 +267,29 @@ ALABEL(irc_end_int)
 1:
     sw   t6, 28(t5)
 #endif /* ESP32C5_CLIC_DEBUG_RING */
+    /*
+     *  【2026-07-15追加】mcause.mpil(bits23:16)=0を強制する（FMP3
+     *  esp32p4/chip_support.S:166-180と同型）。
+     *
+     *  本関数（irc_end_int）は，共通部core_int_entry_2（core_support.S）
+     *  でどの出口分岐（通常mret復帰／idle復帰／遅延ディスパッチ）よりも
+     *  必ず先に1回呼ばれる。asp3_core共通部側の出口正規化（2026-07-15）
+     *  で，idle復帰・遅延ディスパッチの2経路も素のmret経由になったため，
+     *  ここでmcause.mpilを0にしておけば，以後どの経路が実行するmretも
+     *  「mcause.MPILから復元」で必ずmil=0へ降格する。同一優先度以下の
+     *  ブロックは直前に昇格したmintthreshが担う（本ファイル冒頭コメント
+     *  参照）ため，mil=0にしても保護意味論は不変。
+     *
+     *  0xFF00FFFF はRV32のmcauseレイアウト共通のマスク（bit31=Interrupt，
+     *  bits23:16=mpil，bits11:0=exccode。C5固有ではない標準CLICレイアウト
+     *  のためFMP3 esp32p4と同一マスクを使う）。t0/t1はcaller-savedのため
+     *  破壊してよい。
+     */
+    csrr t0, mcause
+    li   t1, 0xFF00FFFF
+    and  t0, t0, t1
+    csrw mcause, t0
+
     /*
      *  割込み前の優先度マスク（mintthresh）を復元する
      */

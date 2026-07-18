@@ -192,4 +192,15 @@
 #define CONFIG_BT_NIMBLE_HS_PVCY 1
 #endif
 
+/*
+ *  CONFIG_BT_NIMBLE_SM_SIGN_CNT（config監査 §3.11.2/§8）：ESP-IDF v6.1 Kconfig
+ *  既定 y に対し全チップ変種で未定義＝MYNEWT_VAL(BLE_SM_SIGN_CNT)=0 に fallback
+ *  していた «PVCY 型» の共通欠落（chip 横断の共通欠落のため chip 間 diff では
+ *  見えない）．有効化で ATT Signed Write の sign-counter replay 保護（受信：
+ *  ble_att_svr.c:2548 の ble_sm_incr_peer_sign_counter，送信 API：ble_sm.c:2721
+ *  の ble_sm_incr_our_sign_counter）が働く．マクロは #if 文脈のみで使用
+ *  （配列サイズ等なし＝定義は安全），bond/接続そのものには無影響．
+ */
+#define CONFIG_BT_NIMBLE_SM_SIGN_CNT 1
+
 #endif /* TOPPERS_BT_NIMBLE_CONFIG_H */
