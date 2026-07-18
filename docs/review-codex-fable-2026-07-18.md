@@ -16,12 +16,12 @@ apps）。ベンダ submodule（esp-idf/hal/lwip/asp3_core）は送信/レビュ
 | 1 | Fable#2 | C6 `wifi/esp_shim.c:1481` 「実施59」診断が無条件で intno==1 割込み毎に MAC reg 読み+RTC 書き（C3 はガード・C5 は無し） | 真 | 現行(C6) | ✅ 修正 `1de29c7` |
 | 2 | Fable#5 | C3 `wifi/esp_wifi_adapter.c` slowclk_cal が「STORE1」称し STORE4(`0x600080B8`) 誤読／BT診断が STORE1 破壊 | 真(番地) | 現行だがマスク | ✅ 修正 `1de29c7` |
 | 3 | Codex#2 + Fable#1 | タイマリスト無ロック走査（Wi-Fi `shim_timer_find`／BT `bt_timer_task`）→ UAF・再arm取りこぼし・int64 torn read | 真 | 潜在(負荷時) | ✅ 修正 `1de29c7` |
-| 4 | Codex#1=Fable#4 | FromISR 取得系（`take_from_isr`/`ReceiveFromISR`/`ref_dtq`）が `twai_sem` 等 task 専用へ落ち ISR で必ず E_CTX 失敗 | 真(構造) | 潜在(blob依存) | ⏸ 保留（下記） |
-| 5 | Fable#3 | タイマ起床 `sig_sem` が critical 内 E_CTX で消え、give/queue の保留救済がタイマ未適用 | 真(構造) | 潜在 | ⏸ 保留 |
-| 6 | Fable#6 | セマフォ delete/再利用で `shim_sem_pend` 未清算 → 再利用先へ亡霊 give | 真(構造) | 潜在(deinit/reinit) | ⏸ 保留 |
+| 4 | Codex#1=Fable#4 | FromISR 取得系（`take_from_isr`/`ReceiveFromISR`/`ref_dtq`）が `twai_sem` 等 task 専用へ落ち ISR で必ず E_CTX 失敗 | 真(構造) | 潜在(blob依存) | ✅ 計装+明文化 `0867aba` |
+| 5 | Fable#3 | タイマ起床 `sig_sem` が critical 内 E_CTX で消え、give/queue の保留救済がタイマ未適用 | 真(構造) | 潜在 | ✅ 修正 `0867aba` |
+| 6 | Fable#6 | セマフォ delete/再利用で `shim_sem_pend` 未清算 → 再利用先へ亡霊 give | 真(構造) | 潜在(deinit/reinit) | ✅ 修正 `0867aba` |
 | 7 | Codex#5 | C5 `wifi_v8/esp_wifi_adapter.c` LPCON=`0x7`(代入) が bit3(LP_TIMER_EN=BT正当) 破壊。C6 は `\|=` 済 | 真 | 潜在(C5 WiFi+BT共存) | ✅ 修正 `1de29c7` |
-| 8 | Codex#4 | プール外全タスクが単一 `shim_main_thread_sem` 共有 → 多タスクで esp_wifi 同期化け | 真(構造) | 潜在(多タスク) | ⏸ 保留（要設計） |
-| 9 | Fable#7 | queue `sem_debt` 窓でブロッキング送信が「空き無し」失敗 | 妥当 | 潜在(高負荷) | ⏸ 保留（要設計） |
+| 8 | Codex#4 | プール外全タスクが単一 `shim_main_thread_sem` 共有 → 多タスクで esp_wifi 同期化け | 真(構造) | 潜在(多タスク) | ⏸ 報告のみ（下記） |
+| 9 | Fable#7 | queue `sem_debt` 窓でブロッキング送信が「空き無し」失敗 | 妥当 | 潜在(高負荷) | ⏸ 報告のみ（下記） |
 | — | **Codex#3** | `sys_arch_sem_wait/mbox_fetch` が `1U` 固定 → lwIP タイマ399msドリフト | **✗ 誤検出** | — | 棄却 |
 
 Fable Low 9件（消し忘れ診断・syslog dangling ポインタ・C5 に残る C3 番地診断・CLIC 内部線0-15
@@ -51,24 +51,45 @@ Codex は「lwIP 契約=成功時に経過ms を返す」と主張。しかし l
   整合のため同修正。
 - #7 `= 0x7` → `\|= 0x7`（C6 evidence-c6-13 と整合）。
 
-## 保留した findings（#4/#5/#6/#8/#9）と «なぜ保留か»
+## 適用した修正 第2弾（commit `0867aba`）＝ #4/#5/#6
 
-いずれも潜在＋（blob 依存 or bond-critical 機構 or 要設計判断）で、投機的に手を入れると
-D-2c/D-2d の bond 修正等を壊すリスクがある。プロジェクトの調査規律
-（`memory/feedback_hardware_investigation_rigor.md`：未確認を確認扱いしない・反証を先に）に従い、
-実機での反証を挟んでから着手する。
+第1弾（`1de29c7`）に続き #4/#5/#6 を実装（#5/#6 は Opus サブエージェントで実装→親が diff
+レビュー＋独立ビルド再検証の上コミット）。全チップ wifi/BT で実コンパイル・リンク確認済み。
+実機/QEMU 動作確認は未実施（潜在系＝要実機反証）。
 
 - **#4 FromISR 取得系** — ★**Codex の提案「`pol_sem` を使え」はカーネルで裏取りした結果 _無効_**：
-  `pol_sem` も `CHECK_TSKCTX_UNL`＝`sense_context()`（ISR で失敗）で弾かれる **タスク文脈専用**
-  （`asp3_core/kernel/semaphore.c` / `check.h`）。**ASP3 には ISR から使えるセマフォ非ブロック取得の
-  サービスコールが存在しない**。真の修正は ISR 経路の再設計。blob が本当に ISR からこれを呼ぶかは
-  未確認（両レビュアとも留保）。→ **まず到達性を計装で確認してから**（`sense_context()` を踏んだら
-  記録）着手すべき。安直な pol_sem 置換は誤修正。
-- **#5 タイマ起床 sig_sem の E_CTX 救済** / **#6 セマフォ delete/再利用の亡霊 give** — 真の機構欠陥
-  だが、D-2c/D-2d の bond-critical な «E_CTX 保留救済機構»（`esp_shim_exit_critical` の
-  `queue_flush_pending`/`sem_flush_pending`）とセマフォプール会計に手を入れる必要があり回帰リスクが高い。
-- **#8 thread sem 共有** / **#9 queue sem_debt** — 現構成で発火しない前提条件（多タスク esp_wifi /
-  高負荷）。設計判断が要る。
+  `pol_sem` も `CHECK_TSKCTX_UNL`＝`sense_context()`（ISR で失敗）で弾かれる **タスク文脈専用**。
+  **ASP3 には ISR から使えるセマフォ非ブロック取得のサービスコールが存在しない**。真ISRからの
+  take は E_CTX 失敗を返すしかなく、give 側と違い «取得» は延期不能で保留救済もできない。
+  ⇒ `esp_shim_sem_take` で E_CTX を検出し `shim_sem_take_ectx_total` で計数（give 側
+  `shim_sem_ectx_total` と対称）＝blob が実際に ISR から take するかを実機で観測可能化
+  （0 のまま＝死経路・無害／非0＝要再設計）。coex `take_from_isr` ラッパにも制約を明記。
+- **#5 タイマ起床 sig_sem の critical外必達 救済** — D-2d の give 救済と同型に、E_CTX の起床要求を
+  semID で保留（`esp_shim_signal_or_pend`）し `esp_shim_exit_critical` で精算
+  （`esp_shim_wakeup_flush_pending`）。★真ISRからは sig_sem 自体が成立（CHECK_UNL）し E_CTX に
+  ならないため救済対象は critical 由来のみ＝漏れ無し。rescue 実体は wifi/esp_shim.c、BT からは
+  共有 esp_shim.h 経由で呼ぶ（C5/C6 は専用 esp_shim.h を持たず C3 のを共有＝target.cmake）。
+- **#6 セマフォ delete/再利用の亡霊 give** — `esp_shim_sem_delete`/`_create` で当該スロットの
+  `shim_sem_pend[i]` を清算（`_total` から先に引いてから 0＝アンダーフロー回避）。
+
+## 報告のみ（#8/#9）＝実装せず・要実機反証
+
+現構成で発火しない前提条件（多タスク esp_wifi / 高負荷）＋修正はいずれも設計判断／bond-critical
+機構への介入を伴うため、**まず #4 同型の計装で到達性を確認してから着手**が安全（Opus サブエージェント
+の分析結論と一致）。
+
+- **#8 thread sem 共有**：`esp_shim_task_get_current()` がプール外タスクに一律 sentinel
+  `&shim_main_thread_sem` を返し、`esp_shim_thread_semphr_get()` が単一共有 sem を返す。複数プール外
+  タスクが esp_wifi 同期 API を叩くと give/take を奪い合う。**現デモは単一タスク＝発火不能**。
+  最小修正案＝プール外 tid→専用 thread_sem の小側テーブル。リスク＝共有 CRE_SEM プール枯渇
+  （寸法＝プール予算の設計判断）。推奨＝「2つ目の相異なるプール外 tid が sentinel に解決した」瞬間を
+  計数する計装を先に入れて実機確認。
+- **#9 queue sem_debt**：ISR/E_CTX 送信がトークン未消費でスロット確保し `sem_debt++`。不変式
+  `token = free_slots + sem_debt`。`free_slots==0 && sem_debt>0` で task 側 `twai_sem` が成功→
+  `slot_alloc` 失敗→`return(0)`＝portMAX_DELAY のブロッキング契約違反（near-full×ISR-debt×task送信の
+  三重条件＝高負荷限定）。案A＝token 戻して残 tmo で再ブロック（過剰待ち懸念）／案B＝debt 相殺で
+  token を実空きに再設計（D-2c bond-critical 会計の再設計＝回帰大）。推奨＝「token 取得済みだが
+  slot_alloc 失敗」を計数する診断を先に入れて窓が踏まれるか観測してから。
 
 ## 手順メモ（再利用可）
 
