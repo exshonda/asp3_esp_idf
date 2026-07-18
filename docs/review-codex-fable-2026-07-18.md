@@ -24,9 +24,11 @@ apps）。ベンダ submodule（esp-idf/hal/lwip/asp3_core）は送信/レビュ
 | 9 | Fable#7 | queue `sem_debt` 窓でブロッキング送信が「空き無し」失敗 | 妥当 | 潜在(高負荷) | ✅ アサート計装 `ac0f319` |
 | — | **Codex#3** | `sys_arch_sem_wait/mbox_fetch` が `1U` 固定 → lwIP タイマ399msドリフト | **✗ 誤検出** | — | 棄却 |
 
-Fable Low 9件（消し忘れ診断・syslog dangling ポインタ・C5 に残る C3 番地診断・CLIC 内部線0-15
-未初期化・トレース重複で multiple-definition・TMO オーバフロー busy-spin・SYSTIMER torn read・
-タスクハンドル型混在・DEF_INH 線カバレッジ）は妥当だが優先度低・未着手。
+Fable Low 9件（全て潜在・確認済み）。**P1（防御的4件）＝`b2ec3e1` で対応**：TMO オーバフロー
+busy-spin（clamp）・トレース重複 multiple-definition（cmake FATAL）・DEF_INH 線カバレッジ
+（set_isr 警告）・C5 に残る C3 番地診断（除去）。**P2/P3（5件）＝据え置き**：タスクハンドル型混在
+（#8型・NimBLE 未到達）・syslog %s dangling（captures はクリーン＝非顕在・要実測）・SYSTIMER
+torn read（極稀）・exit_critical 順序逆転（bond-critical に触る＝リスク）・CLIC 内部線0-15（ROM 挙動が推測）。
 
 ## 誤検出の根拠（Codex#3 棄却）
 
