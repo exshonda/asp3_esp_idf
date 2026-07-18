@@ -75,10 +75,13 @@ ER
 esp_shim_svc_perror(const char *file, int_t line, const char *expr, ER ercd)
 {
 	if (ercd < 0 && ercd != E_CTX && ercd != E_TMOUT && ercd != E_QOVR) {
-		t_perror(LOG_ERROR, file, line, expr, ercd);
+		/*  ★順序は元実装どおり «g_svc_err_* 更新→t_perror»（Tier2 review で
+		    順序反転が指摘されたので復元）．コンソール不安定な C5 で app が
+		    RTC STORE へミラー回収するため，回収用グローバルを先に確定する．  */
 		g_svc_err_last = (int32_t) ercd;
 		g_svc_err_line = (int32_t) line;
 		g_svc_err_count++;
+		t_perror(LOG_ERROR, file, line, expr, ercd);
 	}
 	return(ercd);
 }
