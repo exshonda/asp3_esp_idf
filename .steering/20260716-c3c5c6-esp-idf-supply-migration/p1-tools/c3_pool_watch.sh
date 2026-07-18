@@ -25,10 +25,10 @@ GDISC=$(sym g_gap_disc_count)
 
 # P1-3b watchdog のカウンタ（WD=ON ビルドのときだけ存在）
 WDP=$(sym g_wd_probe_count); WDRC=$(sym g_wd_probe_last_rc)
-WDT=$(sym g_wd_term_count);  WDTRC=$(sym g_wd_term_last_rc); WDRSSI=$(sym g_wd_last_rssi)
+WDT=$(sym g_wd_term_count);  WDTRC=$(sym g_wd_term_last_rc); WDRSSI=$(sym g_wd_last_rssi); WDRST=$(sym g_wd_reset_count)
 WDARGS=()
 if [ -n "$WDP" ]; then
-  WDARGS=( -c "mdw $WDP 1" -c "mdw $WDRC 1" -c "mdw $WDT 1" -c "mdw $WDTRC 1" -c "mdw $WDRSSI 1" )
+  WDARGS=( -c "mdw $WDP 1" -c "mdw $WDRC 1" -c "mdw $WDT 1" -c "mdw $WDTRC 1" -c "mdw $WDRSSI 1" -c "mdw $WDRST 1" )
 fi
 
 OUT=$("$OOCD_DIR/bin/openocd" -s "$OOCD_DIR/share/openocd/scripts" \
@@ -58,7 +58,7 @@ if len(w) >= 11:
     if len(w) >= 16:
         def s32(v): return v - (1 << 32) if v >> 31 else v
         line += (f"\n        WD: probe={w[11]} last_rc={s32(w[12])} term={w[13]} "
-                 f"term_rc={s32(w[14])} rssi={s32(w[15])}")
+                 f"term_rc={s32(w[14])} rssi={s32(w[15])} reset={w[16] if len(w)>16 else 0}")
     print(line)
 else:
     print(f"[{lab}] 読み出し失敗 (words={len(w)})")
