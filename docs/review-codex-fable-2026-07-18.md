@@ -21,7 +21,7 @@ apps）。ベンダ submodule（esp-idf/hal/lwip/asp3_core）は送信/レビュ
 | 6 | Fable#6 | セマフォ delete/再利用で `shim_sem_pend` 未清算 → 再利用先へ亡霊 give | 真(構造) | 潜在(deinit/reinit) | ✅ 修正 `0867aba` |
 | 7 | Codex#5 | C5 `wifi_v8/esp_wifi_adapter.c` LPCON=`0x7`(代入) が bit3(LP_TIMER_EN=BT正当) 破壊。C6 は `\|=` 済 | 真 | 潜在(C5 WiFi+BT共存) | ✅ 修正 `1de29c7` |
 | 8 | Codex#4 | プール外全タスクが単一 `shim_main_thread_sem` 共有 → 多タスクで esp_wifi 同期化け | 真(構造) | 潜在(多タスク) | ✅ アサート計装 `8f8b0a2` |
-| 9 | Fable#7 | queue `sem_debt` 窓でブロッキング送信が「空き無し」失敗 | 妥当 | 潜在(高負荷) | ⏸ 報告のみ（下記） |
+| 9 | Fable#7 | queue `sem_debt` 窓でブロッキング送信が「空き無し」失敗 | 妥当 | 潜在(高負荷) | ✅ アサート計装 `ac0f319` |
 | — | **Codex#3** | `sys_arch_sem_wait/mbox_fetch` が `1U` 固定 → lwIP タイマ399msドリフト | **✗ 誤検出** | — | 棄却 |
 
 Fable Low 9件（消し忘れ診断・syslog dangling ポインタ・C5 に残る C3 番地診断・CLIC 内部線0-15
@@ -85,12 +85,13 @@ Codex は「lwIP 契約=成功時に経過ms を返す」と主張。しかし l
   **「2つ目の相異なるプール外 tid が sentinel に解決した」瞬間を検出**して `shim_main_thread_conflict++`＋
   `LOG_EMERG`（halt はしない）＝**沈黙化けを «大声化»**。複数タスク WiFi 制御を設計するなら本当の
   per-tid sem 化を検討する指標にもなる。C3/C5/C6。
-- **#9 queue sem_debt**：ISR/E_CTX 送信がトークン未消費でスロット確保し `sem_debt++`。不変式
-  `token = free_slots + sem_debt`。`free_slots==0 && sem_debt>0` で task 側 `twai_sem` が成功→
-  `slot_alloc` 失敗→`return(0)`＝portMAX_DELAY のブロッキング契約違反（near-full×ISR-debt×task送信の
-  三重条件＝高負荷限定）。案A＝token 戻して残 tmo で再ブロック（過剰待ち懸念）／案B＝debt 相殺で
-  token を実空きに再設計（D-2c bond-critical 会計の再設計＝回帰大）。推奨＝「token 取得済みだが
-  slot_alloc 失敗」を計数する診断を先に入れて窓が踏まれるか観測してから。
+- **#9 queue sem_debt**（★**計装実装済み `ac0f319`**）：ISR/E_CTX 送信がトークン未消費でスロット確保し
+  `sem_debt++`。不変式 `token = free_slots + sem_debt`。`free_slots==0 && sem_debt>0` で task 側 `twai_sem`
+  が成功→`slot_alloc` 失敗→`return(0)`＝portMAX_DELAY のブロッキング契約違反（near-full×ISR-debt×task送信
+  の三重条件＝高負荷限定）。真の修正（案A=残 tmo で再ブロック＝過剰待ち懸念／案B=debt 相殺で token を
+  実空きに再設計＝D-2c bond-critical 会計の再設計＝回帰大）は見送り、**当該パスで `shim_que_debt_conflict++`
+  ＋ブロッキング時のみ `LOG_WARNING`**（戻り値/挙動は不変=非回帰）。実機高負荷で本窓が踏まれるか
+  （カウンタ非0）を観測可能にする指標＝非0 なら案A の実装を評価。C3/C5/C6。
 
 ## 手順メモ（再利用可）
 
