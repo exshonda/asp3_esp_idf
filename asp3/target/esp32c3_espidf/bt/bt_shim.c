@@ -164,7 +164,10 @@ timer_start(struct esp_timer *t, uint64_t timeout_us, uint64_t period_us)
 	t->period_us = period_us;
 	t->active = true;
 	BT_UNLOCK();
-	(void) sig_sem(BT_TIMER_SEM);	/* タイマタスクへ再計算を促す */
+	/*  #5：critical（MIE=0）内から arm されると sig_sem が E_CTX で消えるため，
+	    起床要求を semID で保留し exit_critical/機会flush で精算する（wifi
+	    esp_shim.c の救済を共用．真ISRからは sig_sem 成立で即発火）．  */
+	esp_shim_signal_or_pend(BT_TIMER_SEM);	/* タイマタスクへ再計算を促す */
 	return(ESP_OK);
 }
 

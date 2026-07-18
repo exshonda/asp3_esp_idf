@@ -78,7 +78,13 @@ coex_semphr_take_from_isr_wrapper(void *semphr, void *hptw)
 	if (hptw != NULL) {
 		*(int *)hptw = 0;
 	}
-	return(esp_shim_sem_take(semphr, 0U));		/* ポーリング */
+	/*
+	 *  ★#4：真のISR文脈から呼ばれると esp_shim_sem_take→twai_sem が E_CTX で
+	 *  «失敗»（0）を返す（ASP3にISR安全なセマフォ取得が無い．esp_shim.c の
+	 *  esp_shim_sem_take 参照）．blobがこの経路を実際にISRから使うかは未確認で，
+	 *  使う場合は shim_sem_take_ectx_total が非0になる＝要再設計の指標．
+	 */
+	return(esp_shim_sem_take(semphr, 0U));		/* ポーリング（task文脈でのみ成立） */
 }
 
 static int32_t

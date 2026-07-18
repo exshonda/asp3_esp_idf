@@ -157,6 +157,7 @@ esp_shim_exit_critical(void)
 			 *  controller の give）も同時に精算する．  */
 			esp_shim_queue_flush_pending();
 			esp_shim_sem_flush_pending();
+			esp_shim_wakeup_flush_pending();	/* #5：タイマ起床の保留精算 */
 		}
 	}
 }
@@ -407,6 +408,7 @@ static bool_t shim_sem_used[ESP_SHIM_NUM_SEM];
 static volatile uint32_t	shim_sem_pend[ESP_SHIM_NUM_SEM];
 static volatile uint32_t	shim_sem_pend_total;
 volatile uint32_t	shim_sem_ectx_total;	/* 累計E_CTX give数（診断・非static） */
+volatile uint32_t	shim_sem_take_ectx_total;	/* 累計E_CTX take数（#4診断・非static） */
 
 void *
 esp_shim_sem_create(uint32_t max, uint32_t init)
@@ -419,6 +421,10 @@ esp_shim_sem_create(uint32_t max, uint32_t init)
 		if (!shim_sem_used[i]) {
 			shim_sem_used[i] = true;
 			semid = shim_sem_id[i];
+			/*  ★#6：念のため確保時にも保留give残を清算（delete で清算済みの
+			    はずだが，未清算のスロットを掴んでも亡霊give を持ち込まない）．  */
+			shim_sem_pend_total -= shim_sem_pend[i];
+			shim_sem_pend[i] = 0U;
 			break;
 		}
 	}
@@ -446,6 +452,12 @@ esp_shim_sem_delete(void *sem)
 	for (i = 0U; i < ESP_SHIM_NUM_SEM; i++) {
 		if (shim_sem_id[i] == semid) {
 			shim_sem_used[i] = false;
+			/*  ★#6：スロット解放時に保留give（shim_sem_pend[i]）を清算する．
+			    残したままスロットが再利用されると，次の flush_pending が新利用者へ
+			    «亡霊give» を注入しバイナリセマフォ化けを起こす．total から先に
+			    引いてからスロットを0にする（アンダーフロー回避）．  */
+			shim_sem_pend_total -= shim_sem_pend[i];
+			shim_sem_pend[i] = 0U;
 			break;
 		}
 	}
@@ -455,8 +467,21 @@ esp_shim_sem_delete(void *sem)
 int32_t
 esp_shim_sem_take(void *sem, uint32_t block_time_tick)
 {
-	return(twai_sem((ID)(intptr_t)sem,
-					esp_shim_tick_to_tmo(block_time_tick)) == E_OK ? 1 : 0);
+	ER	er = twai_sem((ID)(intptr_t)sem, esp_shim_tick_to_tmo(block_time_tick));
+
+	if (er == E_CTX) {
+		/*
+		 *  ★#4：非タスク文脈（真のISR/CPUロック中）からの take．ASP3 には
+		 *  «ISRから使えるセマフォ非ブロック取得» が無い（twai_sem/pol_sem とも
+		 *  CHECK_TSKCTX_UNL＝タスク文脈専用）．ISRからは «失敗» を返すしかなく，
+		 *  «取得» は give と違い延期不能で保留救済もできない．pol_sem 置換でも
+		 *  直らない．発生を計数し実機で本経路が踏まれるかを観測可能にする
+		 *  （0のまま＝死経路・無害／非0＝要再設計）．詳細はC3版コメント参照．
+		 */
+		shim_sem_take_ectx_total++;
+		return(0);
+	}
+	return(er == E_OK ? 1 : 0);
 }
 
 int32_t
@@ -520,6 +545,64 @@ esp_shim_sem_flush_pending(void)
 			SHIM_UNLOCK();
 			(void) sig_sem(shim_sem_id[i]);
 		}
+	}
+}
+
+/*
+ *  ★#5：タイマ再計算の起床（sig_sem）を «critical外で必ず発火» させる救済．
+ *  ble_npl_hw_enter_critical 等（MIE=0）の中から esp_timer_start/ets_timer_arm が
+ *  呼ばれると，直後の sig_sem(*_TIMER_SEM) が E_CTX で消え，タイマタスクが
+ *  TMO_FEVR で寝たまま新しい期限を拾わない（Fable#3）．D-2d の give 救済と同型に，
+ *  E_CTX の起床要求を semID で保留し，esp_shim_exit_critical / 機会flush で精算する．
+ *  真のISRからは sig_sem 自体が成立（CHECK_UNL）し E_CTX にならないため，本救済は
+ *  «critical由来» のみを拾う＝漏れ無し．保留は semID の集合（重複記録しない）．
+ *  ★実体は wifi esp_shim.c 側に置き，BT bt_shim.c からも共用する（esp_shim.h は
+ *  C3 の共有ヘッダで宣言済み＝C5/C6 に別ヘッダは無い）．
+ */
+#define SHIM_WAKEUP_PEND_MAX	4U
+static volatile ID		shim_wakeup_pend[SHIM_WAKEUP_PEND_MAX];
+static volatile uint_t	shim_wakeup_pend_n;
+
+void
+esp_shim_signal_or_pend(ID semid)
+{
+	uint_t	i;
+
+	if (sig_sem(semid) != E_CTX) {
+		return;		/* E_OK/E_QOVR＝成立（非critical）．他エラーもそのまま */
+	}
+	/*  E_CTX＝MIE=0（critical）で起床要求が消えた．semIDを保留（sig_semは冪等的
+	    なので重複記録は不要）．満杯でも «最低1回は起床» するので捨ててよい．  */
+	SHIM_LOCK();
+	for (i = 0U; i < shim_wakeup_pend_n; i++) {
+		if (shim_wakeup_pend[i] == semid) {
+			SHIM_UNLOCK();
+			return;
+		}
+	}
+	if (shim_wakeup_pend_n < SHIM_WAKEUP_PEND_MAX) {
+		shim_wakeup_pend[shim_wakeup_pend_n++] = semid;
+	}
+	SHIM_UNLOCK();
+}
+
+void
+esp_shim_wakeup_flush_pending(void)
+{
+	if (shim_wakeup_pend_n == 0U) {
+		return;		/* 高速パス（ロック無し読み） */
+	}
+	for (;;) {
+		ID	semid;
+
+		SHIM_LOCK();
+		if (shim_wakeup_pend_n == 0U) {
+			SHIM_UNLOCK();
+			break;
+		}
+		semid = shim_wakeup_pend[--shim_wakeup_pend_n];
+		SHIM_UNLOCK();
+		(void) sig_sem(semid);
 	}
 }
 
@@ -1404,7 +1487,7 @@ esp_shim_timer_arm_us(void *ptimer, uint32_t us, bool_t repeat)
 		t->deadline_us = esp_shim_time_us() + (int64_t)us;
 		t->period_us = repeat ? us : 0U;
 		SHIM_UNLOCK();
-		(void) sig_sem(SHIM_TIMER_SEM);		/* タイマタスクの再計算 */
+		esp_shim_signal_or_pend(SHIM_TIMER_SEM);	/* #5：起床（critical内E_CTXは保留精算） */
 	}
 }
 
