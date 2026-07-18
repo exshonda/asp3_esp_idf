@@ -41,6 +41,7 @@
 #include "esp_shim.h"
 #include "esp_shim_cfg.h"
 #include "esp_shim_core.h"
+#include "esp_shim_chip_regs.h"	/* チップ固有アドレス（WDEV_RND_REG/SYSTIMER）の symbolic 名（per-chip 解決） */
 
 /*
  *  SVC_PERROR：共有コアでは常にパススルー（診断トレースはチップ固有 esp_shim.c
@@ -67,6 +68,29 @@ esp_shim_int_restore(uint32_t state)
 	if (state != 0U) {
 		Asm("csrsi mstatus, 8");
 	}
+}
+
+/*
+ *  起動からのμs（SYSTIMER）．チップ差は esp_shim_chip_regs.h の
+ *  ESP_SHIM_SYSTIMER_READ()／ESP_SHIM_SYSTIMER_TICKS_PER_US（per-chip）が吸収．
+ */
+int64_t
+esp_shim_time_us(void)
+{
+	return((int64_t)(ESP_SHIM_SYSTIMER_READ()
+					 / ESP_SHIM_SYSTIMER_TICKS_PER_US));
+}
+
+/*
+ *  HW乱数生成器（WDEV_RND_REG）．レジスタ番地のチップ差は
+ *  esp_shim_chip_regs.h の ESP_SHIM_WDEV_RND_REG（per-chip）が吸収する．
+ *  番地選定の経緯（C3 の WPA2 SNonce 不具合の教訓等）は各チップの
+ *  esp_shim_chip_regs.h のコメントを参照．
+ */
+uint32_t
+esp_shim_random(void)
+{
+	return(sil_rew_mem((void *)ESP_SHIM_WDEV_RND_REG));
 }
 
 /*
