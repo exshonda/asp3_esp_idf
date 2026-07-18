@@ -1,0 +1,52 @@
+### c3_postmortem 2026-07-18T21:29:34+09:00  ELF=/tmp/claude-1000/-home-honda-TOPPERS-ASP3CORE-asp3-esp-idf/72894f4b-3c51-408c-9fbe-657785301cc2/scratchpad/t2c5_c3_ble/asp.elf
+### syms: tcb=0x3fcb5f60 runtsk=0x3fc80a60 schedtsk=0x3fc80a5c dspflg=0x3fc80a54 crit=0x3fc808c8 conn=0x3fc807d4
+Open On-Chip Debugger v0.12.0-esp32-20250422 (2025-04-22-13:02)
+Licensed under GNU GPL v2
+For bug reports, read
+	http://openocd.org/doc/doxygen/bugs.html
+Info : only one transport option; autoselecting 'jtag'
+Info : esp_usb_jtag: VID set to 0x303a and PID to 0x1001
+Info : esp_usb_jtag: capabilities descriptor set to 0x2000
+Info : esp_usb_jtag: serial (60:55:F9:57:BA:BC)
+Info : esp_usb_jtag: Device found. Base speed 40000KHz, div range 1 to 255
+Info : clock speed 40000 kHz
+Info : JTAG tap: esp32c3.tap0 tap/device found: 0x00005c25 (mfg: 0x612 (Espressif Systems), part: 0x0005, ver: 0x0)
+Info : [esp32c3] external reset happened in halted state (dmstatus:0x000f03a2)
+Info : [esp32c3] datacount=2 progbufsize=16
+Info : [esp32c3] Examined RISC-V core; found 1 harts
+Info : [esp32c3]  XLEN=32, misa=0x40101104
+Info : [esp32c3] Examination succeed
+Info : [esp32c3] starting gdb server on 3333
+Info : Listening on port 3333 for gdb connections
+Info : [esp32c3] Target halted, PC=0x42000A5E, debug_reason=00000000
+=== REGS ===
+pc (/32): 0x42000a5e
+mcause (/32): 0x80000010
+mepc (/32): 0x42000a5a
+mstatus (/32): 0x00000089
+mtvec (/32): 0x4201d101
+sp (/32): 0x3fcb64f0
+ra (/32): 0x4201c56e
+=== SCHED (dspflg, ?, schedtsk, runtsk) ===
+0x3fc80a54: 00000001 00000001 3fcb60e0 3fcb60e0 
+=== TCB_TABLE (13 tasks x 32B) ===
+0x3fcb5f60: 3fcb5d10 3fcb5d10 3c043f78 08020240 3fcca858 00000000 3fcca81c 4201aaa4 
+0x3fcb5f80: 3fcb3c0c 3fcb3c0c 3c043f90 08020220 3fcc8854 00000000 3fcc881c 4201aaa4 
+0x3fcb5fa0: 00000000 00000000 3c043fa8 08020200 00000000 00000000 00000000 00000000 
+0x3fcb5fc0: 00000000 00000000 3c043fc0 08020200 00000000 00000000 00000000 00000000 
+0x3fcb5fe0: 00000000 00000000 3c043fd8 08020200 00000000 00000000 00000000 00000000 
+0x3fcb6000: 00000000 00000000 3c043ff0 08020200 00000000 00000000 00000000 00000000 
+0x3fcb6020: 00000000 00000000 3c044008 08020200 00000000 00000000 00000000 00000000 
+0x3fcb6040: 00000000 00000000 3c044020 08020200 00000000 00000000 00000000 00000000 
+0x3fcb6060: 3fcb5ea0 3fcb5ea0 3c044038 08010140 3fcba8b8 00000000 3fcba87c 4201aaa4 
+0x3fcb6080: 3fcb5f30 3fcb5f30 3c044050 08040440 3fcb98b8 00000000 3fcb987c 4201aaa4 
+0x3fcb60a0: 3fcb5f50 3fcb5f50 3c044068 08020240 3fcb8828 00000000 3fcb87ec 4201aaa4 
+0x3fcb60c0: 3fcb2a70 3fcb2a70 3c044080 08090904 3fcb841c 00000000 3fcb83dc 4201aaa4 
+0x3fcb60e0: 3fcb2aa0 3fcb2aa0 3c044098 080f0f01 00000000 00000000 3fcb6460 4201aca8 
+=== SHIM COUNTERS (que_pend_used .. crit_nest) ===
+0x3fc80898: 00000047 00000000 00000000 00000000 00000000 00023ee0 3fc81520 00000001 
+0x3fc808b8: 00000000 00000000 00000000 00000008 00000000 
+=== g_conn_handle ===
+0x3fc807d4: 00000001 
+=== HALT のまま終了（状態保持）===
+shutdown command invoked
