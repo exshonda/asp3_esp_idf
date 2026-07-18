@@ -1177,6 +1177,14 @@ typedef struct {
 
 static SHIM_TSK shim_tsk[ESP_SHIM_NUM_TSK];
 static void *shim_main_thread_sem;	/* プール外タスク用 */
+/*  ★#8 診断（Codex#4）：プール外タスクは «単一共有» thread-sem を使う（下記
+    esp_shim_thread_semphr_get）．ESP-IDF は pthread TLS で «タスク毎» に持つ設計
+    ＝2つ以上のプール外タスクが同時に esp_wifi 同期 API を叩くと完了 give を
+    奪い合い «沈黙の同期化け» になる．現アプリは単一タスクからしか叩かない前提．
+    前提が破れた瞬間（相異なる2つ目のプール外 tid が sentinel に解決）を大声で
+    検出する（halt はしない＝潜在条件で WiFi ホットパス．LOG_EMERG＋カウンタ）．  */
+static ID			shim_main_thread_owner;		/* 最初のプール外 tid（0=未） */
+volatile uint32_t	shim_main_thread_conflict;	/* 相異なる2つ目以降の検出数（診断・非static） */
 
 /*
  *  共通エントリ（esp_shim.cfgのCRE_TSKから呼ばれる．exinf=スロット番号）
@@ -1310,6 +1318,24 @@ esp_shim_thread_semphr_get(void)
 	void	*cur = esp_shim_task_get_current();
 
 	if (cur == (void *)&shim_main_thread_sem) {
+		/*  ★#8：この共有 sentinel を «相異なる2つ目のプール外 tid» が要求したら
+		    «複数タスクから esp_wifi 同期 API»＝サポート外の並行使用＝同期化けの
+		    危険．halt はせず LOG_EMERG＋カウンタで大声で知らせる（現構成は単一
+		    タスク＝発火せず非回帰）．  */
+		ID	self = 0;
+
+		(void) get_tid(&self);
+		if (shim_main_thread_owner == 0) {
+			shim_main_thread_owner = self;
+		}
+		else if (shim_main_thread_owner != self) {
+			shim_main_thread_conflict++;
+			syslog(LOG_EMERG,
+				   "esp_shim: #8 UNSUPPORTED: esp_wifi sync API from 2nd non-pool "
+				   "task (owner tid=%d this tid=%d); shared thread-sem = sync "
+				   "corruption risk (need per-tid sem for multi-task WiFi)",
+				   (int_t) shim_main_thread_owner, (int_t) self);
+		}
 		if (shim_main_thread_sem == NULL) {
 			shim_main_thread_sem = esp_shim_sem_create(1U, 0U);
 		}
