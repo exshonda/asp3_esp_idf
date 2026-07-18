@@ -409,6 +409,7 @@ static volatile uint32_t	shim_sem_pend[ESP_SHIM_NUM_SEM];
 static volatile uint32_t	shim_sem_pend_total;
 volatile uint32_t	shim_sem_ectx_total;	/* 累計E_CTX give数（診断・非static） */
 volatile uint32_t	shim_sem_take_ectx_total;	/* 累計E_CTX take数（#4診断・非static） */
+volatile uint32_t	shim_que_debt_conflict;		/* #9診断：token取得後に空きslot無し窓の検出数 */
 
 void *
 esp_shim_sem_create(uint32_t max, uint32_t init)
@@ -1114,7 +1115,18 @@ esp_shim_queue_send(void *que, void *item, uint32_t block_time_tick,
 	slot = shim_que_slot_alloc(q);
 	SHIM_UNLOCK();
 	if (slot == 0xFFFFFFFFU) {
-		/* 到達しないはず（トークン確保後は空きが保証される）が防御的に */
+		/*  ★#9 診断（Fable#7）：トークン取得後に空きスロット無し＝sem_debt 窓
+		    （ISR/E_CTX 送信がトークン未消費でスロットを取り token>実空き）で
+		    «到達しないはず» が到達．現状はトークンを戻して 0（失敗）を返す＝
+		    block_time_tick が無限待ちなら «待つはず» の送信が失敗＝契約違反
+		    （D-2c 同型）．発火を計数し実機で本窓が踏まれるか観測可能にする
+		    （0 のまま＝死経路・無害／非0＝要「残tmoで再ブロック」修正）．  */
+		shim_que_debt_conflict++;
+		if (block_time_tick != 0U) {
+			syslog(LOG_WARNING,
+				   "esp_shim: #9 queue send: token acquired but no free slot "
+				   "(sem_debt window); blocking send returned fail");
+		}
 		(void) sig_sem(q->semid);
 		return(0);
 	}
