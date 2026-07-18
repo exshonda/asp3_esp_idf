@@ -455,13 +455,19 @@ endif()
 
 option(ESP32C6_WIFI "Enable Wi-Fi (esp_wifi blob + os_adapter shim, Phase B-2a scan)" OFF)
 if(ESP32C6_WIFI OR ESP32C6_BT)
+    #  dedup Tier2：esp_shim.c の 3チップ 0-diff 共有コアは common_espidf/wifi/
+    #  esp_shim_core.c に集約（docs/dedup-tier2-plan.md）．縮小した C6 固有
+    #  wifi/esp_shim.c と併せてコンパイルする．
+    get_filename_component(COMMON_ESPIDF ${CMAKE_CURRENT_LIST_DIR}/../common_espidf ABSOLUTE)
     list(APPEND ASP3_INCLUDE_DIRS
         ${TARGETDIR}/wifi
         ${C3_TARGETDIR}
         ${C3_TARGETDIR}/wifi
+        ${COMMON_ESPIDF}/wifi
     )
     list(APPEND ASP3_CFG_FILES ${C3_TARGETDIR}/wifi/esp_shim.cfg)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${COMMON_ESPIDF}/wifi/esp_shim_core.c
         ${TARGETDIR}/wifi/esp_shim.c
         #  esp_shim_blobglue.cはWiFi blob（net80211/pp/core）専用の
         #  グルーが大半だが，esp_sleep_pd_config／esp_sleep_clock_config／

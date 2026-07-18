@@ -401,10 +401,15 @@ option(ESP32C3_WIFI "Enable Wi-Fi (esp_wifi blob + os_adapter shim)" OFF)
 #  ESP32C3_WIFIとは独立にESP32C3_BTからも取り込めるよう分離する
 #  （Wi-Fi固有のosi/coex/eventアダプタ層は従来通りESP32C3_WIFI限定）．
 #
+#  dedup Tier2：esp_shim.c の 3チップ 0-diff 共有コアは common_espidf/wifi/
+#  esp_shim_core.c に集約した（docs/dedup-tier2-plan.md）．各チップは共有
+#  コアをコンパイルしつつ，チップ固有部（縮小した wifi/esp_shim.c）も積む．
+get_filename_component(COMMON_ESPIDF ${CMAKE_CURRENT_LIST_DIR}/../common_espidf ABSOLUTE)
 if(ESP32C3_WIFI OR ESP32C3_BT)
-    list(APPEND ASP3_INCLUDE_DIRS ${TARGETDIR}/wifi)
+    list(APPEND ASP3_INCLUDE_DIRS ${TARGETDIR}/wifi ${COMMON_ESPIDF}/wifi)
     list(APPEND ASP3_CFG_FILES ${TARGETDIR}/wifi/esp_shim.cfg)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+        ${COMMON_ESPIDF}/wifi/esp_shim_core.c
         ${TARGETDIR}/wifi/esp_shim.c
         ${TARGETDIR}/wifi/esp_shim_libc.c
         ${TARGETDIR}/wifi/esp_shim_blobglue.c
