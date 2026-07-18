@@ -145,26 +145,10 @@ esp_shim_exit_critical(void)
 }
 
 /*
- *  時刻・乱数
+ *  時刻（esp_shim_time_us）・乱数（esp_shim_random）は dedup Tier2c で共有コア
+ *  （common_espidf/wifi/esp_shim_core.c）へ移動．チップ固有の番地は
+ *  esp_shim_chip_regs.h の ESP_SHIM_WDEV_RND_REG／ESP_SHIM_SYSTIMER_* で吸収．
  */
-int64_t
-esp_shim_time_us(void)
-{
-	return((int64_t)(esp32c5_systimer_read()
-					 / ESP32C5_SYSTIMER_TICKS_PER_US));
-}
-
-uint32_t
-esp_shim_random(void)
-{
-	/*
-	 *  HW乱数生成器．無線が有効になるとRFノイズ由来の真性乱数になる
-	 *  （無効時はエントロピー低）．★C5レジスタ差替え：C3の SYSCON_RND_DATA_REG
-	 *  (0x600260B0) ではなく，C5は LPPERI_RNG_DATA_SYNC_REG (WDEV_RND_REG)
-	 *  = 0x600B2828（docs/c5-port-design.md §8.3・C5実施の再生成方針）．
-	 */
-	return(sil_rew_mem((void *)0x600B2828U));	/* LPPERI_RNG_DATA_SYNC_REG (WDEV_RND_REG) */
-}
 
 #ifdef TOPPERS_ESP32C5_BT
 /*

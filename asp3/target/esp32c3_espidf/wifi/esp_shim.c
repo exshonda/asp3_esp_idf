@@ -118,35 +118,10 @@ esp_shim_exit_critical(void)
 }
 
 /*
- *  時刻・乱数
+ *  時刻（esp_shim_time_us）・乱数（esp_shim_random）は dedup Tier2c で共有コア
+ *  （common_espidf/wifi/esp_shim_core.c）へ移動．チップ固有の番地は
+ *  esp_shim_chip_regs.h の ESP_SHIM_WDEV_RND_REG／ESP_SHIM_SYSTIMER_* で吸収．
  */
-int64_t
-esp_shim_time_us(void)
-{
-	return((int64_t)(esp32c3_systimer_read()
-					 / ESP32C3_SYSTIMER_TICKS_PER_US));
-}
-
-uint32_t
-esp_shim_random(void)
-{
-	/*
-	 *  HW乱数生成器（RNG_DATA_REG）．無線が有効になるとRFノイズ由来の
-	 *  真性乱数になる（無効時はエントロピー低）．
-	 *
-	 *  アドレスは SYSCON_RND_DATA_REG = DR_REG_SYSCON_BASE(0x60026000)
-	 *  + 0x0B0 = 0x600260B0（esp-hal-3rdparty:
-	 *  soc/esp32c3/register/soc/syscon_reg.h の SYSCON_RND_DATA_REG／
-	 *  RNG_DATA_REG，apb_ctrl_reg.h の APB_CTRL_RND_DATA_REG も同値＝
-	 *  SYSCONの旧名）．旧実装は0x6002607C（-0x34のオフセット違い）を
-	 *  読んでおり，これは常に0を返す別レジスタだった＝WPA2 4-way
-	 *  ハンドシェイクのSNonceが常時全ゼロになり，AP側がゼロnonceを
-	 *  リプレイ攻撃/nonce再利用とみなして黙ってmsg1を再送し続ける
-	 *  （4-wayハンドシェイクタイムアウト，reason=15）原因だった．
-	 *  実機JTAG（gdbでSYSCON_RND_DATA_REGを複数回読み比較）で確認済み．
-	 */
-	return(sil_rew_mem((void *)0x600260B0U));	/* SYSCON_RND_DATA_REG */
-}
 
 /*
  *		セマフォ take/give/get_count（チップ固有＝診断カウンタ差のため per-chip）

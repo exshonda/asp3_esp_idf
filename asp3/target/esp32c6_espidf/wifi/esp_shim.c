@@ -109,32 +109,10 @@ esp_shim_exit_critical(void)
 }
 
 /*
- *  時刻・乱数
+ *  時刻（esp_shim_time_us）・乱数（esp_shim_random）は dedup Tier2c で共有コア
+ *  （common_espidf/wifi/esp_shim_core.c）へ移動．チップ固有の番地は
+ *  esp_shim_chip_regs.h の ESP_SHIM_WDEV_RND_REG／ESP_SHIM_SYSTIMER_* で吸収．
  */
-int64_t
-esp_shim_time_us(void)
-{
-	return((int64_t)(esp32c6_systimer_read()
-					 / ESP32C6_SYSTIMER_TICKS_PER_US));
-}
-
-uint32_t
-esp_shim_random(void)
-{
-	/*
-	 *  HW乱数生成器（RNG_DATA_REG）．無線が有効になるとRFノイズ由来の
-	 *  真性乱数になる（無効時はエントロピー低）．
-	 *
-	 *  C6の真のHW RNG読出しレジスタはWDEV_RND_REG＝LPPERI_RNG_DATA_REG
-	 *  （DR_REG_LPPERI_BASE(0x600B2800)+0x8＝0x600B2808．esp-hal-3rdparty:
-	 *  soc/esp32c6/register/soc/lpperi_reg.hおよびsoc/wdev_reg.hの
-	 *  WDEV_RND_REG定義で確認．C3のSYSCON_RND_DATA_REGとは全く別の
-	 *  ペリフェラル（C6はLP_PERIブロックへ移動）．C3のB-2bで
-	 *  「WDEV_RND_REGの実体を正しく引く」ことがWPA2 SNonce不具合の
-	 *  修正だった教訓を踏まえ，C6でも最初からwdev_reg.h同値を採用する．
-	 */
-	return(sil_rew_mem((void *)0x600B2808U));	/* LPPERI_RNG_DATA_REG (WDEV_RND_REG) */
-}
 
 /*
  *		セマフォ take/give/get_count（チップ固有＝診断カウンタ差のため per-chip）
