@@ -20,7 +20,7 @@ apps）。ベンダ submodule（esp-idf/hal/lwip/asp3_core）は送信/レビュ
 | 5 | Fable#3 | タイマ起床 `sig_sem` が critical 内 E_CTX で消え、give/queue の保留救済がタイマ未適用 | 真(構造) | 潜在 | ✅ 修正 `0867aba` |
 | 6 | Fable#6 | セマフォ delete/再利用で `shim_sem_pend` 未清算 → 再利用先へ亡霊 give | 真(構造) | 潜在(deinit/reinit) | ✅ 修正 `0867aba` |
 | 7 | Codex#5 | C5 `wifi_v8/esp_wifi_adapter.c` LPCON=`0x7`(代入) が bit3(LP_TIMER_EN=BT正当) 破壊。C6 は `\|=` 済 | 真 | 潜在(C5 WiFi+BT共存) | ✅ 修正 `1de29c7` |
-| 8 | Codex#4 | プール外全タスクが単一 `shim_main_thread_sem` 共有 → 多タスクで esp_wifi 同期化け | 真(構造) | 潜在(多タスク) | ⏸ 報告のみ（下記） |
+| 8 | Codex#4 | プール外全タスクが単一 `shim_main_thread_sem` 共有 → 多タスクで esp_wifi 同期化け | 真(構造) | 潜在(多タスク) | ✅ アサート計装 `8f8b0a2` |
 | 9 | Fable#7 | queue `sem_debt` 窓でブロッキング送信が「空き無し」失敗 | 妥当 | 潜在(高負荷) | ⏸ 報告のみ（下記） |
 | — | **Codex#3** | `sys_arch_sem_wait/mbox_fetch` が `1U` 固定 → lwIP タイマ399msドリフト | **✗ 誤検出** | — | 棄却 |
 
@@ -78,12 +78,13 @@ Codex は「lwIP 契約=成功時に経過ms を返す」と主張。しかし l
 機構への介入を伴うため、**まず #4 同型の計装で到達性を確認してから着手**が安全（Opus サブエージェント
 の分析結論と一致）。
 
-- **#8 thread sem 共有**：`esp_shim_task_get_current()` がプール外タスクに一律 sentinel
-  `&shim_main_thread_sem` を返し、`esp_shim_thread_semphr_get()` が単一共有 sem を返す。複数プール外
-  タスクが esp_wifi 同期 API を叩くと give/take を奪い合う。**現デモは単一タスク＝発火不能**。
-  最小修正案＝プール外 tid→専用 thread_sem の小側テーブル。リスク＝共有 CRE_SEM プール枯渇
-  （寸法＝プール予算の設計判断）。推奨＝「2つ目の相異なるプール外 tid が sentinel に解決した」瞬間を
-  計数する計装を先に入れて実機確認。
+- **#8 thread sem 共有**（★**計装実装済み `8f8b0a2`**）：`esp_shim_task_get_current()` がプール外タスクに
+  一律 sentinel `&shim_main_thread_sem` を返し、`esp_shim_thread_semphr_get()` が単一共有 sem を返す。
+  複数プール外タスクが esp_wifi 同期 API を叩くと give/take を奪い合う。**現デモは単一タスク＝発火不能**。
+  真の修正（tid→専用 thread_sem の側テーブル）は共有 CRE_SEM プール枯渇リスク＝要設計判断なので見送り、
+  **「2つ目の相異なるプール外 tid が sentinel に解決した」瞬間を検出**して `shim_main_thread_conflict++`＋
+  `LOG_EMERG`（halt はしない）＝**沈黙化けを «大声化»**。複数タスク WiFi 制御を設計するなら本当の
+  per-tid sem 化を検討する指標にもなる。C3/C5/C6。
 - **#9 queue sem_debt**：ISR/E_CTX 送信がトークン未消費でスロット確保し `sem_debt++`。不変式
   `token = free_slots + sem_debt`。`free_slots==0 && sem_debt>0` で task 側 `twai_sem` が成功→
   `slot_alloc` 失敗→`return(0)`＝portMAX_DELAY のブロッキング契約違反（near-full×ISR-debt×task送信の
