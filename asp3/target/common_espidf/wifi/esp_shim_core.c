@@ -1233,6 +1233,93 @@ esp_shim_timer_done(void *ptimer)
 }
 
 /*
+ *		タスク遅延／ets_timer arm／タイマタスク本体（3チップ共通）
+ *
+ *  dedup Tier2b：旧来 per-chip の wifi/esp_shim.c に置いていた診断計装差が
+ *  解消したため共有コアへ移した．esp_shim_time_us はチップ固有（extern，
+ *  esp_shim.h）．タイマリスト shim_timer_list／検索 esp_shim_timer_find／
+ *  起床 esp_shim_signal_or_pend は本ファイルが所有する．
+ */
+void
+esp_shim_task_delay(uint32_t tick)
+{
+	(void) dly_tsk((RELTIM)(tick * 1000U));
+}
+
+void
+esp_shim_timer_arm_us(void *ptimer, uint32_t us, bool_t repeat)
+{
+	SHIM_TIMER	*t = esp_shim_timer_find(ptimer, true);
+
+	if (t != NULL) {
+		SHIM_LOCK();
+		t->deadline_us = esp_shim_time_us() + (int64_t)us;
+		t->period_us = repeat ? us : 0U;
+		SHIM_UNLOCK();
+		esp_shim_signal_or_pend(SHIM_TIMER_SEM);	/* #5：起床（critical内E_CTXは保留精算） */
+	}
+}
+
+/*
+ *  タイマタスク本体（esp_shim.cfgのCRE_TSKで生成・起動）
+ */
+void
+esp_shim_timer_task(EXINF exinf)
+{
+	for (;;) {
+		SHIM_TIMER	*t;
+		int64_t		now = esp_shim_time_us();
+		int64_t		next = 0;
+		void		(*fn)(void *) = NULL;
+		void		*arg = NULL;
+
+		/*
+		 *  期限到来タイマを1つ選ぶ（コールバックはロック外で実行）
+		 */
+		SHIM_LOCK();
+		for (t = shim_timer_list; t != NULL; t = t->next) {
+			if (t->deadline_us == 0) {
+				continue;
+			}
+			if (t->deadline_us <= now) {
+				fn = t->fn;
+				arg = t->arg;
+				if (t->period_us != 0U) {
+					t->deadline_us = now + (int64_t)t->period_us;
+				}
+				else {
+					t->deadline_us = 0;
+				}
+				break;
+			}
+			if (next == 0 || t->deadline_us < next) {
+				next = t->deadline_us;
+			}
+		}
+		SHIM_UNLOCK();
+
+		if (fn != NULL) {
+			fn(arg);
+			continue;			/* 他の期限到来タイマを続けて処理 */
+		}
+
+		if (next == 0) {
+			(void) twai_sem(SHIM_TIMER_SEM, TMO_FEVR);
+		}
+		else {
+			int64_t wait = next - now;
+			if (wait < 1000) {
+				wait = 1000;
+			}
+			else if (wait > (int64_t) TMAX_RELTIM) {
+				wait = (int64_t) TMAX_RELTIM;	/* ★Low#6：>TMAX_RELTIM の busy-spin 回避 */
+			}
+			(void) twai_sem(SHIM_TIMER_SEM, (TMO)wait);
+		}
+	}
+}
+
+/*
  *		Wi-Fi割込みディスパッチ表の登録（set_isr）
  *
  *  blobは_set_intr（ソース→CPU割込み線のルーティング）と_set_isr
