@@ -337,8 +337,8 @@ endif()
 #  （Espressif版QEMU forkにesp32c6マシンが無い．asp3_core Phase Aで
 #  確認済み）のため実機書込みのみ．
 #
-set(ESP32C6_ESPTOOL esptool
-    CACHE STRING "Path to esptool")
+include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_find_esptool.cmake)
+asp3_find_esptool(ESP32C6_ESPTOOL)
 set(ESP32C6_PORT /dev/ttyACM1
     CACHE STRING "Serial port of the ESP32-C6 board")
 set(ASP3_RUN_COMMAND

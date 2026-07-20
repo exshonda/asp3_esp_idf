@@ -390,8 +390,8 @@ else()
     #  書き込む．コンソールは書込みと同じUSBポート（USB Serial/JTAG＝
     #  /dev/ttyACM*）に出る（ESP32C3_CONSOLE=usbjtag時）．
     #
-    set(ESP32C3_ESPTOOL esptool
-        CACHE STRING "Path to esptool")
+    include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_find_esptool.cmake)
+    asp3_find_esptool(ESP32C3_ESPTOOL)
     set(ESP32C3_PORT /dev/ttyACM0
         CACHE STRING "Serial port of the ESP32-C3 board")
     set(ASP3_RUN_COMMAND

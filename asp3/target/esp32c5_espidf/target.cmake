@@ -323,8 +323,8 @@ include(${CMAKE_CURRENT_LIST_DIR}/../../arch/riscv_gcc/esp32c5/chip.cmake)
 #  【実機確認待ち】docs/c5-port-design.md §8.1 13番。esptoolの
 #  pinnedバージョンが`--chip esp32c5`をサポートしているか要確認。
 #
-set(ESP32C5_ESPTOOL esptool
-    CACHE STRING "Path to esptool")
+include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_find_esptool.cmake)
+asp3_find_esptool(ESP32C5_ESPTOOL)
 set(ESP32C5_PORT /dev/ttyACM1
     CACHE STRING "Serial port of the ESP32-C5 board")
 set(ASP3_RUN_COMMAND

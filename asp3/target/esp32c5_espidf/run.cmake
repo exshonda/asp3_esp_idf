@@ -13,6 +13,15 @@
 
 if(ASP3_SEAM_BOOT)
     #
+    #  ★seam は POST_BUILD で esptool を呼ぶ＝**ビルド中に実体が要る**
+    #  （Direct Boot は ${CMAKE_OBJCOPY} なので不要）。無いまま進むと
+    #  `/bin/sh: 1: esptool: not found` という分かりにくいビルドエラーに
+    #  なるため、configure 時に明示的に止める（実測：本ガード導入前は
+    #  リンク成功後の POST_BUILD で落ちていた）。
+    #
+    asp3_require_esptool(ESP32C5_ESPTOOL "ESP32-C5 seam boot (ASP3_SEAM_BOOT=ON)")
+
+    #
     #  seam：実ESP-IDF 2nd-stage bootloader が読む標準イメージ形式
     #  （esptool elf2image）を生成する．Direct Boot の objcopy 生ダンプ
     #  とは別物（イメージヘッダ＋セグメントヘッダ＋checksum＋SHA256）。
