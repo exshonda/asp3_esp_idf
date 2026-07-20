@@ -2,12 +2,6 @@
 	path = asp3/asp3_core
 	url = https://github.com/exshonda/asp3_core.git
 	branch = feat/esp32c6
-[submodule "hal"]
-	path = hal
-	url = https://github.com/espressif/esp-hal-3rdparty.git
-[submodule "lwip"]
-	path = lwip
-	url = https://github.com/lwip-tcpip/lwip.git
 [submodule "esp-idf"]
 	path = esp-idf
 	url = https://github.com/espressif/esp-idf.git

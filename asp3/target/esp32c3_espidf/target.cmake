@@ -186,6 +186,7 @@ if(ASP3_ESPIDF_SUPPLY)
     #  hal=`void *` / esp-idf v5.5.4=`const void *`（esp_event.h）。
     list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESPIDF_SUPPLY=1)
 else()
+    asp3_require_removed_submodule(${ESP_HAL_DIR} ASP3_ESPIDF_SUPPLY "esp-hal-3rdparty (./hal)")
     set(ESP_SUP_DIR ${ESP_HAL_DIR})
 endif()
 
@@ -490,6 +491,7 @@ if(ESP32C3_LWIP)
         list(APPEND ASP3_COMPILE_DEFS TOPPERS_LWIP_ESPIDF_SUPPLY=1)
     else()
         get_filename_component(LWIP_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../lwip ABSOLUTE)
+        asp3_require_removed_submodule(${LWIP_DIR} ASP3_LWIP_ESPIDF "lwip-tcpip (./lwip)")
     endif()
     include(${LWIP_DIR}/src/Filelists.cmake)
 

@@ -32,9 +32,7 @@ asp3_esp_idf/
 │       ├── esp32c3_espidf/        … ターゲット依存部（本リポジトリ側）
 │       ├── esp32c5_espidf/
 │       └── esp32c6_espidf/
-├── esp-idf/                       … ESP-IDF（submodule．**v5.5.4タグ**＝既定の供給元）
-├── hal/                           … esp-hal-3rdparty（submodule．C3のBT既定供給／可逆fallback）
-├── lwip/                          … lwIP（submodule）
+├── esp-idf/                       … ESP-IDF（submodule．**v5.5.4タグ**＝唯一の供給元）
 ├── apps/                          … デモアプリ（17個．下記）
 └── docs/
 ```

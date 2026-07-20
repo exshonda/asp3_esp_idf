@@ -276,6 +276,7 @@ endif()
 #
 option(ASP3_WIFI_BLOB_HAL "Use hal(v8) WiFi/PHY/coexist blob instead of ESP-IDF v5.5.4(v8) unification (reversible fallback)" OFF)
 if(ASP3_WIFI_BLOB_HAL)
+    asp3_require_removed_submodule(${ESP_HAL_DIR} ASP3_WIFI_BLOB_HAL "esp-hal-3rdparty (./hal)")
     set(ASP3_WIFI_BLOB_SRC ${ESP_HAL_DIR})
 else()
     set(ASP3_WIFI_BLOB_SRC ${IDF_V554})

@@ -154,6 +154,7 @@ if(ASP3_BT_IDF_V554)
     endif()
     set(BT_IDF ${ASP3_BT_IDF_V554_DIR})
 else()
+    asp3_require_removed_submodule(${ESP_HAL_DIR} ASP3_BT_IDF_V554 "esp-hal-3rdparty (./hal)")
     set(BT_IDF ${ESP_HAL_DIR})
 endif()
 

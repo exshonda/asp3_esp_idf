@@ -87,3 +87,36 @@ function(asp3_warn_if_cache_overrides_default _var _computed_default)
         "old value and stop the configure.\n"
         "${_hint}")
 endfunction()
+
+#
+#		段階6（./hal・./lwip submodule撤廃）後の fallback ガード
+#
+#  ./hal（esp-hal-3rdparty）・./lwip submoduleは既定経路では一切参照され
+#  ない（evidence-c3-13で9構成すべてhal参照ゼロを実測確認済み）ため撤廃した．
+#  ただし各チップのfallbackオプション（-DASP3_ESPIDF_SUPPLY=OFF等）の
+#  コード自体は「可逆性の記録」として残してある——実行すると存在しない
+#  ディレクトリを参照するので，そのまま踏ませると分かりにくい
+#  file-not-found エラーになる．本関数は fallback 分岐の**入口**で呼び，
+#  「このオプションはsubmodule撤廃済みにつき使えない．復元手順」を
+#  明示するFATAL_ERRORへ変える．
+#
+#  使い方：hal/lwipを参照する分岐（else節等）の先頭で呼ぶ：
+#      asp3_require_removed_submodule(${ESP_HAL_DIR} ASP3_WIFI_BLOB_HAL
+#          "esp-hal-3rdparty (./hal)")
+#
+function(asp3_require_removed_submodule _dir _option_name _submodule_desc)
+    if(NOT EXISTS ${_dir}/CMakeLists.txt AND NOT EXISTS ${_dir}/src/Filelists.cmake)
+        message(FATAL_ERROR
+            "${_option_name} selects the ${_submodule_desc} submodule fallback, but "
+            "that submodule was removed from this repository in stage 6 of the "
+            "esp-idf-only migration (evidence-c3-13/14: default builds have zero "
+            "references to it on C3/C5/C6, measured via ninja -t deps).\n"
+            "\n"
+            "To use this fallback again:\n"
+            "  git checkout <commit-before-stage6> -- .gitmodules ${_dir}\n"
+            "  git submodule update --init ${_dir}\n"
+            "(or revert the stage-6 removal commit entirely). See "
+            ".steering/20260716-c3c5c6-esp-idf-supply-migration/"
+            "evidence-c3-14-stage6-submodule-removal.md for the removal commit.")
+    endif()
+endfunction()
