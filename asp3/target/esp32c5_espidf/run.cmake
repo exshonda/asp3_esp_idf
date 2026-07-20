@@ -27,8 +27,16 @@ if(ASP3_SEAM_BOOT)
     #  とは別物（イメージヘッダ＋セグメントヘッダ＋checksum＋SHA256）。
     #
     #  出力は asp_seam.bin（app．flash 0x10000 へ書く）。bootloader と
-    #  partition table は esp-idf 側でビルドしたものを使う
-    #  （scripts/seam_c5/build_bootloader.sh 参照）。
+    #  partition table は esp-idf 側でビルドしたものを使う。
+    #  ★実際に動く手順は
+    #    .steering/20260716-c3c5c6-esp-idf-supply-migration/
+    #      evidence-c5-11-seam-rerun-on-current-tree.md §1
+    #  （最小 IDF プロジェクト＋submodule esp-idf v5.5.4。2026-07-21 実機再現）。
+    #  ※従来ここが案内していた `scripts/seam_c5/build_bootloader.sh` は
+    #    **リポジトリに存在しない**（scripts/ 自体が無い）＝案内先が実在しない
+    #    エラーだったので差し替えた。
+    #  ★seam は **真POWERON でしか起動しない**（USB-JTAG リセットでは WDT ループ）。
+    #    観測は uart0 コンソール（既定）で行うこと（同 §2・§3）。
     #
     add_custom_command(TARGET asp POST_BUILD
         COMMAND ${ESP32C5_ESPTOOL} --chip esp32c5 elf2image
