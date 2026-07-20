@@ -28,6 +28,11 @@ set(TARGETDIR ${CMAKE_CURRENT_LIST_DIR})
 #  リポジトリ直下 esp/common/ に置く（旧 asp3/target/common_espidf/ と
 #  旧 esp32c3_espidf/{hal_stub,net,bt/stub,wifi の共有分} を統合したもの）．
 #
+#
+#  ESP統合のチップ固有部（esp/c5）．wifi・bt・sdkconfig_stub・esp_*.cmake
+#  と，チップ固有のESP初期化ソースを置く．
+#
+get_filename_component(ESP_CHIP_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../esp/c5 ABSOLUTE)
 get_filename_component(ESP_COMMON_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../esp/common ABSOLUTE)
 
 #
@@ -170,8 +175,10 @@ endforeach()
 #
 
 list(APPEND ASP3_INCLUDE_DIRS
+    ${ESP_CHIP_DIR}
+    ${ESP_COMMON_DIR}
     ${ESP_COMMON_DIR}/hal_stub/include
-    ${TARGETDIR}/sdkconfig_stub
+    ${ESP_CHIP_DIR}/sdkconfig_stub
     ${ESP_SUP_DIR}/components/hal/esp32c5/include
     ${ESP_SUP_DIR}/components/hal/include
     ${ESP_SUP_DIR}/components/hal/platform_port/include
@@ -268,7 +275,7 @@ option(ASP3_SEAM_BOOT
     OFF)
 
 if(ASP3_SEAM_BOOT)
-    set(ASP3_LDSCRIPT ${TARGETDIR}/esp32c5_seam.ld)
+    set(ASP3_LDSCRIPT ${ESP_CHIP_DIR}/esp32c5_seam.ld)
 else()
     set(ASP3_LDSCRIPT ${TARGETDIR}/esp32c5.ld)
 endif()
@@ -288,7 +295,7 @@ list(APPEND ASP3_TARGET_C_FILES
 #
 if(ASP3_SEAM_BOOT)
     list(APPEND ASP3_TARGET_C_FILES
-        ${TARGETDIR}/seam_appdesc.c
+        ${ESP_CHIP_DIR}/seam_appdesc.c
     )
     #
     #  ★-u が必須：ASP3_TARGET_C_FILES は静的ライブラリ（libasp3.a）へ
@@ -332,7 +339,7 @@ set(ASP3_RUN_COMMAND
 #  shim基盤（esp_shim.[ch]／esp_shim_libc.c／esp_shim_blobglue.c）は
 #  C3のwifi/を土台に，チップ固有アドレス（割込みルーティング＝
 #  INTMTX+CLIC，HW RNG＝LPPERI_RNG_DATA_SYNC_REG，eFuse MACレジスタ）
-#  のみ差し替えたC5版を${TARGETDIR}/wifi/に置く（C6版と同じ構成）。
+#  のみ差し替えたC5版を${ESP_CHIP_DIR}/wifi/に置く（C6版と同じ構成）。
 #  chip非依存のesp_shim.h／esp_shim_cfg.h／esp_shim_libc.c／
 #  esp_event_shim.c／esp_coex_adapter.c／esp_shim.cfgはC3側をそのまま
 #  再利用する（中身に変更不要）。
@@ -368,8 +375,8 @@ endif()
 #  docs/c5-bringup.md（実施08〜49）に残る。BT単体ビルドも wifi_v8/ を使う。
 #
 option(ESP32C5_WIFI "Enable Wi-Fi (esp_wifi blob + os_adapter shim; hal(v8), IDF-independent. Phase B-2a scan 〜 実施51 5GHz)" OFF)
-set(ESP32C5_WIFI_CMAKE_FILE ${TARGETDIR}/esp_wifi_v8.cmake)
-set(ESP32C5_WIFI_SRCDIR ${TARGETDIR}/wifi_v8)
+set(ESP32C5_WIFI_CMAKE_FILE ${ESP_CHIP_DIR}/esp_wifi_v8.cmake)
+set(ESP32C5_WIFI_SRCDIR ${ESP_CHIP_DIR}/wifi_v8)
 if(ESP32C5_WIFI OR ESP32C5_BT)
     if(ESP32C5_WIFI AND NOT EXISTS ${ESP32C5_WIFI_CMAKE_FILE})
         message(FATAL_ERROR
@@ -382,6 +389,7 @@ if(ESP32C5_WIFI OR ESP32C5_BT)
     list(APPEND ASP3_INCLUDE_DIRS
         ${ESP32C5_WIFI_SRCDIR}
         ${ESP_COMMON_DIR}
+        ${ESP_CHIP_DIR}
         ${ESP_COMMON_DIR}/wifi
     )
     list(APPEND ASP3_CFG_FILES ${ESP_COMMON_DIR}/wifi/esp_shim.cfg)
@@ -410,7 +418,7 @@ if(ESP32C5_WIFI)
 
     include(${ESP32C5_WIFI_CMAKE_FILE})
 endif()
-include(${TARGETDIR}/esp_bt.cmake)
+include(${ESP_CHIP_DIR}/esp_bt.cmake)
 
 #
 #  TCP/IP統合（lwIP．Wi-Fi必須＝ESP32C5_WIFIが前提。実施44）
@@ -594,7 +602,7 @@ if(ASP3_C5_PMU_INIT)
     #  ASP3_TARGET_C_FILES 側（libasp3.a）ではなく SYSSVC 側へ置く＝
     #  stock の weak シンボルより確実に優先させるため。
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-        ${TARGETDIR}/pmu_instance.c
+        ${ESP_CHIP_DIR}/pmu_instance.c
         ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/pmu_init.c
         ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/pmu_param.c
         ${ESP_SUP_DIR}/components/esp_hw_support/port/esp32c5/ocode_init.c

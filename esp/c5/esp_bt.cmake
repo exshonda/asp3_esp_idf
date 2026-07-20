@@ -36,7 +36,7 @@
 
 if(ESP32C5_BT)
 
-set(BT_TARGETDIR ${TARGETDIR}/bt)
+set(BT_TARGETDIR ${ESP_CHIP_DIR}/bt)
 
 #
 #  esp_wifi.cmakeと同一のIDF v6.1パス（実施10で確立．eco2 C5対応の
@@ -221,7 +221,7 @@ list(PREPEND ASP3_INCLUDE_DIRS ${ESP_COMMON_DIR}/bt/stub/include)
 
 list(APPEND ASP3_INCLUDE_DIRS
     ${ESP_COMMON_DIR}/bt/stub/include
-    ${TARGETDIR}/wifi
+    ${ESP_CHIP_DIR}/wifi
     ${IDF}/components/bt/include/${BT_CHIP_SERIES}/include
     ${IDF}/components/bt/common/include
     ${IDF}/components/bt/common/ble_log/include

@@ -21,6 +21,11 @@ set(TARGETDIR ${CMAKE_CURRENT_LIST_DIR})
 #  リポジトリ直下 esp/common/ に置く（旧 asp3/target/common_espidf/ と
 #  旧 esp32c3_espidf/{hal_stub,net,bt/stub,wifi の共有分} を統合したもの）．
 #
+#
+#  ESP統合のチップ固有部（esp/c6）．wifi・bt・sdkconfig_stub・esp_*.cmake
+#  と，チップ固有のESP初期化ソースを置く．
+#
+get_filename_component(ESP_CHIP_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../esp/c6 ABSOLUTE)
 get_filename_component(ESP_COMMON_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../esp/common ABSOLUTE)
 
 #
@@ -208,7 +213,7 @@ endforeach()
 #  hal fallback 時は従来どおり hal の nuttx/ を直接参照する。
 #
 if(ASP3_ESPIDF_SUPPLY)
-    set(ESP_SUP_SDKCONFIG_DIR ${CMAKE_CURRENT_LIST_DIR}/sdkconfig_stub)
+    set(ESP_SUP_SDKCONFIG_DIR ${ESP_CHIP_DIR}/sdkconfig_stub)
 else()
     set(ESP_SUP_SDKCONFIG_DIR ${ESP_HAL_DIR}/nuttx/esp32c6/include)
 endif()
@@ -221,6 +226,8 @@ endif()
 #
 
 list(APPEND ASP3_INCLUDE_DIRS
+    ${ESP_CHIP_DIR}
+    ${ESP_COMMON_DIR}
     ${ESP_COMMON_DIR}/hal_stub/include
     ${ESP_SUP_DIR}/components/hal/esp32c6/include
     ${ESP_SUP_DIR}/components/hal/include
@@ -345,7 +352,7 @@ set(ASP3_RUN_COMMAND
 #  shim基盤（esp_shim.[ch]／esp_shim_libc.c／esp_shim_blobglue.c）は
 #  C3のwifi/を土台に，チップ固有アドレス（割込みルーティング＝
 #  INTMTX+PLIC_MX，HW RNG＝LPPERI_RNG_DATA_REG，eFuse MACレジスタ）
-#  のみ差し替えたC6版を${TARGETDIR}/wifi/に置く．chip非依存の
+#  のみ差し替えたC6版を${ESP_CHIP_DIR}/wifi/に置く．chip非依存の
 #  esp_shim.h／esp_shim_cfg.h／esp_shim_libc.c／esp_event_shim.c／
 #  esp_coex_adapter.c／esp_shim.cfgはC3側をそのまま再利用する
 #  （中身に変更不要．docs/wifi-shim.md参照）．
@@ -440,7 +447,7 @@ option(ESP32C6_COLD_CPU_PLL
 #  rtc_clk.c は esp_wifi.cmake / esp_bt_idf61.cmake の双方が既にリンク済み。
 #  素のビルド（WiFi/BT 両OFF）は rtc_clk.c を積まないので対象外＝PHY も使わない。
 if(ESP32C6_COLD_CPU_PLL AND (ESP32C6_WIFI OR ESP32C6_BT))
-    list(APPEND ASP3_SYSSVC_TARGET_C_FILES ${TARGETDIR}/cold_clk_init_c6.c)
+    list(APPEND ASP3_SYSSVC_TARGET_C_FILES ${ESP_CHIP_DIR}/cold_clk_init_c6.c)
     list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_COLD_CPU_PLL)
 endif()
 
@@ -466,28 +473,29 @@ if(ESP32C6_WIFI OR ESP32C6_BT)
     #  esp_shim_core.c に集約（docs/dedup-tier2-plan.md）．縮小した C6 固有
     #  wifi/esp_shim.c と併せてコンパイルする．
     list(APPEND ASP3_INCLUDE_DIRS
-        ${TARGETDIR}/wifi
+        ${ESP_CHIP_DIR}/wifi
         ${ESP_COMMON_DIR}
+        ${ESP_CHIP_DIR}
         ${ESP_COMMON_DIR}/wifi
     )
     list(APPEND ASP3_CFG_FILES ${ESP_COMMON_DIR}/wifi/esp_shim.cfg)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
         ${ESP_COMMON_DIR}/wifi/esp_shim_core.c
-        ${TARGETDIR}/wifi/esp_shim.c
+        ${ESP_CHIP_DIR}/wifi/esp_shim.c
         #  esp_shim_blobglue.cはWiFi blob（net80211/pp/core）専用の
         #  グルーが大半だが，esp_sleep_pd_config／esp_sleep_clock_config／
         #  esp_deep_sleep_register_phy_hook／_esp_error_check_failed等
         #  BTも要求する汎用スタブ（modem_clock.c／phy_init.cが参照）を
         #  同居させているため，BT単体ビルドでもリンクする（--gc-sections
         #  でWiFi専用の未参照部分は落ちる．BLE実施01で確認）．
-        ${TARGETDIR}/wifi/esp_shim_blobglue.c
+        ${ESP_CHIP_DIR}/wifi/esp_shim_blobglue.c
         ${ESP_COMMON_DIR}/wifi/esp_shim_libc.c
     )
 endif()
 if(ESP32C6_WIFI)
     list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_WIFI)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-        ${TARGETDIR}/wifi/esp_wifi_adapter.c
+        ${ESP_CHIP_DIR}/wifi/esp_wifi_adapter.c
         ${ESP_COMMON_DIR}/wifi/esp_event_shim.c
         ${ESP_COMMON_DIR}/wifi/esp_coex_adapter.c
         #
@@ -511,11 +519,11 @@ if(ESP32C6_WIFI)
         #  （AGC 1024ワード読み）も --gc-sections で落ちる＝**ホットパスのコストは消える**。
         #  wifi_dhcp（W1）は wifi_trace を一切参照しない＝**ELF から完全に消える**（§4 で実測）。
         #
-        ${TARGETDIR}/wifi/wifi_trace.c
+        ${ESP_CHIP_DIR}/wifi/wifi_trace.c
     )
 endif()
-include(${TARGETDIR}/esp_wifi.cmake)
-include(${TARGETDIR}/esp_bt.cmake)
+include(${ESP_CHIP_DIR}/esp_wifi.cmake)
+include(${ESP_CHIP_DIR}/esp_bt.cmake)
 
 #
 #  TCP/IP統合（lwIP．Wi-Fi必須＝ESP32C6_WIFIが前提。実施89）

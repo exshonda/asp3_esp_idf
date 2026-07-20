@@ -19,7 +19,7 @@
 if(ESP32C3_BT)
 
 set(BT_CHIP_SERIES esp32c3)
-set(BT_TARGETDIR ${TARGETDIR}/bt)
+set(BT_TARGETDIR ${ESP_CHIP_DIR}/bt)
 
 #
 #  ★C3 BT blob統一（docs/blob-unify-v554.md「C3のv5.5.4切替」節）：
@@ -217,7 +217,7 @@ list(APPEND ASP3_COMPILE_OPTIONS
 #  esp_event）はチップHAL＝blob世代非依存のためhalのまま．
 list(APPEND ASP3_INCLUDE_DIRS
     ${ESP_COMMON_DIR}/bt/stub/include
-    ${TARGETDIR}/wifi
+    ${ESP_CHIP_DIR}/wifi
     ${BT_IDF}/components/bt/include/${BT_CHIP_SERIES}/include
     ${BT_IDF}/components/bt/common/include
     ${BT_IDF}/components/bt/common/ble_log/include

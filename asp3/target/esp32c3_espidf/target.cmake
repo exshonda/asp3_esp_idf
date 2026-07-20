@@ -18,6 +18,11 @@ set(TARGETDIR ${CMAKE_CURRENT_LIST_DIR})
 #  リポジトリ直下 esp/common/ に置く（旧 asp3/target/common_espidf/ と
 #  旧 esp32c3_espidf/{hal_stub,net,bt/stub,wifi の共有分} を統合したもの）．
 #
+#
+#  ESP統合のチップ固有部（esp/c3）．wifi・bt・sdkconfig_stub・esp_*.cmake
+#  と，チップ固有のESP初期化ソースを置く．
+#
+get_filename_component(ESP_CHIP_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../esp/c3 ABSOLUTE)
 get_filename_component(ESP_COMMON_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../esp/common ABSOLUTE)
 
 #
@@ -221,7 +226,7 @@ endforeach()
 #  hal fallback 時は従来どおり hal の nuttx/ を直接参照する。
 #
 if(ASP3_ESPIDF_SUPPLY)
-    set(ESP_SUP_SDKCONFIG_DIR ${CMAKE_CURRENT_LIST_DIR}/sdkconfig_stub)
+    set(ESP_SUP_SDKCONFIG_DIR ${ESP_CHIP_DIR}/sdkconfig_stub)
 else()
     set(ESP_SUP_SDKCONFIG_DIR ${ESP_HAL_DIR}/nuttx/esp32c3/include)
 endif()
@@ -247,6 +252,8 @@ endif()
 #  必要なlibc側のギャップ埋めである．
 #
 list(APPEND ASP3_INCLUDE_DIRS
+    ${ESP_CHIP_DIR}
+    ${ESP_COMMON_DIR}
     ${ESP_COMMON_DIR}/hal_stub/include
     ${ESP_SUP_SDKCONFIG_DIR}
     ${ESP_SUP_DIR}/components/hal/esp32c3/include
@@ -414,25 +421,25 @@ option(ESP32C3_WIFI "Enable Wi-Fi (esp_wifi blob + os_adapter shim)" OFF)
 #  esp_shim_core.c に集約した（docs/dedup-tier2-plan.md）．各チップは共有
 #  コアをコンパイルしつつ，チップ固有部（縮小した wifi/esp_shim.c）も積む．
 if(ESP32C3_WIFI OR ESP32C3_BT)
-    list(APPEND ASP3_INCLUDE_DIRS ${TARGETDIR}/wifi ${ESP_COMMON_DIR} ${ESP_COMMON_DIR}/wifi)
+    list(APPEND ASP3_INCLUDE_DIRS ${ESP_CHIP_DIR}/wifi ${ESP_COMMON_DIR} ${ESP_COMMON_DIR}/wifi)
     list(APPEND ASP3_CFG_FILES ${ESP_COMMON_DIR}/wifi/esp_shim.cfg)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
         ${ESP_COMMON_DIR}/wifi/esp_shim_core.c
-        ${TARGETDIR}/wifi/esp_shim.c
+        ${ESP_CHIP_DIR}/wifi/esp_shim.c
         ${ESP_COMMON_DIR}/wifi/esp_shim_libc.c
-        ${TARGETDIR}/wifi/esp_shim_blobglue.c
+        ${ESP_CHIP_DIR}/wifi/esp_shim_blobglue.c
     )
 endif()
 
 if(ESP32C3_WIFI)
     list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_WIFI)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-        ${TARGETDIR}/wifi/esp_wifi_adapter.c
+        ${ESP_CHIP_DIR}/wifi/esp_wifi_adapter.c
         ${ESP_COMMON_DIR}/wifi/esp_event_shim.c
         ${ESP_COMMON_DIR}/wifi/esp_coex_adapter.c
     )
 endif()
-include(${TARGETDIR}/esp_wifi.cmake)
+include(${ESP_CHIP_DIR}/esp_wifi.cmake)
 
 #
 #  Bluetooth（BLE．NimBLE＋os_adapter shim．既定OFF）
@@ -447,7 +454,7 @@ if(ESP32C3_BT)
         message(FATAL_ERROR "ESP32C3_BT + ESP32C3_WIFI is not supported yet (RAM budget; Phase D-1 is BT-only)")
     endif()
 endif()
-include(${TARGETDIR}/esp_bt.cmake)
+include(${ESP_CHIP_DIR}/esp_bt.cmake)
 
 #
 #  TCP/IP統合（lwIP．Wi-Fi必須＝ESP32C3_WIFIが前提）

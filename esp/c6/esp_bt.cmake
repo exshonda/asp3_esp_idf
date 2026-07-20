@@ -32,7 +32,7 @@
 
 if(ESP32C6_BT)
 
-set(BT_TARGETDIR ${TARGETDIR}/bt)
+set(BT_TARGETDIR ${ESP_CHIP_DIR}/bt)
 
 #
 #  ------------------------------------------------------------------
@@ -277,11 +277,11 @@ list(APPEND ASP3_COMPILE_OPTIONS
 #  対策）．順序を誤ると C3 版が先に見つかり LEGACY_VHCI=1＝mbuf 余白計算が
 #  トランスポートと不整合になるサイレントな実行時バッファバグ．D-1（bt_smoke_c6）は
 #  bt_nimble_config.h を include しないため本 PREPEND は無害．
-list(PREPEND ASP3_INCLUDE_DIRS ${TARGETDIR}/bt/stub_idf61/include)
+list(PREPEND ASP3_INCLUDE_DIRS ${ESP_CHIP_DIR}/bt/stub_idf61/include)
 
 list(APPEND ASP3_INCLUDE_DIRS
     ${ESP_COMMON_DIR}/bt/stub/include
-    ${TARGETDIR}/wifi
+    ${ESP_CHIP_DIR}/wifi
     ${IDF}/components/bt/include/${BT_CHIP_SERIES}/include
     ${IDF}/components/bt/common/include
     ${IDF}/components/bt/common/ble_log/include
