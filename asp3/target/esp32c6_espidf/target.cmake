@@ -524,12 +524,22 @@ include(${TARGETDIR}/esp_bt.cmake)
 #  実施89）．
 #
 option(ESP32C6_LWIP "Integrate lwIP (TCP/IP + BSD sockets, requires ESP32C6_WIFI)" OFF)
+#
+#  ★段階1（esp-idf-only化）横展開：C3で実機GREEN確認済み（evidence-c3-11）の
+#  ASP3_LWIP_ESPIDFをC6へ移植。既定OFF＝従来どおり ./lwip。
+#
+option(ASP3_LWIP_ESPIDF "Supply lwIP core/api sources from the esp-idf submodule (bundled lwip fork, same Filelists.cmake layout) instead of the dedicated ./lwip submodule (lwip-tcpip upstream). Default OFF until real-HW GOT-IP+ping is verified on C6. Reversible" OFF)
 if(ESP32C6_LWIP)
     if(NOT ESP32C6_WIFI)
         message(FATAL_ERROR "ESP32C6_LWIP requires ESP32C6_WIFI=ON")
     endif()
 
-    get_filename_component(LWIP_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../lwip ABSOLUTE)
+    if(ASP3_LWIP_ESPIDF)
+        set(LWIP_DIR ${IDF_V554}/components/lwip/lwip)
+        list(APPEND ASP3_COMPILE_DEFS TOPPERS_LWIP_ESPIDF_SUPPLY=1)
+    else()
+        get_filename_component(LWIP_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../lwip ABSOLUTE)
+    endif()
     include(${LWIP_DIR}/src/Filelists.cmake)
 
     list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_LWIP)
