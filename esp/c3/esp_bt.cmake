@@ -385,6 +385,22 @@ if(ESP32C3_BT_NIMBLE)
     #  （可逆）．
     option(ESP32C3_BT_SM "Enable NimBLE SMP pairing/bonding (Phase D-2d, tinycrypt)" ON)
 
+    #
+    #  ★stale 接続の検出と解消（rc-c3 P1-3b）．既定 OFF．
+    #
+    #  実機で確定した障害 L1：リンクが静かに死んだとき supervision-timeout 由来の
+    #  切断イベントが host に配送されず（DISC=0），host が接続を保持し続けるため
+    #  **広告が再開されず «スマホから見えない»**（復帰は reset のみ）。
+    #  本オプションは «接続保持中に GAP 事象が 45 秒動かない» を stale と判定して
+    #  ble_gap_terminate、それでも畳めなければ ble_hs_sched_reset でホストを
+    #  作り直し、広告を自動復帰させる（2サイクル連続で実機実証済み）。
+    #
+    #  ★これは «根治» ではなく緩和策（本丸＝なぜリンクが死ぬかは未解明）。
+    #  証跡＝.steering/…/evidence-rc-c3-P1-wedge-mbuf-exhaustion.md（別ブランチ
+    #  claude/c3-smp-death-plan）。
+    #
+    option(ESP32C3_BT_CONN_WD "Detect+terminate stale connection and restore advertising (rc-c3 P1-3b). Default OFF (mitigation, not a root fix)" OFF)
+
     #  ---- コンパイル定義 ----
     #  ESP_PLATFORM：syscfg.h が esp_nimble_cfg.h を読むための分岐キー．
     #  SECURITY off：sync に暗号は不要．NIMBLE_BLE_SM = SM_LEGACY||SM_SC を
@@ -434,6 +450,9 @@ if(ESP32C3_BT_NIMBLE)
         #  有効化する識別子．NIMBLE_BLE_SM は bt_nimble_config.h の
         #  CONFIG_BT_NIMBLE_SM_LEGACY/SC=1 から自動で 1 になる（蓋をしない）．
         list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_BT_SM)
+    endif()
+    if(ESP32C3_BT_CONN_WD)
+        list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_BT_CONN_WD)
     else()
         #  D-2c まで：SECURITY off．NIMBLE_BLE_SM=SM_LEGACY||SM_SC を 0 に落とし
         #  （nimble_opt_auto.h），ble_sm*.c を near-empty 化して tinycrypt/mbedTLS
