@@ -25,7 +25,7 @@
 #include <t_syslog.h>
 #include <sil.h>
 #include <string.h>
-#include "ble_host_smoke.h"
+#include "ble_host_smoke_c3.h"
 
 #include "esp_bt.h"
 #include "esp_shim.h"

@@ -15,7 +15,7 @@
 #include <kernel.h>
 #include <t_syslog.h>
 #include <string.h>
-#include "bt_smoke.h"
+#include "bt_smoke_c3.h"
 
 #include "esp_bt.h"
 #include "esp_shim.h"

@@ -35,7 +35,7 @@
  */
 #include <kernel.h>
 #include <t_syslog.h>
-#include "boot_pmu_probe.h"
+#include "boot_pmu_probe_c5.h"
 
 /*
  *  PMU（常時給電ドメイン．読みは常に安全）

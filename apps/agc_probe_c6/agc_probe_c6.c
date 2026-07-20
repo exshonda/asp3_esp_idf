@@ -14,7 +14,7 @@
  */
 #include <kernel.h>
 #include <t_syslog.h>
-#include "agc_probe.h"
+#include "agc_probe_c6.h"
 
 #define AGC_SPOT_REG		0x600a7128UL
 #define AGC_REGION_BASE		0x600a7000UL

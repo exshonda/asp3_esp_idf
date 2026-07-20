@@ -41,8 +41,8 @@ asp3_esp_idf/
 
 - Wi-Fi：`wifi_scan` / `wifi_connect` / `wifi_dhcp`
 - TCP/IP：`tcp_socket_echo` / `tcp_socket_client` / `udp_socket_echo`
-- BLE：`bt_smoke{,_c5,_c6}`（コントローラ／HCI）・`ble_host_smoke{,_c5,_c6}`（NimBLE＋独自GATT）
-- 負荷・診断：`load_test_c3` / `load_test_c5` / `load_test_c6` / `agc_probe` / `boot_pmu_probe`
+- BLE：`bt_smoke_c{3,5,6}`（コントローラ／HCI）・`ble_host_smoke_c{3,5,6}`（NimBLE＋独自GATT）
+- 負荷・診断：`load_test_c{3,5,6}` / `agc_probe_c6`（C6専用・AGC調査は★完結） / `boot_pmu_probe_c5`（C5専用・boot方式調査は★完結）
 
 ## 供給元（esp-idf submodule か hal か）
 
@@ -146,7 +146,7 @@ cmake -S asp3/asp3_core -B build/c3_ble -G Ninja \
   -DASP3_TARGET=esp32c3_espidf \
   -DASP3_TARGET_DIR=$PWD/asp3/target/esp32c3_espidf \
   -DESP32C3_QEMU=OFF -DESP32C3_BT=ON -DESP32C3_BT_NIMBLE=ON \
-  -DASP3_APPLDIR=$PWD/apps/ble_host_smoke -DASP3_APPLNAME=ble_host_smoke
+  -DASP3_APPLDIR=$PWD/apps/ble_host_smoke_c3 -DASP3_APPLNAME=ble_host_smoke_c3
 cmake --build build/c3_ble
 ```
 

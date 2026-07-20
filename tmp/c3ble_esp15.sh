@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-#  ESP32-C3 BLE（ble_host_smoke ほか）を «Espressif版 riscv32-esp-elf GCC 15.2.0»
+#  ESP32-C3 BLE（ble_host_smoke_c3 ほか）を «Espressif版 riscv32-esp-elf GCC 15.2.0»
 #  でビルド→flash→boot する実機ヘルパ（c3ble.sh の esp-15.2 版）。
 #
 #  c3ble.sh（正典＝xpack riscv-none-elf-gcc 15.2.0）との差分は以下の3点のみ：
@@ -16,7 +16,7 @@
 #  -DESP32C3_QEMU=OFF は c3ble.sh と同じく必須のまま維持（csrw mie 罠）。
 #  csrw mie 自己検査（xpack objdump相当）も継承。
 #
-#  使い方: c3ble.sh と同じ（build/flash/boot/all/mark/read/port）。既定app=ble_host_smoke。
+#  使い方: c3ble.sh と同じ（build/flash/boot/all/mark/read/port）。既定app=ble_host_smoke_c3。
 #
 set -u
 
@@ -47,10 +47,10 @@ need_port() {
 }
 
 do_build() {
-	local app="${1:-ble_host_smoke}"; shift || true
+	local app="${1:-ble_host_smoke_c3}"; shift || true
 	local opts=()
 	case "$app" in
-		ble_host_smoke|bt_smoke)
+		ble_host_smoke_c3|bt_smoke_c3)
 			opts+=(-DESP32C3_BT=ON -DESP32C3_BT_SM=ON) ;;
 	esac
 	echo "## configure ($app) -> $BUILD [esp-15.2, prefix=$TOOLCHAIN_PREFIX]"

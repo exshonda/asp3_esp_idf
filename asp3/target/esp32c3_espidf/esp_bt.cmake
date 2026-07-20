@@ -389,11 +389,11 @@ endforeach()
 #  にブリッジする（詳細は docs/bt-shim.md／hal/components/bt/CMakeLists.txt
 #  の NimBLE ブロック lines 694-940 を参照）．
 #
-#  RAM 予算のため既定は OFF．NimBLE を要するアプリ（ble_host_smoke）では
-#  自動で ON にする（D-1 の bt_smoke を痩せたまま保つ）．
+#  RAM 予算のため既定は OFF．NimBLE を要するアプリ（ble_host_smoke_c3）では
+#  自動で ON にする（D-1 の bt_smoke_c3 を痩せたまま保つ）．
 #
 option(ESP32C3_BT_NIMBLE "Enable NimBLE host stack on top of BT controller (Phase D-2)" OFF)
-if(ASP3_APPLNAME STREQUAL "ble_host_smoke")
+if(ASP3_APPLNAME STREQUAL "ble_host_smoke_c3")
     set(ESP32C3_BT_NIMBLE ON)
 endif()
 
@@ -429,7 +429,7 @@ if(ESP32C3_BT_NIMBLE)
         ESP_PLATFORM
         #  NimBLE ホストを積むビルドの識別子．esp_shim の静的プール拡張
         #  （wifi/esp_shim_cfg.h ほか）をこのビルド限定にするために使う
-        #  （bt_smoke=コントローラのみ のビルドはプールを増やさない）．
+        #  （bt_smoke_c3=コントローラのみ のビルドはプールを増やさない）．
         TOPPERS_ESP32C3_BT_NIMBLE
     )
     #  ---- 段階1 A/B切り分け用：PVCY トグル（既定=ON＝bond有効・恒久ビルド） ----
@@ -447,7 +447,7 @@ if(ESP32C3_BT_NIMBLE)
 
     #  ---- connect不可 恒久修正候補(i)（ドラフト・既定OFF） ----
     #  docs/c3-ble-connect-plan.md 段階1で「PVCY=0でconnect成功／PVCY=1で失敗」＝
-    #  候補1が確定した場合の恒久修正候補(i)．app（ble_host_smoke.c on_sync）で
+    #  候補1が確定した場合の恒久修正候補(i)．app（ble_host_smoke_c3.c on_sync）で
     #  アドバタイズ開始前に ble_hs_pvcy_set_resolve_enabled(0) を呼び，起動時
     #  バーストが有効化したアドレス解決を「元に戻す」．PVCY=1 を保つため bond
     #  （Identity 鍵配布のコンパイル時ゲート）は維持される．本アプリは
@@ -460,7 +460,7 @@ if(ESP32C3_BT_NIMBLE)
     endif()
 
     if(ESP32C3_BT_SM)
-        #  D-2d：SMP 有効．app 側（ble_host_smoke.c）の SM 設定・store 初期化を
+        #  D-2d：SMP 有効．app 側（ble_host_smoke_c3.c）の SM 設定・store 初期化を
         #  有効化する識別子．NIMBLE_BLE_SM は bt_nimble_config.h の
         #  CONFIG_BT_NIMBLE_SM_LEGACY/SC=1 から自動で 1 になる（蓋をしない）．
         list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_BT_SM)

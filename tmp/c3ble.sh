@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-#  ESP32-C3 BLE（ble_host_smoke ほか）の build→flash→boot→RTCマーカ読取を
+#  ESP32-C3 BLE（ble_host_smoke_c3 ほか）の build→flash→boot→RTCマーカ読取を
 #  一括化する実機操作ヘルパ（このマシン固有）。
 #
 #  ★ハマりどころを全部埋め込む（過去に実際にやらかした事故の再発防止）:
@@ -24,7 +24,7 @@
 #    c3ble.sh read <addr>                           任意RTC/メモリ語を1つ読む
 #    c3ble.sh port                                  解決した by-id ポートを表示
 #
-#  既定 app = ble_host_smoke（SM有効）。別ボードは BOARD_MAC 環境変数で上書き。
+#  既定 app = ble_host_smoke_c3（SM有効）。別ボードは BOARD_MAC 環境変数で上書き。
 #  観測（ライブBLE）はホスト bluetoothctl / スマホから。コンソール開放は
 #  DUTをリセットするので RTC マーカ読取を主判定にする。
 #
@@ -56,11 +56,11 @@ need_port() {
 }
 
 do_build() {
-	local app="${1:-ble_host_smoke}"; shift || true
+	local app="${1:-ble_host_smoke_c3}"; shift || true
 	local opts=()
 	#  BLE系アプリは BT/SM を既定 ON。それ以外は素で通す。
 	case "$app" in
-		ble_host_smoke|bt_smoke)
+		ble_host_smoke_c3|bt_smoke_c3)
 			opts+=(-DESP32C3_BT=ON -DESP32C3_BT_SM=ON) ;;
 	esac
 	echo "## configure ($app) -> $BUILD"
