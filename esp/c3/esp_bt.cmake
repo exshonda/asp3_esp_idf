@@ -45,8 +45,8 @@ set(BT_TARGETDIR ${ESP_CHIP_DIR}/bt)
 #  esp_bt.hがCONFIG_BT_CTRL_CHECK_CONFIG_EFF未定義時に
 #  CONFIG_BT_CTRL_BLE_MIN_CONN_INTERVAL_ENABLE=1を定義→call有効化→v5.5.4 blobで解決）．
 #
-#  ★既定OFF（hal）を維持——実機bondがv5.5.4で通るまでデフォルトは切替えない．
-#  可逆：-DASP3_BT_IDF_V554=OFF でhalへ完全復帰．
+#  ★2026-07-21：hal fallback は撤去済み（./hal submodule ごと削除）。
+#  BT ツリーは常に esp-idf submodule（真の v5.5.4）から供給する。
 #
 #  ★2026-07-17：`option(ASP3_BT_IDF_V554 … OFF)` の宣言はここから
 #  **下の供給移行ブロックへ移した**（既定を `ASP3_ESPIDF_SUPPLY` に追従させ，
@@ -121,42 +121,14 @@ set(ASP3_BT_IDF_V554_DIR ${IDF_V554}
 #  食い違う指定は **FATAL_ERROR で即座に落とす**（＝「混ぜた」ことに起因する
 #  難解なコンパイルエラーを，設定段階の明示的なエラーに置き換える）。
 #
-if(NOT DEFINED ASP3_BT_IDF_V554)
-    set(_asp3_bt_v554_default ${ASP3_ESPIDF_SUPPLY})
-else()
-    set(_asp3_bt_v554_default ${ASP3_BT_IDF_V554})
-endif()
-option(ASP3_BT_IDF_V554
-    "Supply the C3 BT tree (controller bt.c / phy / blobs / ROM ld / NimBLE) from the esp-idf submodule (TRUE v5.5.4 tag) instead of esp-hal-3rdparty. Defaults to ASP3_ESPIDF_SUPPLY so the base and the BT tree never mix. Reversible"
-    ${_asp3_bt_v554_default})
-
-if(ASP3_BT_IDF_V554 AND NOT ASP3_ESPIDF_SUPPLY)
+if(NOT EXISTS ${ASP3_BT_IDF_V554_DIR}/components/bt/controller/${BT_CHIP_SERIES}/bt.c)
     message(FATAL_ERROR
-        "ASP3_BT_IDF_V554=ON requires ASP3_ESPIDF_SUPPLY=ON: the BT tree (esp-idf) and the "
-        "base components (hal) would come from different supplies. That mixture is known to "
-        "break (measured: shared_periph_module_t / soc_root_clk_circuit_t undefined) because "
-        "hal and esp-idf are each self-consistent but not interchangeable per-component. "
-        "Use -DASP3_ESPIDF_SUPPLY=ON (both esp-idf) or -DASP3_BT_IDF_V554=OFF (both hal).")
+        "ASP3_BT_IDF_V554_DIR='${ASP3_BT_IDF_V554_DIR}' does not look like an esp-idf tree "
+        "(bt/controller/${BT_CHIP_SERIES}/bt.c not found). Default is the repo submodule "
+        "esp-idf/ (true v5.5.4 tag); init it with `git submodule update --init esp-idf`, "
+        "or point -DASP3_BT_IDF_V554_DIR=<tree>.")
 endif()
-if(ASP3_ESPIDF_SUPPLY AND NOT ASP3_BT_IDF_V554)
-    message(FATAL_ERROR
-        "ASP3_ESPIDF_SUPPLY=ON with ASP3_BT_IDF_V554=OFF mixes an esp-idf base with a hal BT "
-        "tree; see above. Use -DASP3_ESPIDF_SUPPLY=OFF (both hal) for the hal fallback.")
-endif()
-
-if(ASP3_BT_IDF_V554)
-    if(NOT EXISTS ${ASP3_BT_IDF_V554_DIR}/components/bt/controller/${BT_CHIP_SERIES}/bt.c)
-        message(FATAL_ERROR
-            "ASP3_BT_IDF_V554=ON but ASP3_BT_IDF_V554_DIR='${ASP3_BT_IDF_V554_DIR}' "
-            "does not look like an esp-idf tree (bt/controller/${BT_CHIP_SERIES}/bt.c not found). "
-            "Default is the repo submodule esp-idf/ (true v5.5.4 tag); init it with "
-            "`git submodule update --init esp-idf`, or point -DASP3_BT_IDF_V554_DIR=<tree>.")
-    endif()
-    set(BT_IDF ${ASP3_BT_IDF_V554_DIR})
-else()
-    asp3_require_removed_submodule(${ESP_HAL_DIR} ASP3_BT_IDF_V554 "esp-hal-3rdparty (./hal)")
-    set(BT_IDF ${ESP_HAL_DIR})
-endif()
+set(BT_IDF ${ASP3_BT_IDF_V554_DIR})
 
 list(APPEND ASP3_COMPILE_DEFS
     TOPPERS_ESP32C3_BT
@@ -250,17 +222,15 @@ list(APPEND ASP3_INCLUDE_DIRS
     ${ESP_SUP_DIR}/components/esp_event/include
 )
 
-if(ASP3_BT_IDF_V554)
-    #  v5.5.4のesp_wifi_types_generic.hはv6.1/halと異なり"esp_interface.h"を
-    #  直接includeする（phy_init.cがesp_private/wifi.h→esp_wifi_types_generic.h
-    #  経由でこのヘッダ連鎖を辿る）．v5.5.4のesp_interface.h実体は
-    #  esp_hw_support/includeにある（halには存在しないファイル＝hal側の
-    #  esp_hw_support/includeが先にあっても衝突せず素通り）．C5/C6の
-    #  ASP3_BT_IDF_V554と同一の壁・同一の解決（memory c5c6-bt-blob-v554-feasibility）．
-    list(APPEND ASP3_INCLUDE_DIRS
-        ${BT_IDF}/components/esp_hw_support/include
-    )
-endif()
+#  v5.5.4のesp_wifi_types_generic.hはv6.1/halと異なり"esp_interface.h"を
+#  直接includeする（phy_init.cがesp_private/wifi.h→esp_wifi_types_generic.h
+#  経由でこのヘッダ連鎖を辿る）．v5.5.4のesp_interface.h実体は
+#  esp_hw_support/includeにある（halには存在しないファイル＝hal側の
+#  esp_hw_support/includeが先にあっても衝突せず素通り）．C5/C6の
+#  ASP3_BT_IDF_V554と同一の壁・同一の解決（memory c5c6-bt-blob-v554-feasibility）．
+list(APPEND ASP3_INCLUDE_DIRS
+    ${BT_IDF}/components/esp_hw_support/include
+)
 
 #
 #  ------------------------------------------------------------------

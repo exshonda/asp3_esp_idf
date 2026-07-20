@@ -61,7 +61,8 @@ option(ESP32C3_WIFI "Integrate esp-hal-3rdparty prebuilt Wi-Fi libs (wpa_supplic
 if(ESP32C3_WIFI)
 
 #
-#  ESP_HAL_DIR はtarget.cmakeで定義済み（asp3/hal ＝ esp-hal-3rdparty submodule）
+#  ★2026-07-21：hal（esp-hal-3rdparty）供給は撤去済み（submodule ごと削除）。
+#  ESP コンポーネントは常に esp-idf submodule（ESP_SUP_DIR＝真の v5.5.4）から供給する。
 #
 
 set(WIFI_CHIP_SERIES esp32c3)
@@ -234,33 +235,31 @@ set_source_files_properties(
 #  2. リンクライブラリパス・ライブラリ（Wireless.mk 80-88行目）
 #  ------------------------------------------------------------------
 #
-if(ASP3_ESPIDF_SUPPLY)
-    #  esp-idf版 esp_wifi/src/wifi_init.c が `#include "esp_netif.h"` する
-    #  （呼出しは0件＝型宣言のためだけ）。
-    list(APPEND ASP3_INCLUDE_DIRS
-        ${ESP_SUP_DIR}/components/esp_netif/include
-    )
-    #  ★esp-idf版の esp_event.h／esp_private/wifi.h／esp_wifi_private.h は
-    #  `#include "freertos/FreeRTOS.h"`／`task.h`／`queue.h`／`semphr.h` する。
-    #  hal版はOS非依存の `platform/os.h` に置換されている（＝esp-hal-3rdparty
-    #  がNuttX向けにFreeRTOS依存を剥がしているための差．実測：
-    #  hal esp_event.h:12 `platform/os.h` ／ esp-idf esp_event.h:12-15 freertos×4）。
-    #  ASP3はFreeRTOSを«使わない»ので，既存のBTコントローラ用FreeRTOS互換
-    #  スタブ（bt/stub/include，実体はesp_shimへ委譲）を再利用する
-    #  ＝C5・C6と同一（両者はこのC3のスタブを参照している＝チップ非依存）。
-    #  APPEND（＝後ろ）にするのは，同ディレクトリに同居する
-    #  bt_nimble_config.h／esp_partition.hで意図せずシャドウしないため
-    #  （WiFi単体ビルドではこの2つはどこからもincludeされない）。
-    list(APPEND ASP3_INCLUDE_DIRS
-        ${ESP_COMMON_DIR}/bt/stub/include
-    )
-endif()
+#  esp-idf版 esp_wifi/src/wifi_init.c が `#include "esp_netif.h"` する
+#  （呼出しは0件＝型宣言のためだけ）。
+list(APPEND ASP3_INCLUDE_DIRS
+    ${ESP_SUP_DIR}/components/esp_netif/include
+)
+#  ★esp-idf版の esp_event.h／esp_private/wifi.h／esp_wifi_private.h は
+#  `#include "freertos/FreeRTOS.h"`／`task.h`／`queue.h`／`semphr.h` する。
+#  hal版はOS非依存の `platform/os.h` に置換されている（＝esp-hal-3rdparty
+#  がNuttX向けにFreeRTOS依存を剥がしているための差．実測：
+#  hal esp_event.h:12 `platform/os.h` ／ esp-idf esp_event.h:12-15 freertos×4）。
+#  ASP3はFreeRTOSを«使わない»ので，既存のBTコントローラ用FreeRTOS互換
+#  スタブ（bt/stub/include，実体はesp_shimへ委譲）を再利用する
+#  ＝C5・C6と同一（両者はこのC3のスタブを参照している＝チップ非依存）。
+#  APPEND（＝後ろ）にするのは，同ディレクトリに同居する
+#  bt_nimble_config.h／esp_partition.hで意図せずシャドウしないため
+#  （WiFi単体ビルドではこの2つはどこからもincludeされない）。
+list(APPEND ASP3_INCLUDE_DIRS
+    ${ESP_COMMON_DIR}/bt/stub/include
+)
 
 #
 #  ★v5.5.4統一（docs/blob-unify-v554.md）：WiFi/PHY/coexist blobを
 #  hal（esp-hal-3rdparty submodule，NuttX同期のv8）から**真のv5.5.4タグ**
 #  （repo submodule `esp-idf/`＝735507283d）へ切替える。
-#  reversible: ASP3_WIFI_BLOB_HAL=ON でhalへ戻せる。
+#  ★2026-07-21：hal fallback は撤去済み（./hal submodule ごと削除）＝常に v5.5.4。
 #
 #  ★provenance（本ラウンドの実測．evidence-c3-01 §1）：`IDF_V554` は
 #  **target.cmake で submodule 相対に定義**するようになった。従来ここに
@@ -274,26 +273,20 @@ endif()
 #  ∴ C3 に `idf_v554_override/` 相当は存在せず（実測＝0件），
 #  `ASP3_WIFI_OSI_HAS_DISABLE_AC_AX` 相当のガードも不要。
 #
-option(ASP3_WIFI_BLOB_HAL "Use hal(v8) WiFi/PHY/coexist blob instead of ESP-IDF v5.5.4(v8) unification (reversible fallback)" OFF)
-if(ASP3_WIFI_BLOB_HAL)
-    asp3_require_removed_submodule(${ESP_HAL_DIR} ASP3_WIFI_BLOB_HAL "esp-hal-3rdparty (./hal)")
-    set(ASP3_WIFI_BLOB_SRC ${ESP_HAL_DIR})
-else()
-    set(ASP3_WIFI_BLOB_SRC ${IDF_V554})
-    #  ★本ガードが有効化する残り2関数（esp_wifi_sta_get_ie／
-    #  esp_wifi_is_wpa3_compatible_mode_enabled）は **hal の
-    #  wpa_supplicant だけが呼ぶ hal 独自API**で，真のv5.5.4タグ blob は
-    #  持たない（実測：nm で 0）。esp-idf 供給の wpa はそもそも呼ばない
-    #  ので未参照→`--gc-sections` で脱落する（C5 evidence-02 §7＝★D5 解消）。
-    #  hal blob 使用時は blob 側が定義するため排他が必要（二重定義になる）。
-    #
-    #  ★`esp_wifi_skip_supp_pmkcaching` は本ガードから**外した**（本ラウンド）：
-    #  実測で **真のv5.5.4タグ・v5.5.0・hal のいずれも blob が定義**しており
-    #  （欠くのは v6.1 のみ），スタブが残っていると
-    #  `multiple definition` でリンク不能になる（＝移行前の既定ビルドが
-    #  本PCで壊れていた真因．evidence-c3-01 §3）。C6 が同じ修正を先行実施。
-    list(APPEND ASP3_COMPILE_DEFS ASP3_WIFI_BLOB_V554=1)
-endif()
+set(ASP3_WIFI_BLOB_SRC ${IDF_V554})
+#  ★本ガードが有効化する残り2関数（esp_wifi_sta_get_ie／
+#  esp_wifi_is_wpa3_compatible_mode_enabled）は **hal の
+#  wpa_supplicant だけが呼ぶ hal 独自API**で，真のv5.5.4タグ blob は
+#  持たない（実測：nm で 0）。esp-idf 供給の wpa はそもそも呼ばない
+#  ので未参照→`--gc-sections` で脱落する（C5 evidence-02 §7＝★D5 解消）。
+#  hal blob 使用時は blob 側が定義するため排他が必要（二重定義になる）。
+#
+#  ★`esp_wifi_skip_supp_pmkcaching` は本ガードから**外した**（本ラウンド）：
+#  実測で **真のv5.5.4タグ・v5.5.0・hal のいずれも blob が定義**しており
+#  （欠くのは v6.1 のみ），スタブが残っていると
+#  `multiple definition` でリンク不能になる（＝移行前の既定ビルドが
+#  本PCで壊れていた真因．evidence-c3-01 §3）。C6 が同じ修正を先行実施。
+list(APPEND ASP3_COMPILE_DEFS ASP3_WIFI_BLOB_V554=1)
 
 list(APPEND ASP3_LINK_OPTIONS
     -L${ASP3_WIFI_BLOB_SRC}/components/esp_wifi/lib/${WIFI_CHIP_SERIES}
@@ -364,42 +357,24 @@ list(APPEND ASP3_INCLUDE_DIRS
     ${MBEDTLS_DIR}/include
 )
 
-if(ASP3_ESPIDF_SUPPLY)
-    #
-    #  mbedtls 3.6.5（classic）．ESP-IDF本家の mbedtls コンポーネントは
-    #  `port/include` `mbedtls/include` `mbedtls/library` の3つをPUBLICな
-    #  インクルードとして公開し（esp-idf/components/mbedtls/CMakeLists.txt:30），
-    #  wpa_supplicant は PRIV_REQUIRES mbedtls でそれを受ける（同 :250）。
-    #  ＝`library/` を検索パスに置くのは**本家と同じ**構成。
-    #
-    #  ★shadow注意（**版ダウン固有の新規リスク**）：3.6.5の
-    #  `library/common.h` は wpaの `src/utils/common.h` と**同名**。
-    #  mbedtls 4.0.0 には `library/common.h` が存在しないため hal 構成では
-    #  この衝突自体が起き得なかった＝移行で初めて生じる。
-    #  正しい解決先は**wpa側**（本家 esp-idf の include 順と同じ）。
-    #  ⇒ `library` は §4（wpa）の**後ろ**に置く（§4 末尾を参照）。
-    #
-    list(APPEND ASP3_COMPILE_DEFS
-        MBEDTLS_CONFIG_FILE=<mbedtls/esp_config.h>
-    )
-else()
-    #  mbedtls 4.0.0（tf-psa-crypto分離）＝従来のhal供給（可逆fallback）
-    list(APPEND ASP3_INCLUDE_DIRS
-        ${MBEDTLS_DIR}/library
-        ${ESP_HAL_DIR}/components/mbedtls/port/psa_driver/include
-        ${MBEDTLS_DIR}/tf-psa-crypto/drivers/builtin/include
-        ${MBEDTLS_DIR}/tf-psa-crypto/drivers/builtin/src
-        ${MBEDTLS_DIR}/tf-psa-crypto/core
-        ${MBEDTLS_DIR}/tf-psa-crypto/include
-        ${ESP_HAL_DIR}/nuttx/include/mbedtls
-    )
-    list(APPEND ASP3_COMPILE_DEFS
-        MBEDTLS_CONFIG_FILE=<mbedtls/esp_config.h>
-        TF_PSA_CRYPTO_USER_CONFIG_FILE=\"mbedtls/esp_config.h\"
-    )
-endif()
+#
+#  mbedtls 3.6.5（classic）．ESP-IDF本家の mbedtls コンポーネントは
+#  `port/include` `mbedtls/include` `mbedtls/library` の3つをPUBLICな
+#  インクルードとして公開し（esp-idf/components/mbedtls/CMakeLists.txt:30），
+#  wpa_supplicant は PRIV_REQUIRES mbedtls でそれを受ける（同 :250）。
+#  ＝`library/` を検索パスに置くのは**本家と同じ**構成。
+#
+#  ★shadow注意（**版ダウン固有の新規リスク**）：3.6.5の
+#  `library/common.h` は wpaの `src/utils/common.h` と**同名**。
+#  mbedtls 4.0.0 には `library/common.h` が存在しないため hal 構成では
+#  この衝突自体が起き得なかった＝移行で初めて生じる。
+#  正しい解決先は**wpa側**（本家 esp-idf の include 順と同じ）。
+#  ⇒ `library` は §4（wpa）の**後ろ**に置く（§4 末尾を参照）。
+#
+list(APPEND ASP3_COMPILE_DEFS
+    MBEDTLS_CONFIG_FILE=<mbedtls/esp_config.h>
+)
 
-if(ASP3_ESPIDF_SUPPLY)
 
 #
 #  ------------------------------------------------------------------
@@ -421,159 +396,78 @@ if(ASP3_ESPIDF_SUPPLY)
 #
 set(MBEDTLS_LIB_DIR ${MBEDTLS_DIR}/library)
 list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-    ${MBEDTLS_LIB_DIR}/aes.c
-    ${MBEDTLS_LIB_DIR}/aria.c
-    ${MBEDTLS_LIB_DIR}/bignum_core.c
-    ${MBEDTLS_LIB_DIR}/bignum.c
-    ${MBEDTLS_LIB_DIR}/bignum_mod.c
-    ${MBEDTLS_LIB_DIR}/bignum_mod_raw.c
-    ${MBEDTLS_LIB_DIR}/ccm.c
-    ${MBEDTLS_LIB_DIR}/cipher_wrap.c
-    ${MBEDTLS_LIB_DIR}/cipher.c
-    ${MBEDTLS_LIB_DIR}/cmac.c
-    ${MBEDTLS_LIB_DIR}/constant_time.c
-    ${MBEDTLS_LIB_DIR}/ctr_drbg.c
-    ${MBEDTLS_LIB_DIR}/ecp_curves.c
-    ${MBEDTLS_LIB_DIR}/ecp.c
-    ${MBEDTLS_LIB_DIR}/entropy.c
-    ${MBEDTLS_LIB_DIR}/entropy_poll.c
-    ${MBEDTLS_LIB_DIR}/gcm.c
-    ${MBEDTLS_LIB_DIR}/md.c
-    ${MBEDTLS_LIB_DIR}/pkcs5.c
-    ${MBEDTLS_LIB_DIR}/platform_util.c
-    ${MBEDTLS_LIB_DIR}/platform.c
-    ${MBEDTLS_LIB_DIR}/sha1.c
-    ${MBEDTLS_LIB_DIR}/sha3.c
-    ${MBEDTLS_LIB_DIR}/sha256.c
-    ${MBEDTLS_LIB_DIR}/sha512.c
-    ${MBEDTLS_LIB_DIR}/pk.c
-    ${MBEDTLS_LIB_DIR}/pk_wrap.c
-    ${MBEDTLS_LIB_DIR}/pkparse.c
-    ${MBEDTLS_LIB_DIR}/ecdsa.c
-    ${MBEDTLS_LIB_DIR}/asn1parse.c
-    ${MBEDTLS_LIB_DIR}/asn1write.c
-    ${MBEDTLS_LIB_DIR}/rsa.c
-    ${MBEDTLS_LIB_DIR}/md5.c
-    ${MBEDTLS_LIB_DIR}/oid.c
-    ${MBEDTLS_LIB_DIR}/pem.c
-    ${MBEDTLS_LIB_DIR}/hmac_drbg.c
-    ${MBEDTLS_LIB_DIR}/rsa_alt_helpers.c
-    ${MBEDTLS_LIB_DIR}/ecdh.c
-    ${MBEDTLS_LIB_DIR}/pk_ecc.c
-    ${MBEDTLS_LIB_DIR}/psa_util.c
-    ${MBEDTLS_LIB_DIR}/psa_crypto_ffdh.c
-    ${MBEDTLS_LIB_DIR}/psa_crypto_ecp.c
-    ${MBEDTLS_LIB_DIR}/psa_crypto_rsa.c
-    ${MBEDTLS_LIB_DIR}/psa_crypto_cipher.c
-    ${MBEDTLS_LIB_DIR}/psa_crypto_mac.c
-    ${MBEDTLS_LIB_DIR}/psa_crypto_hash.c
-    ${MBEDTLS_LIB_DIR}/psa_crypto_aead.c
-    #  4.0.0 の tf-psa-crypto/core/ 相当（3.6.5では library/ に同居）
-    ${MBEDTLS_LIB_DIR}/psa_crypto_client.c
-    ${MBEDTLS_LIB_DIR}/psa_crypto_driver_wrappers_no_static.c
-    ${MBEDTLS_LIB_DIR}/psa_crypto_slot_management.c
-    ${MBEDTLS_LIB_DIR}/psa_crypto_storage.c
-    ${MBEDTLS_LIB_DIR}/psa_crypto.c
-    ${MBEDTLS_LIB_DIR}/psa_its_file.c
-    ${MBEDTLS_LIB_DIR}/version.c
+${MBEDTLS_LIB_DIR}/aes.c
+${MBEDTLS_LIB_DIR}/aria.c
+${MBEDTLS_LIB_DIR}/bignum_core.c
+${MBEDTLS_LIB_DIR}/bignum.c
+${MBEDTLS_LIB_DIR}/bignum_mod.c
+${MBEDTLS_LIB_DIR}/bignum_mod_raw.c
+${MBEDTLS_LIB_DIR}/ccm.c
+${MBEDTLS_LIB_DIR}/cipher_wrap.c
+${MBEDTLS_LIB_DIR}/cipher.c
+${MBEDTLS_LIB_DIR}/cmac.c
+${MBEDTLS_LIB_DIR}/constant_time.c
+${MBEDTLS_LIB_DIR}/ctr_drbg.c
+${MBEDTLS_LIB_DIR}/ecp_curves.c
+${MBEDTLS_LIB_DIR}/ecp.c
+${MBEDTLS_LIB_DIR}/entropy.c
+${MBEDTLS_LIB_DIR}/entropy_poll.c
+${MBEDTLS_LIB_DIR}/gcm.c
+${MBEDTLS_LIB_DIR}/md.c
+${MBEDTLS_LIB_DIR}/pkcs5.c
+${MBEDTLS_LIB_DIR}/platform_util.c
+${MBEDTLS_LIB_DIR}/platform.c
+${MBEDTLS_LIB_DIR}/sha1.c
+${MBEDTLS_LIB_DIR}/sha3.c
+${MBEDTLS_LIB_DIR}/sha256.c
+${MBEDTLS_LIB_DIR}/sha512.c
+${MBEDTLS_LIB_DIR}/pk.c
+${MBEDTLS_LIB_DIR}/pk_wrap.c
+${MBEDTLS_LIB_DIR}/pkparse.c
+${MBEDTLS_LIB_DIR}/ecdsa.c
+${MBEDTLS_LIB_DIR}/asn1parse.c
+${MBEDTLS_LIB_DIR}/asn1write.c
+${MBEDTLS_LIB_DIR}/rsa.c
+${MBEDTLS_LIB_DIR}/md5.c
+${MBEDTLS_LIB_DIR}/oid.c
+${MBEDTLS_LIB_DIR}/pem.c
+${MBEDTLS_LIB_DIR}/hmac_drbg.c
+${MBEDTLS_LIB_DIR}/rsa_alt_helpers.c
+${MBEDTLS_LIB_DIR}/ecdh.c
+${MBEDTLS_LIB_DIR}/pk_ecc.c
+${MBEDTLS_LIB_DIR}/psa_util.c
+${MBEDTLS_LIB_DIR}/psa_crypto_ffdh.c
+${MBEDTLS_LIB_DIR}/psa_crypto_ecp.c
+${MBEDTLS_LIB_DIR}/psa_crypto_rsa.c
+${MBEDTLS_LIB_DIR}/psa_crypto_cipher.c
+${MBEDTLS_LIB_DIR}/psa_crypto_mac.c
+${MBEDTLS_LIB_DIR}/psa_crypto_hash.c
+${MBEDTLS_LIB_DIR}/psa_crypto_aead.c
+#  4.0.0 の tf-psa-crypto/core/ 相当（3.6.5では library/ に同居）
+${MBEDTLS_LIB_DIR}/psa_crypto_client.c
+${MBEDTLS_LIB_DIR}/psa_crypto_driver_wrappers_no_static.c
+${MBEDTLS_LIB_DIR}/psa_crypto_slot_management.c
+${MBEDTLS_LIB_DIR}/psa_crypto_storage.c
+${MBEDTLS_LIB_DIR}/psa_crypto.c
+${MBEDTLS_LIB_DIR}/psa_its_file.c
+${MBEDTLS_LIB_DIR}/version.c
 )
 
 # mbedtls port（ESP-IDF本家．hal版のNuttX向けpsa_driver/は3.6.5に存在しない）
 set(MBEDTLS_PORT_DIR ${ESP_SUP_DIR}/components/mbedtls/port)
 list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-    ${MBEDTLS_PORT_DIR}/esp_hardware.c
-    ${MBEDTLS_PORT_DIR}/esp_mem.c
-    ${MBEDTLS_PORT_DIR}/esp_timing.c
-    #  sdkconfig_stub の CONFIG_MBEDTLS_ROM_MD5=1 が MBEDTLS_MD5_ALT を
-    #  立てる（esp_config.h:188）ため md5_alt 実体が要る
-    #  （本家 esp-idf/components/mbedtls/CMakeLists.txt:337-339 と同じ条件）。
-    ${MBEDTLS_PORT_DIR}/md/esp_md.c
+${MBEDTLS_PORT_DIR}/esp_hardware.c
+${MBEDTLS_PORT_DIR}/esp_mem.c
+${MBEDTLS_PORT_DIR}/esp_timing.c
+#  sdkconfig_stub の CONFIG_MBEDTLS_ROM_MD5=1 が MBEDTLS_MD5_ALT を
+#  立てる（esp_config.h:188）ため md5_alt 実体が要る
+#  （本家 esp-idf/components/mbedtls/CMakeLists.txt:337-339 と同じ条件）。
+${MBEDTLS_PORT_DIR}/md/esp_md.c
 )
 #  ★hal版にあった `-Wl,-u,mbedtls_psa_crypto_init_include_impl` は付けない：
 #  当該シンボルを供給する `port/esp_psa_crypto_init.c` は
 #  **esp-hal-3rdparty独自**（NuttX向け）で esp-idf には存在しない（実測）。
 
-else() # ASP3_ESPIDF_SUPPLY
-
-# mbedtls builtin（tf-psa-crypto/drivers/builtin/src．Wireless.mk 114-157行目）
-set(MBEDTLS_BUILTIN_DIR ${MBEDTLS_DIR}/tf-psa-crypto/drivers/builtin/src)
-list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-    ${MBEDTLS_BUILTIN_DIR}/aes.c
-    ${MBEDTLS_BUILTIN_DIR}/aria.c
-    ${MBEDTLS_BUILTIN_DIR}/bignum_core.c
-    ${MBEDTLS_BUILTIN_DIR}/bignum.c
-    ${MBEDTLS_BUILTIN_DIR}/ccm.c
-    ${MBEDTLS_BUILTIN_DIR}/cipher_wrap.c
-    ${MBEDTLS_BUILTIN_DIR}/cipher.c
-    ${MBEDTLS_BUILTIN_DIR}/cmac.c
-    ${MBEDTLS_BUILTIN_DIR}/constant_time.c
-    ${MBEDTLS_BUILTIN_DIR}/ctr_drbg.c
-    ${MBEDTLS_BUILTIN_DIR}/ecp_curves.c
-    ${MBEDTLS_BUILTIN_DIR}/ecp.c
-    ${MBEDTLS_BUILTIN_DIR}/entropy.c
-    ${MBEDTLS_BUILTIN_DIR}/gcm.c
-    ${MBEDTLS_BUILTIN_DIR}/md.c
-    ${MBEDTLS_BUILTIN_DIR}/pkcs5.c
-    ${MBEDTLS_BUILTIN_DIR}/platform_util.c
-    ${MBEDTLS_BUILTIN_DIR}/platform.c
-    ${MBEDTLS_BUILTIN_DIR}/sha1.c
-    ${MBEDTLS_BUILTIN_DIR}/sha3.c
-    ${MBEDTLS_BUILTIN_DIR}/sha256.c
-    ${MBEDTLS_BUILTIN_DIR}/sha512.c
-    ${MBEDTLS_BUILTIN_DIR}/pk.c
-    ${MBEDTLS_BUILTIN_DIR}/pk_wrap.c
-    ${MBEDTLS_BUILTIN_DIR}/pkparse.c
-    ${MBEDTLS_BUILTIN_DIR}/ecdsa.c
-    ${MBEDTLS_BUILTIN_DIR}/asn1parse.c
-    ${MBEDTLS_BUILTIN_DIR}/asn1write.c
-    ${MBEDTLS_BUILTIN_DIR}/rsa.c
-    ${MBEDTLS_BUILTIN_DIR}/md5.c
-    ${MBEDTLS_BUILTIN_DIR}/oid.c
-    ${MBEDTLS_BUILTIN_DIR}/pem.c
-    ${MBEDTLS_BUILTIN_DIR}/hmac_drbg.c
-    ${MBEDTLS_BUILTIN_DIR}/rsa_alt_helpers.c
-    ${MBEDTLS_BUILTIN_DIR}/ecdh.c
-    ${MBEDTLS_BUILTIN_DIR}/pk_ecc.c
-    ${MBEDTLS_BUILTIN_DIR}/pk_rsa.c
-    ${MBEDTLS_BUILTIN_DIR}/psa_util.c
-    ${MBEDTLS_BUILTIN_DIR}/psa_crypto_ffdh.c
-    ${MBEDTLS_BUILTIN_DIR}/psa_crypto_ecp.c
-    ${MBEDTLS_BUILTIN_DIR}/psa_crypto_rsa.c
-    ${MBEDTLS_BUILTIN_DIR}/psa_crypto_cipher.c
-    ${MBEDTLS_BUILTIN_DIR}/psa_crypto_mac.c
-    ${MBEDTLS_BUILTIN_DIR}/psa_crypto_hash.c
-)
-
-# tf-psa-crypto core（Wireless.mk 159-168行目）
-set(TF_PSA_CORE_DIR ${MBEDTLS_DIR}/tf-psa-crypto/core)
-list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-    ${TF_PSA_CORE_DIR}/psa_crypto_client.c
-    ${TF_PSA_CORE_DIR}/psa_crypto_driver_wrappers_no_static.c
-    ${TF_PSA_CORE_DIR}/psa_crypto_slot_management.c
-    ${TF_PSA_CORE_DIR}/psa_crypto_storage.c
-    ${TF_PSA_CORE_DIR}/psa_crypto.c
-    ${TF_PSA_CORE_DIR}/psa_its_file.c
-    ${TF_PSA_CORE_DIR}/tf_psa_crypto_config.c
-    ${TF_PSA_CORE_DIR}/tf_psa_crypto_version.c
-)
-
-# mbedtls port（Wireless.mk 170-186行目）
-set(MBEDTLS_PORT_DIR ${ESP_HAL_DIR}/components/mbedtls/port)
-list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-    ${MBEDTLS_PORT_DIR}/esp_psa_crypto_init.c
-    ${MBEDTLS_PORT_DIR}/esp_hardware.c
-    ${MBEDTLS_PORT_DIR}/esp_mem.c
-    ${MBEDTLS_PORT_DIR}/esp_timing.c
-    ${MBEDTLS_PORT_DIR}/psa_driver/esp_mac/psa_crypto_driver_esp_hmac_opaque.c
-    ${MBEDTLS_PORT_DIR}/psa_driver/esp_md/psa_crypto_driver_esp_md5.c
-)
-
-# PSA crypto初期化を確実にリンクへ含める（Wireless.mk 179行目）
-list(APPEND ASP3_LINK_OPTIONS
-    -Wl,-u,mbedtls_psa_crypto_init_include_impl
-)
-
-endif() # ASP3_ESPIDF_SUPPLY（mbedtls ソース一覧）
 
 #
 #  ------------------------------------------------------------------
@@ -612,27 +506,25 @@ list(APPEND ASP3_INCLUDE_DIRS
     ${WPA_SUPPLICANT_DIR}/port/include
 )
 
-if(ASP3_ESPIDF_SUPPLY)
-    #
-    #  ★`common.h` shadow の解決（§3 の続き．**版ダウン固有の新規リスク**）
-    #
-    #  mbedtls 3.6.5 の `library/common.h` は wpa の `src/utils/common.h` と
-    #  **同名**（4.0.0 には `library/common.h` が存在しないため hal 構成では
-    #  この衝突自体が起き得なかった＝移行で初めて生じる）。
-    #  本家 esp-idf は wpa を `PRIV_INCLUDE_DIRS src src/utils …` ＋
-    #  `PRIV_REQUIRES mbedtls` で登録するため，**コンポーネント自身の
-    #  include が requirements より前**に来る（wpa_supplicant/CMakeLists.txt
-    #  :246-250）。＝`mbedtls/library` を **wpa の後ろ**へ置くのが本家と同じ順序。
-    #
-    #  `library` 自体は wpa の `crypto_mbedtls.c`(`common.h`) と
-    #  `tls_mbedtls.c`(`ssl_misc.h`) が mbedtls 内部ヘッダを直接 include する
-    #  ため必要（本家も mbedtls コンポーネントの公開 include に
-    #  `mbedtls/library` を含む＝esp-idf/components/mbedtls/CMakeLists.txt:30）。
-    #
-    list(APPEND ASP3_INCLUDE_DIRS
-        ${MBEDTLS_DIR}/library
-    )
-endif()
+#
+#  ★`common.h` shadow の解決（§3 の続き．**版ダウン固有の新規リスク**）
+#
+#  mbedtls 3.6.5 の `library/common.h` は wpa の `src/utils/common.h` と
+#  **同名**（4.0.0 には `library/common.h` が存在しないため hal 構成では
+#  この衝突自体が起き得なかった＝移行で初めて生じる）。
+#  本家 esp-idf は wpa を `PRIV_INCLUDE_DIRS src src/utils …` ＋
+#  `PRIV_REQUIRES mbedtls` で登録するため，**コンポーネント自身の
+#  include が requirements より前**に来る（wpa_supplicant/CMakeLists.txt
+#  :246-250）。＝`mbedtls/library` を **wpa の後ろ**へ置くのが本家と同じ順序。
+#
+#  `library` 自体は wpa の `crypto_mbedtls.c`(`common.h`) と
+#  `tls_mbedtls.c`(`ssl_misc.h`) が mbedtls 内部ヘッダを直接 include する
+#  ため必要（本家も mbedtls コンポーネントの公開 include に
+#  `mbedtls/library` を含む＝esp-idf/components/mbedtls/CMakeLists.txt:30）。
+#
+list(APPEND ASP3_INCLUDE_DIRS
+    ${MBEDTLS_DIR}/library
+)
 
 # wpa_supplicant/src/ap（Wireless.mk 233-243行目．7ファイル）
 list(APPEND ASP3_SYSSVC_TARGET_C_FILES

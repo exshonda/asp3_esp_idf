@@ -67,7 +67,6 @@ esp_event_handler_register(const char *event_base, int32_t event_id,
 /*
  *  イベント通知（osiテーブルの_event_postから呼ばれる）
  */
-#ifdef TOPPERS_ESPIDF_SUPPLY
 /*
  *  esp-idf（v5.5.4）供給時の版差（実測）：esp_event.h の宣言が
  *  `const void *event_data`（halは `void *`）．本shimの定義も揃える．
@@ -81,12 +80,6 @@ esp_event_post(const char *event_base, int32_t event_id,
 			   const void *event_data,
 			   size_t event_data_size, uint32_t ticks_to_wait)
 {
-#else
-int
-esp_event_post(const char *event_base, int32_t event_id, void *event_data,
-			   size_t event_data_size, uint32_t ticks_to_wait)
-{
-#endif
 	uint_t	i;
 
 	(void) event_data_size;

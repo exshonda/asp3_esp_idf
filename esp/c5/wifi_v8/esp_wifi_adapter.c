@@ -600,15 +600,6 @@ get_free_heap_size_wrapper(void)
 /*
  *		イベント（esp_event_shim.cの最小実装へ）
  */
-#ifndef TOPPERS_ESPIDF_SUPPLY
-/*
- *  hal（esp-hal-3rdparty）供給時：esp_private/wifi.h が esp_event.h を
- *  includeしないため，ここで局所externを置く．
- */
-extern int esp_event_post(const char *event_base, int32_t event_id,
-						  void *event_data, size_t event_data_size,
-						  uint32_t ticks_to_wait);
-#else
 /*
  *  esp-idf（v5.5.4）供給時：esp_private/wifi.h が esp_event.h を
  *  includeする（＝本物の宣言が既に見えている）ため局所externは置かない．
@@ -617,7 +608,6 @@ extern int esp_event_post(const char *event_base, int32_t event_id,
  *  esp_event.h の宣言をそのまま使う（実体は esp_event_shim.c）．
  */
 #include "esp_event.h"
-#endif
 
 static int32_t
 event_post_wrapper(const char *event_base, int32_t event_id,

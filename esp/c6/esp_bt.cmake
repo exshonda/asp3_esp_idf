@@ -471,11 +471,9 @@ endif()
 #  `rtc_timer_hal.c` が存在せず別経路で解決するため不要＝実測）。
 #  ∴ esp-idf 供給のときだけ積む（hal 供給時に積むとファイルが無くて落ちる）。
 #
-if(ASP3_ESPIDF_SUPPLY)
-    list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-        ${ESP_SUP_DIR}/components/hal/lp_timer_hal.c
-    )
-endif()
+list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+    ${ESP_SUP_DIR}/components/hal/lp_timer_hal.c
+)
 
 #  pmu_init.c/ocode_init.c/rtc_clk.c 内の REGI2C_WRITE_MASK/READ_MASK・
 #  regi2c_ctrl_write_reg* を «ROM 直呼び»（esp_rom_regi2c_*，ロック無し）へ

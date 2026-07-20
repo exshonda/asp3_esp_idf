@@ -73,7 +73,6 @@ include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_toolchain_check.cmake)
 #  sdkconfig.hはKconfig生成物を使わず，esp-hal同梱のNuttX用静的スタブ
 #  （SOC機能フラグのみ）を流用する．
 #
-get_filename_component(ESP_HAL_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../hal ABSOLUTE)
 
 #
 #  ------------------------------------------------------------------
@@ -164,11 +163,7 @@ endif()
 #
 #  既定は ON（＝HAL-free）．変数に出すのは下の «古い既定のまま黙って動く»
 #  検出へ «計算された既定» を渡すため（値・挙動は従来と同一）。
-set(_asp3_espidf_supply_default ON)
 
-option(ASP3_ESPIDF_SUPPLY
-    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (true v5.5.4 tag) instead of esp-hal-3rdparty. Default ON for ALL configurations (WiFi / BT / plain) = HAL-free. For ESP32C6_BT=ON this became the default in evidence-c6-08: the v5.5.4-submodule supply reaches D-1/D-2b/D-2c/D-2d at both warm and TRUE COLD, and the old 'shared_periph_module_t' wall was caused by *mixing* an esp-idf base with hal's esp_hw_support, which disappears once the BT tree itself is moved. OFF = a true hal fallback ONLY for WiFi/plain builds (measured: hal 7181 / esp-idf 0). WARNING for ESP32C6_BT=ON: OFF reverts the BASE components only -- the BT tree independently follows ASP3_BT_IDF_V554 (default ON = esp-idf submodule), so -DASP3_ESPIDF_SUPPLY=OFF alone silently yields a MIXED build (measured: hal 1932 / esp-idf 119, of which 88 = components/bt; evidence-c6-09 section 5). It does build, but it is NOT a hal fallback: the hal BT path was REMOVED in evidence-c6-09 (esp_bt.cmake references ESP_HAL_DIR 0 times), so no all-hal BT configuration exists for C6. The BT supply choices are ASP3_BT_IDF_V554=ON (esp-idf submodule v5.5.4) or =OFF (external v6.1 via ESP_IDF61_DIR). Unlike C3 (esp_bt.cmake:133-145), C6 has no FATAL_ERROR guard against the mixture"
-    ${_asp3_espidf_supply_default})
 
 #
 #  ★既定変更が既存 build dir に届かない件の検出（詳細は下記ファイルの冒頭）。
@@ -178,18 +173,10 @@ option(ASP3_ESPIDF_SUPPLY
 #  黙って hal で建ち続ける（実測：C6 の build dir で SUPPLY=OFF は 58 個）。
 #  FATAL にはしない（既存の通るビルドを落とすのは挙動変更＝ユーザー判断）。
 #
-include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_supply_default_check.cmake)
-asp3_warn_if_cache_overrides_default(ASP3_ESPIDF_SUPPLY ${_asp3_espidf_supply_default})
 
-if(ASP3_ESPIDF_SUPPLY)
-    set(ESP_SUP_DIR ${IDF_V554})
+set(ESP_SUP_DIR ${IDF_V554})
     #  供給元の版差を共有ソース（C3/C5と共用のshim等）で吸収するための
     #  ガード。S3(LX6/LX7)・C5の同名ガードと同じ役割・命名。
-    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESPIDF_SUPPLY=1)
-else()
-    asp3_require_removed_submodule(${ESP_HAL_DIR} ASP3_ESPIDF_SUPPLY "esp-hal-3rdparty (./hal)")
-    set(ESP_SUP_DIR ${ESP_HAL_DIR})
-endif()
 
 #
 #  esp-hal-3rdpartyが分割した`esp_hal_<x>`コンポーネントの供給元別パス。
@@ -198,11 +185,7 @@ endif()
 #  2パターンで参照できる形に揃える（C5 target.cmake と同一）。
 #
 foreach(_esp_hal_c clock timg rtc_timer pmu gpio security ana_conv usb)
-    if(ASP3_ESPIDF_SUPPLY)
-        set(ESP_SUP_HAL_${_esp_hal_c} ${ESP_SUP_DIR}/components/hal)
-    else()
-        set(ESP_SUP_HAL_${_esp_hal_c} ${ESP_HAL_DIR}/components/esp_hal_${_esp_hal_c})
-    endif()
+    set(ESP_SUP_HAL_${_esp_hal_c} ${ESP_SUP_DIR}/components/hal)
 endforeach()
 
 #
@@ -210,13 +193,8 @@ endforeach()
 #  チェックアウトに存在しない＝本ディレクトリへ vendor したものを使う
 #  （sdkconfig_stub/sdkconfig.h＝hal の nuttx/esp32c6 版の verbatim コピー．
 #  CONFIG_* は1ビットも変えていない＝供給移行で設定を同時に動かさない）。
-#  hal fallback 時は従来どおり hal の nuttx/ を直接参照する。
 #
-if(ASP3_ESPIDF_SUPPLY)
-    set(ESP_SUP_SDKCONFIG_DIR ${ESP_CHIP_DIR}/sdkconfig_stub)
-else()
-    set(ESP_SUP_SDKCONFIG_DIR ${ESP_HAL_DIR}/nuttx/esp32c6/include)
-endif()
+set(ESP_SUP_SDKCONFIG_DIR ${ESP_CHIP_DIR}/sdkconfig_stub)
 
 #
 #  hal_stub（libc互換ヘッダ．ツールチェーンにnewlib実体が無い環境向け）
@@ -541,19 +519,13 @@ option(ESP32C6_LWIP "Integrate lwIP (TCP/IP + BSD sockets, requires ESP32C6_WIFI
 #  ★既定ON（evidence-c3-12）：C6実機でGOT IP(192.168.1.78) + gateway ping
 #  継続成功を確認済み（C3/C5と同時に検証）。
 #
-option(ASP3_LWIP_ESPIDF "Supply lwIP core/api sources from the esp-idf submodule (bundled lwip fork, same Filelists.cmake layout) instead of the dedicated ./lwip submodule (lwip-tcpip upstream). Default ON: real-HW GOT-IP+ping verified on C3/C5/C6 (evidence-c3-11, evidence-c3-12). Reversible" ON)
 if(ESP32C6_LWIP)
     if(NOT ESP32C6_WIFI)
         message(FATAL_ERROR "ESP32C6_LWIP requires ESP32C6_WIFI=ON")
     endif()
 
-    if(ASP3_LWIP_ESPIDF)
-        set(LWIP_DIR ${IDF_V554}/components/lwip/lwip)
-        list(APPEND ASP3_COMPILE_DEFS TOPPERS_LWIP_ESPIDF_SUPPLY=1)
-    else()
-        get_filename_component(LWIP_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../lwip ABSOLUTE)
-        asp3_require_removed_submodule(${LWIP_DIR} ASP3_LWIP_ESPIDF "lwip-tcpip (./lwip)")
-    endif()
+    set(LWIP_DIR ${IDF_V554}/components/lwip/lwip)
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_LWIP_ESPIDF_SUPPLY=1)
     include(${LWIP_DIR}/src/Filelists.cmake)
 
     list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_LWIP)

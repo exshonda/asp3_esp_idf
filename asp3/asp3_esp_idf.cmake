@@ -30,7 +30,6 @@ set(ASP3_CORE_DIR ${CMAKE_CURRENT_LIST_DIR}/asp3_core)
 set(ASP3_ROOT_DIR ${ASP3_CORE_DIR})
 
 #  esp-hal-3rdparty（submodule．Phase B-1以降で使用）
-get_filename_component(ESP_HAL_DIR ${CMAKE_CURRENT_LIST_DIR}/../hal ABSOLUTE)
 
 #  ターゲット依存部（本リポジトリ側）を asp3_core へ供給
 if(NOT DEFINED ASP3_TARGET)

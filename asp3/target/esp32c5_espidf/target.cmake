@@ -75,7 +75,6 @@ include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_toolchain_check.cmake)
 #  スタブ（sdkconfig_stub/．下記参照）を使う（hal submoduleは
 #  ESP32-C5向けのNuttX統合ファイル一式を同梱していないため）。
 #
-get_filename_component(ESP_HAL_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../hal ABSOLUTE)
 
 #
 #  ------------------------------------------------------------------
@@ -124,32 +123,20 @@ endif()
 #
 #  既定は ON（＝HAL-free）．変数に出すのは下の «古い既定のまま黙って動く»
 #  検出へ «計算された既定» を渡すため（値・挙動は従来と同一）．
-set(_asp3_espidf_supply_default ON)
 
-option(ASP3_ESPIDF_SUPPLY
-    "Supply ESP components (headers/sources/blobs/ROM ld) from the esp-idf submodule (true v5.5.4 tag) instead of esp-hal-3rdparty. Default ON = HAL-free. OFF = a true hal fallback ONLY for WiFi/plain builds (measured: hal 7357 / esp-idf 0). WARNING for ESP32C5_BT=ON: OFF reverts the BASE components only -- the BT tree independently follows ASP3_BT_IDF_V554 (default ON = esp-idf submodule), so -DASP3_ESPIDF_SUPPLY=OFF alone silently yields a MIXED build (measured: hal 1594 / esp-idf 119, of which 88 = components/bt). It does build, but it is NOT a hal fallback. There is no all-hal BT configuration for C5 at all (esp_bt.cmake references ESP_HAL_DIR 0 times); the BT supply choices are ASP3_BT_IDF_V554=ON (esp-idf submodule v5.5.4) or =OFF (external v6.1 via ESP_IDF61_DIR). Unlike C3 (esp_bt.cmake:133-145), C5 has no FATAL_ERROR guard against the mixture"
-    ${_asp3_espidf_supply_default})
 
 #  既定変更が既存 build dir に届かない件の検出（詳細は下記ファイルの冒頭）．
 #  C5 の既定は一貫して ON なので «既定変更に取り残された» dir は原理的に
 #  無い（実測：OFF は 4 dir ＝いずれも -D による意図的な hal 構成）．
 #  それでも入れるのは，機構が C3/C6 と同一（option() はキャッシュを
 #  上書きしない）で，将来 C5 の既定が動いたときに同じ穴が開くため．
-include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_supply_default_check.cmake)
-asp3_warn_if_cache_overrides_default(ASP3_ESPIDF_SUPPLY ${_asp3_espidf_supply_default})
 
-if(ASP3_ESPIDF_SUPPLY)
-    set(ESP_SUP_DIR ${IDF_V554})
+set(ESP_SUP_DIR ${IDF_V554})
     #  供給元の版差を共有ソース（C3/C6と共用のshim等）で吸収するための
     #  ガード。S3(LX6/LX7)の同名ガードと同じ役割・命名。
     #  既知の版差（実測）：
     #    esp_event_post() の event_data が hal=`void *` /
     #    esp-idf v5.5.4=`const void *`（esp_event.h）。
-    list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESPIDF_SUPPLY=1)
-else()
-    asp3_require_removed_submodule(${ESP_HAL_DIR} ASP3_ESPIDF_SUPPLY "esp-hal-3rdparty (./hal)")
-    set(ESP_SUP_DIR ${ESP_HAL_DIR})
-endif()
 
 #
 #  esp-hal-3rdpartyが分割した`esp_hal_<x>`コンポーネントの供給元別パス。
@@ -161,11 +148,7 @@ endif()
 #  `${ESP_SUP_HAL_<x>}/esp32c5/include` の2パターンで参照できる形に揃える。
 #
 foreach(_esp_hal_c clock timg rtc_timer pmu gpio security ana_conv usb)
-    if(ASP3_ESPIDF_SUPPLY)
-        set(ESP_SUP_HAL_${_esp_hal_c} ${ESP_SUP_DIR}/components/hal)
-    else()
-        set(ESP_SUP_HAL_${_esp_hal_c} ${ESP_HAL_DIR}/components/esp_hal_${_esp_hal_c})
-    endif()
+    set(ESP_SUP_HAL_${_esp_hal_c} ${ESP_SUP_DIR}/components/hal)
 endforeach()
 
 #
@@ -436,19 +419,13 @@ option(ESP32C5_LWIP "Integrate lwIP (TCP/IP + BSD sockets, requires ESP32C5_WIFI
 #  ★既定ON（evidence-c3-12）：C5実機でGOT IP(192.168.1.79) + gateway ping
 #  継続成功を確認済み（C3/C6と同時に検証）。
 #
-option(ASP3_LWIP_ESPIDF "Supply lwIP core/api sources from the esp-idf submodule (bundled lwip fork, same Filelists.cmake layout) instead of the dedicated ./lwip submodule (lwip-tcpip upstream). Default ON: real-HW GOT-IP+ping verified on C3/C5/C6 (evidence-c3-11, evidence-c3-12). Reversible" ON)
 if(ESP32C5_LWIP)
     if(NOT ESP32C5_WIFI)
         message(FATAL_ERROR "ESP32C5_LWIP requires ESP32C5_WIFI=ON")
     endif()
 
-    if(ASP3_LWIP_ESPIDF)
-        set(LWIP_DIR ${IDF_V554}/components/lwip/lwip)
-        list(APPEND ASP3_COMPILE_DEFS TOPPERS_LWIP_ESPIDF_SUPPLY=1)
-    else()
-        get_filename_component(LWIP_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../lwip ABSOLUTE)
-        asp3_require_removed_submodule(${LWIP_DIR} ASP3_LWIP_ESPIDF "lwip-tcpip (./lwip)")
-    endif()
+    set(LWIP_DIR ${IDF_V554}/components/lwip/lwip)
+    list(APPEND ASP3_COMPILE_DEFS TOPPERS_LWIP_ESPIDF_SUPPLY=1)
     include(${LWIP_DIR}/src/Filelists.cmake)
 
     list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C5_LWIP)
@@ -542,12 +519,6 @@ option(ASP3_C5_PMU_INIT
     OFF)
 
 if(ASP3_C5_PMU_INIT)
-    if(NOT ASP3_ESPIDF_SUPPLY)
-        message(FATAL_ERROR
-            "ASP3_C5_PMU_INIT=ON requires ASP3_ESPIDF_SUPPLY=ON "
-            "(pmu_init.c/pmu_param.c are supplied by the esp-idf submodule; "
-            "esp-hal-3rdparty does not ship the esp_hw_support port sources)")
-    endif()
     #
     #  ★ESP32C5_WIFI 必須（実測に基づく制限．黙って壊れる構成を作らない）
     #
