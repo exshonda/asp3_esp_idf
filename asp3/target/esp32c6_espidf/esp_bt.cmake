@@ -33,7 +33,6 @@
 if(ESP32C6_BT)
 
 set(BT_TARGETDIR ${TARGETDIR}/bt)
-get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf ABSOLUTE)
 
 #
 #  ------------------------------------------------------------------
@@ -281,7 +280,7 @@ list(APPEND ASP3_COMPILE_OPTIONS
 list(PREPEND ASP3_INCLUDE_DIRS ${TARGETDIR}/bt/stub_idf61/include)
 
 list(APPEND ASP3_INCLUDE_DIRS
-    ${C3_TARGETDIR}/bt/stub/include
+    ${ESP_COMMON_DIR}/bt/stub/include
     ${TARGETDIR}/wifi
     ${IDF}/components/bt/include/${BT_CHIP_SERIES}/include
     ${IDF}/components/bt/common/include

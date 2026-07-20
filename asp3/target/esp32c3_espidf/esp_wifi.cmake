@@ -252,7 +252,7 @@ if(ASP3_ESPIDF_SUPPLY)
     #  bt_nimble_config.h／esp_partition.hで意図せずシャドウしないため
     #  （WiFi単体ビルドではこの2つはどこからもincludeされない）。
     list(APPEND ASP3_INCLUDE_DIRS
-        ${TARGETDIR}/bt/stub/include
+        ${ESP_COMMON_DIR}/bt/stub/include
     )
 endif()
 

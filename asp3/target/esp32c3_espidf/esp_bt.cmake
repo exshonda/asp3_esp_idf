@@ -216,7 +216,7 @@ list(APPEND ASP3_COMPILE_OPTIONS
 #  それ以外（esp_hw_support/esp_system/esp_rom/heap/log/riscv/gpio/clock/efuse/
 #  esp_event）はチップHAL＝blob世代非依存のためhalのまま．
 list(APPEND ASP3_INCLUDE_DIRS
-    ${BT_TARGETDIR}/stub/include
+    ${ESP_COMMON_DIR}/bt/stub/include
     ${TARGETDIR}/wifi
     ${BT_IDF}/components/bt/include/${BT_CHIP_SERIES}/include
     ${BT_IDF}/components/bt/common/include
@@ -288,7 +288,7 @@ list(APPEND ASP3_SYSSVC_TARGET_C_FILES
     ${ESP_SUP_DIR}/components/esp_hw_support/port/${BT_CHIP_SERIES}/rtc_clk.c
     #  Wi-Fiと共有のcoexアダプタ（docs/wifi-shim.md．ダミーno-opテーブル
      #  登録＝ROM側coexist_funcs NULL回避）．BT単体でも要求される．
-    ${TARGETDIR}/wifi/esp_coex_adapter.c
+    ${ESP_COMMON_DIR}/wifi/esp_coex_adapter.c
 )
 
 #

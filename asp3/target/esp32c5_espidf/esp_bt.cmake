@@ -37,7 +37,6 @@
 if(ESP32C5_BT)
 
 set(BT_TARGETDIR ${TARGETDIR}/bt)
-get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf ABSOLUTE)
 
 #
 #  esp_wifi.cmakeと同一のIDF v6.1パス（実施10で確立．eco2 C5対応の
@@ -218,10 +217,10 @@ list(APPEND ASP3_COMPILE_OPTIONS
 #  バッファバグ）．D-1（bt_smoke_c5）はbt_nimble_config.hをincludeしない
 #  ため本PREPENDは無害．
 #
-list(PREPEND ASP3_INCLUDE_DIRS ${BT_TARGETDIR}/stub/include)
+list(PREPEND ASP3_INCLUDE_DIRS ${ESP_COMMON_DIR}/bt/stub/include)
 
 list(APPEND ASP3_INCLUDE_DIRS
-    ${C3_TARGETDIR}/bt/stub/include
+    ${ESP_COMMON_DIR}/bt/stub/include
     ${TARGETDIR}/wifi
     ${IDF}/components/bt/include/${BT_CHIP_SERIES}/include
     ${IDF}/components/bt/common/include

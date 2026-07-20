@@ -13,6 +13,14 @@
 set(TARGETDIR ${CMAKE_CURRENT_LIST_DIR})
 
 #
+#  ESP統合の3チップ共有資産（esp/common）．ASP3カーネルポート（本ディレクトリ）
+#  とESP統合を分離する方針により，hal_stub・net・bt/stub・共有shimは
+#  リポジトリ直下 esp/common/ に置く（旧 asp3/target/common_espidf/ と
+#  旧 esp32c3_espidf/{hal_stub,net,bt/stub,wifi の共有分} を統合したもの）．
+#
+get_filename_component(ESP_COMMON_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../esp/common ABSOLUTE)
+
+#
 #  ------------------------------------------------------------------
 #  ESP ツールチェーン検証（C5 で確立し C6 が転写した型の再転写．2行）
 #  ------------------------------------------------------------------
@@ -224,7 +232,7 @@ endif()
 #  hal_stub/（libc互換ヘッダ．ツールチェーンにnewlib実体が無い環境で
 #  esp-hal／mbedtls／wpa_supplicantのincludeを満たすためのスタブ）は，
 #  パスがesp32c3_espidf/配下にあるがC3専用ではなく，**C5／C6のビルドも
-#  ${C3_TARGETDIR}/hal_stub/include として同じ実体を参照する**
+#  ${ESP_COMMON_DIR}/hal_stub/include として同じ実体を参照する**
 #  （esp32c5_espidf/target.cmake・esp32c6_espidf/target.cmakeを参照）．
 #  ⇒ここのヘッダを変更するとC5／C6のビルドにも波及する．C3固有の
 #  変更を入れてはならない（チップ非依存＝トゥールチェーンのギャップを
@@ -239,7 +247,7 @@ endif()
 #  必要なlibc側のギャップ埋めである．
 #
 list(APPEND ASP3_INCLUDE_DIRS
-    ${TARGETDIR}/hal_stub/include
+    ${ESP_COMMON_DIR}/hal_stub/include
     ${ESP_SUP_SDKCONFIG_DIR}
     ${ESP_SUP_DIR}/components/hal/esp32c3/include
     ${ESP_SUP_DIR}/components/hal/include
@@ -405,14 +413,13 @@ option(ESP32C3_WIFI "Enable Wi-Fi (esp_wifi blob + os_adapter shim)" OFF)
 #  dedup Tier2：esp_shim.c の 3チップ 0-diff 共有コアは common_espidf/wifi/
 #  esp_shim_core.c に集約した（docs/dedup-tier2-plan.md）．各チップは共有
 #  コアをコンパイルしつつ，チップ固有部（縮小した wifi/esp_shim.c）も積む．
-get_filename_component(COMMON_ESPIDF ${CMAKE_CURRENT_LIST_DIR}/../common_espidf ABSOLUTE)
 if(ESP32C3_WIFI OR ESP32C3_BT)
-    list(APPEND ASP3_INCLUDE_DIRS ${TARGETDIR}/wifi ${COMMON_ESPIDF}/wifi)
-    list(APPEND ASP3_CFG_FILES ${TARGETDIR}/wifi/esp_shim.cfg)
+    list(APPEND ASP3_INCLUDE_DIRS ${TARGETDIR}/wifi ${ESP_COMMON_DIR} ${ESP_COMMON_DIR}/wifi)
+    list(APPEND ASP3_CFG_FILES ${ESP_COMMON_DIR}/wifi/esp_shim.cfg)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-        ${COMMON_ESPIDF}/wifi/esp_shim_core.c
+        ${ESP_COMMON_DIR}/wifi/esp_shim_core.c
         ${TARGETDIR}/wifi/esp_shim.c
-        ${TARGETDIR}/wifi/esp_shim_libc.c
+        ${ESP_COMMON_DIR}/wifi/esp_shim_libc.c
         ${TARGETDIR}/wifi/esp_shim_blobglue.c
     )
 endif()
@@ -421,8 +428,8 @@ if(ESP32C3_WIFI)
     list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_WIFI)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
         ${TARGETDIR}/wifi/esp_wifi_adapter.c
-        ${TARGETDIR}/wifi/esp_event_shim.c
-        ${TARGETDIR}/wifi/esp_coex_adapter.c
+        ${ESP_COMMON_DIR}/wifi/esp_event_shim.c
+        ${ESP_COMMON_DIR}/wifi/esp_coex_adapter.c
     )
 endif()
 include(${TARGETDIR}/esp_wifi.cmake)
@@ -454,7 +461,7 @@ include(${TARGETDIR}/esp_bt.cmake)
 #  【重要】net/ は3チップ共有（C3専用ではない）
 #
 #  net/（sys_arch・netif・lwipopts・net.cfg）はパスがesp32c3_espidf/
-#  配下にあるがC3専用ではなく，**C5／C6のビルドも${C3_TARGETDIR}/net
+#  配下にあるがC3専用ではなく，**C5／C6のビルドも${ESP_COMMON_DIR}/net
 #  として同じ実体を参照する**（コピーは存在しない．esp32c5_espidf/
 #  target.cmake・esp32c6_espidf/target.cmakeの「TCP/IP統合」節を参照）．
 #  ⇒ここを変更するとC5／C6のTCP/IPにも波及する．チップ非依存（blob API
@@ -501,11 +508,11 @@ if(ESP32C3_LWIP)
         ${LWIP_DIR}/src/include
         ${LWIP_DIR}/contrib/apps/ping
         ${LWIP_DIR}/contrib/apps/tcpecho_raw
-        ${TARGETDIR}/net/port/include
-        ${TARGETDIR}/net
+        ${ESP_COMMON_DIR}/net/port/include
+        ${ESP_COMMON_DIR}/net
     )
 
-    list(APPEND ASP3_CFG_FILES ${TARGETDIR}/net/net.cfg)
+    list(APPEND ASP3_CFG_FILES ${ESP_COMMON_DIR}/net/net.cfg)
 
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
         ${lwipcore_SRCS}
@@ -514,8 +521,8 @@ if(ESP32C3_LWIP)
         ${LWIP_DIR}/src/netif/ethernet.c
         ${LWIP_DIR}/contrib/apps/ping/ping.c
         ${LWIP_DIR}/contrib/apps/tcpecho_raw/tcpecho_raw.c
-        ${TARGETDIR}/net/port/sys_arch.c
-        ${TARGETDIR}/net/netif_esp32c3.c
+        ${ESP_COMMON_DIR}/net/port/sys_arch.c
+        ${ESP_COMMON_DIR}/net/netif_esp32c3.c
     )
 endif()
 

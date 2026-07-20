@@ -16,6 +16,14 @@
 set(TARGETDIR ${CMAKE_CURRENT_LIST_DIR})
 
 #
+#  ESP統合の3チップ共有資産（esp/common）．ASP3カーネルポート（本ディレクトリ）
+#  とESP統合を分離する方針により，hal_stub・net・bt/stub・共有shimは
+#  リポジトリ直下 esp/common/ に置く（旧 asp3/target/common_espidf/ と
+#  旧 esp32c3_espidf/{hal_stub,net,bt/stub,wifi の共有分} を統合したもの）．
+#
+get_filename_component(ESP_COMMON_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../esp/common ABSOLUTE)
+
+#
 #  ------------------------------------------------------------------
 #  ツールチェーン検証（C5 evidence-c5-08 §2.1 からの転写）
 #  ------------------------------------------------------------------
@@ -211,10 +219,9 @@ endif()
 #  チェーンのギャップを埋めるだけの内容．esp32c3_espidf/hal_stub/
 #  README相当のコメントは各ヘッダ先頭参照）．
 #
-get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf ABSOLUTE)
 
 list(APPEND ASP3_INCLUDE_DIRS
-    ${C3_TARGETDIR}/hal_stub/include
+    ${ESP_COMMON_DIR}/hal_stub/include
     ${ESP_SUP_DIR}/components/hal/esp32c6/include
     ${ESP_SUP_DIR}/components/hal/include
     ${ESP_SUP_DIR}/components/hal/platform_port/include
@@ -343,7 +350,6 @@ set(ASP3_RUN_COMMAND
 #  esp_coex_adapter.c／esp_shim.cfgはC3側をそのまま再利用する
 #  （中身に変更不要．docs/wifi-shim.md参照）．
 #
-get_filename_component(C3_TARGETDIR ${CMAKE_CURRENT_LIST_DIR}/../esp32c3_espidf ABSOLUTE)
 
 #
 #  Bluetooth（BLE．esp32c6/c5世代コントローラ＋platform/os.hシム．
@@ -459,16 +465,14 @@ if(ESP32C6_WIFI OR ESP32C6_BT)
     #  dedup Tier2：esp_shim.c の 3チップ 0-diff 共有コアは common_espidf/wifi/
     #  esp_shim_core.c に集約（docs/dedup-tier2-plan.md）．縮小した C6 固有
     #  wifi/esp_shim.c と併せてコンパイルする．
-    get_filename_component(COMMON_ESPIDF ${CMAKE_CURRENT_LIST_DIR}/../common_espidf ABSOLUTE)
     list(APPEND ASP3_INCLUDE_DIRS
         ${TARGETDIR}/wifi
-        ${C3_TARGETDIR}
-        ${C3_TARGETDIR}/wifi
-        ${COMMON_ESPIDF}/wifi
+        ${ESP_COMMON_DIR}
+        ${ESP_COMMON_DIR}/wifi
     )
-    list(APPEND ASP3_CFG_FILES ${C3_TARGETDIR}/wifi/esp_shim.cfg)
+    list(APPEND ASP3_CFG_FILES ${ESP_COMMON_DIR}/wifi/esp_shim.cfg)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
-        ${COMMON_ESPIDF}/wifi/esp_shim_core.c
+        ${ESP_COMMON_DIR}/wifi/esp_shim_core.c
         ${TARGETDIR}/wifi/esp_shim.c
         #  esp_shim_blobglue.cはWiFi blob（net80211/pp/core）専用の
         #  グルーが大半だが，esp_sleep_pd_config／esp_sleep_clock_config／
@@ -477,15 +481,15 @@ if(ESP32C6_WIFI OR ESP32C6_BT)
         #  同居させているため，BT単体ビルドでもリンクする（--gc-sections
         #  でWiFi専用の未参照部分は落ちる．BLE実施01で確認）．
         ${TARGETDIR}/wifi/esp_shim_blobglue.c
-        ${C3_TARGETDIR}/wifi/esp_shim_libc.c
+        ${ESP_COMMON_DIR}/wifi/esp_shim_libc.c
     )
 endif()
 if(ESP32C6_WIFI)
     list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C6_WIFI)
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
         ${TARGETDIR}/wifi/esp_wifi_adapter.c
-        ${C3_TARGETDIR}/wifi/esp_event_shim.c
-        ${C3_TARGETDIR}/wifi/esp_coex_adapter.c
+        ${ESP_COMMON_DIR}/wifi/esp_event_shim.c
+        ${ESP_COMMON_DIR}/wifi/esp_coex_adapter.c
         #
         #  ★【2026-07-17 evidence-c6-11】ここに在った «DIAGNOSTIC (temporary)» の
         #  コメントは残置していたが、**wifi_trace.c 自体は if(ESP32C6_WIFI) 配下に
@@ -519,7 +523,7 @@ include(${TARGETDIR}/esp_bt.cmake)
 #  net/層（sys_arch・netif・lwipopts等）はチップ非依存（esp_wifi_
 #  internal_tx/reg_rxcb／esp_read_mac等のblob APIのみに依存し，
 #  C6固有のレジスタ・アドレスには一切触れない）ため，C3側
-#  （${C3_TARGETDIR}/net）をコピーせずそのまま再利用する．
+#  （${ESP_COMMON_DIR}/net）をコピーせずそのまま再利用する．
 #  esp_shim_libc.c等と同じ「chip非依存部はC3_TARGETDIRから直接取込む」
 #  既存パターンを踏襲（docs/tcpip-integration.md，docs/wifi-shim-c6.md
 #  実施89）．
@@ -550,11 +554,11 @@ if(ESP32C6_LWIP)
         ${LWIP_DIR}/src/include
         ${LWIP_DIR}/contrib/apps/ping
         ${LWIP_DIR}/contrib/apps/tcpecho_raw
-        ${C3_TARGETDIR}/net/port/include
-        ${C3_TARGETDIR}/net
+        ${ESP_COMMON_DIR}/net/port/include
+        ${ESP_COMMON_DIR}/net
     )
 
-    list(APPEND ASP3_CFG_FILES ${C3_TARGETDIR}/net/net.cfg)
+    list(APPEND ASP3_CFG_FILES ${ESP_COMMON_DIR}/net/net.cfg)
 
     list(APPEND ASP3_SYSSVC_TARGET_C_FILES
         ${lwipcore_SRCS}
@@ -563,8 +567,8 @@ if(ESP32C6_LWIP)
         ${LWIP_DIR}/src/netif/ethernet.c
         ${LWIP_DIR}/contrib/apps/ping/ping.c
         ${LWIP_DIR}/contrib/apps/tcpecho_raw/tcpecho_raw.c
-        ${C3_TARGETDIR}/net/port/sys_arch.c
-        ${C3_TARGETDIR}/net/netif_esp32c3.c
+        ${ESP_COMMON_DIR}/net/port/sys_arch.c
+        ${ESP_COMMON_DIR}/net/netif_esp32c3.c
     )
 endif()
 
