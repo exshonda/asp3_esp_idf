@@ -469,12 +469,27 @@ include(${TARGETDIR}/esp_bt.cmake)
 #  事例がある．死活はLWIP=ONの構成で測ること．
 #
 option(ESP32C3_LWIP "Integrate lwIP (TCP/IP + BSD sockets, requires ESP32C3_WIFI)" OFF)
+#
+#  ★段階1（esp-idf-only化・docs/hal-vs-espidf-decision.md）：lwIPの供給元は
+#  これまでhal/esp-idfのどちらでもなく，専用の ./lwip submodule（lwip-tcpip
+#  upstream，STABLE-2_2_1_RELEASE pin）だった．esp-idf submoduleは自身の
+#  フォーク（同一のFilelists.cmake変数名＝lwipcore_SRCS等）を同梱している
+#  ため，そちらへ切替え可能＝./lwip submoduleを最終的に撤廃できる（段階6）．
+#  既定OFF＝従来どおり ./lwip（実機GREEN確認後にC5/C6へ横展開し既定反転）．
+#  可逆：-DASP3_LWIP_ESPIDF=OFF で ./lwip へ完全復帰．
+#
+option(ASP3_LWIP_ESPIDF "Supply lwIP core/api sources from the esp-idf submodule (bundled lwip fork, same Filelists.cmake layout) instead of the dedicated ./lwip submodule (lwip-tcpip upstream). Default OFF until real-HW GOT-IP+ping is verified. Reversible" OFF)
 if(ESP32C3_LWIP)
     if(NOT ESP32C3_WIFI)
         message(FATAL_ERROR "ESP32C3_LWIP requires ESP32C3_WIFI=ON")
     endif()
 
-    get_filename_component(LWIP_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../lwip ABSOLUTE)
+    if(ASP3_LWIP_ESPIDF)
+        set(LWIP_DIR ${IDF_V554}/components/lwip/lwip)
+        list(APPEND ASP3_COMPILE_DEFS TOPPERS_LWIP_ESPIDF_SUPPLY=1)
+    else()
+        get_filename_component(LWIP_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../lwip ABSOLUTE)
+    endif()
     include(${LWIP_DIR}/src/Filelists.cmake)
 
     list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_LWIP)

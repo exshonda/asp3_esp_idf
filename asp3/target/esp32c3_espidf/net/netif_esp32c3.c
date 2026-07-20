@@ -62,6 +62,19 @@
 #include "netif_esp32c3.h"
 #include "ping.h"
 
+#if defined(TOPPERS_LWIP_ESPIDF_SUPPLY)
+/*
+ *  esp-idf同梱lwipのping.cにはping_stop()が無い（TOPPERSがhal/./lwip版へ
+ *  独自追加していた関数．esp32_s3 repoのesp-idf-only化でも同型の欠落が
+ *  確認済み）．ping_init()は再init時に内部状態を自動クリーンするため
+ *  no-opで実害なし．
+ */
+void
+ping_stop(void)
+{
+}
+#endif /* TOPPERS_LWIP_ESPIDF_SUPPLY */
+
 static struct netif	s_netif;
 static bool_t		s_dhcp_started;
 static bool_t		s_ip_reported;
