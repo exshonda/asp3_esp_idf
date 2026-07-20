@@ -525,10 +525,10 @@ include(${TARGETDIR}/esp_bt.cmake)
 #
 option(ESP32C6_LWIP "Integrate lwIP (TCP/IP + BSD sockets, requires ESP32C6_WIFI)" OFF)
 #
-#  ★段階1（esp-idf-only化）横展開：C3で実機GREEN確認済み（evidence-c3-11）の
-#  ASP3_LWIP_ESPIDFをC6へ移植。既定OFF＝従来どおり ./lwip。
+#  ★既定ON（evidence-c3-12）：C6実機でGOT IP(192.168.1.78) + gateway ping
+#  継続成功を確認済み（C3/C5と同時に検証）。
 #
-option(ASP3_LWIP_ESPIDF "Supply lwIP core/api sources from the esp-idf submodule (bundled lwip fork, same Filelists.cmake layout) instead of the dedicated ./lwip submodule (lwip-tcpip upstream). Default OFF until real-HW GOT-IP+ping is verified on C6. Reversible" OFF)
+option(ASP3_LWIP_ESPIDF "Supply lwIP core/api sources from the esp-idf submodule (bundled lwip fork, same Filelists.cmake layout) instead of the dedicated ./lwip submodule (lwip-tcpip upstream). Default ON: real-HW GOT-IP+ping verified on C3/C5/C6 (evidence-c3-11, evidence-c3-12). Reversible" ON)
 if(ESP32C6_LWIP)
     if(NOT ESP32C6_WIFI)
         message(FATAL_ERROR "ESP32C6_LWIP requires ESP32C6_WIFI=ON")

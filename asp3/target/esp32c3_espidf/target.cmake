@@ -475,10 +475,11 @@ option(ESP32C3_LWIP "Integrate lwIP (TCP/IP + BSD sockets, requires ESP32C3_WIFI
 #  upstream，STABLE-2_2_1_RELEASE pin）だった．esp-idf submoduleは自身の
 #  フォーク（同一のFilelists.cmake変数名＝lwipcore_SRCS等）を同梱している
 #  ため，そちらへ切替え可能＝./lwip submoduleを最終的に撤廃できる（段階6）．
-#  既定OFF＝従来どおり ./lwip（実機GREEN確認後にC5/C6へ横展開し既定反転）．
+#  ★既定ON（evidence-c3-11/evidence-c3-12）：C3/C5/C6の3チップとも実機で
+#  GOT IP(192.168.1.{77,79,78}) + gateway ping継続成功を確認済み．
 #  可逆：-DASP3_LWIP_ESPIDF=OFF で ./lwip へ完全復帰．
 #
-option(ASP3_LWIP_ESPIDF "Supply lwIP core/api sources from the esp-idf submodule (bundled lwip fork, same Filelists.cmake layout) instead of the dedicated ./lwip submodule (lwip-tcpip upstream). Default OFF until real-HW GOT-IP+ping is verified. Reversible" OFF)
+option(ASP3_LWIP_ESPIDF "Supply lwIP core/api sources from the esp-idf submodule (bundled lwip fork, same Filelists.cmake layout) instead of the dedicated ./lwip submodule (lwip-tcpip upstream). Default ON: real-HW GOT-IP+ping verified on C3/C5/C6 (evidence-c3-11, evidence-c3-12). Reversible" ON)
 if(ESP32C3_LWIP)
     if(NOT ESP32C3_WIFI)
         message(FATAL_ERROR "ESP32C3_LWIP requires ESP32C3_WIFI=ON")
