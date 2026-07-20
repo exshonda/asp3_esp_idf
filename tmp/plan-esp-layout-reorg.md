@@ -126,3 +126,79 @@ pico/fsp/stm32/nxp は全て `target/<name>/` にSDK統合を置く（asp3_core 
   per-object 逆アセンブル比較かサイズ一致で見る。
 - **本日の教訓**：`apps/` 改名時に `ASP3_APPLNAME STREQUAL` の文字列一致が黙って壊れる寸前だった。
   **同種の«パス/名前の文字列一致に依存した隠れ結合»が他にもある可能性**。要探索。
+
+---
+
+# 8. ★レビュー結果と訂正（2026-07-20・Codex + fable 並走、全指摘を独立検証済み）
+
+**結論：この計画は書かれたままでは実行できない。両レビュアが独立に「段階Aのみ・段階Bは見送り」で一致した。**
+
+## 8-1. 上記 §2・§3 の実測値は誤り（訂正）
+
+私（Claude）の測定に5件の誤りがあった。全て `file:line` で再現確認済み：
+
+| 誤り | 実際 |
+|---|---|
+| 「`target_*.h` のESP依存 0」 | **`target_timer.h:46` が `#include "hal/systimer_ll.h"`**。私は `target_timer.c` は測ったが **`.h` を測っていなかった** |
+| 「`.ld` のESP依存 0」 | **`esp32c3.ld:27` が `INCLUDE esp32c3.peripherals.ld`**（esp-idf の soc component 由来） |
+| 「ASP3側26/ESP側5 で3チップ対称」 | **26/28/27 で非対称**。私の grep パターン `^target|\.ld$|^flash_header|usbjtag|^run\.cmake` が **C5 `pmu_instance.c`・`seam_appdesc.c`・`esp32c5_seam.ld`、C6 `cold_clk_init_c6.c` を機械的に漏らした**＝対称性は測定の人工物。しかもこの超過分は**esp-idf 依存が最も濃い**ファイル群 |
+| 「C3で測ったので3チップ同じ」 | **外挿が崩れる**。C5 `target_kernel_impl.c` は **1794行**（C3の4.6倍）で `#include "esp_rom_sys.h"`。C6 `cold_clk_init_c6.c` は esp-idf ヘッダ4本 |
+| §0 の共有資産リスト | **4件漏れ**（8-2） |
+
+## 8-2. ★C6 には «逆向き» の依存がある（新発見・分割線が一方向でない）
+
+`asp3/target/esp32c6_espidf/target_kernel_impl.c` が **ESP shim のシンボルを7箇所で `extern` 宣言して呼ぶ**
+（:268 `esp_shim_coex_adapter_register` / :292,:374 `esp_shim_bt_pmu_diag` / :322,:437 `esp_shim_bt_pmu_init` /
+:390 `esp_shim_cold_cpu_clk_init` / :405 `esp_shim_cold_recalib_bbpll`）。
+実体は `bt/bt_pmu_init_c6.c`・`wifi/esp_shim.c`＝**ESP側へ移すディレクトリ**。
+∴「カーネルポート → ESP統合」の一方向ではなく、**カーネルポートが ESP統合を呼び返す**。
+
+## 8-3. §3 のレイアウトどおりに移すと C5/C6 がビルド不能になる
+
+- **`esp_shim.h` / `esp_shim_cfg.h` は C3 の `wifi/` にしか存在しない**（実測：C5 `wifi_v8/`・C6 `wifi/` には
+  `esp_shim_chip_regs.h` のみ）。C5 `bt/bt_shim.c:89`・C6 `wifi/esp_shim.c:36`・
+  `common_espidf/wifi/esp_shim_core.c:42` が C3 側の実体を include している。
+  **§3 の `esp/common` 列挙にこの2ヘッダが無い**＝列挙どおり移すと C5/C6 が壊れる。
+- **`${C3_TARGETDIR}/bt/stub/include` も3チップ共有**（C5 `esp_bt.cmake:224`・C6 `esp_bt.cmake:284` ほか）。
+  §0 のリストに無い。C5/C6 の自前 stub は `bt_nimble_config.h`＋`FreeRTOSConfig.h` のみで、
+  **`freertos/*.h` 8本と `esp_partition.h` は C3 にしか無い**。
+
+## 8-4. 「パス書き換えのみで論理変更なし」（§4）は誤り
+
+1. **`TARGETDIR` が «ESP資産の在処» として使われている**（`esp_bt.cmake:39` `set(BT_TARGETDIR ${TARGETDIR}/bt)`、
+   `${TARGETDIR}/wifi` 等）。段階B後も `TARGETDIR` は ASP3 target dir を指すので、
+   **`ESP_CHIP_DIR` / `ESP_COMMON_DIR` のような新変数の導入が必須**。
+2. **ディレクトリ名がソース/cfg に焼き込まれている**：
+   - `wifi/esp_shim.cfg:4` → `#include "wifi/esp_shim_cfg.h"`（`wifi/` が焼き込み）
+   - `bt/bt.cfg:4`・`bt/bt_shim.c:37` → `#include "bt/bt_cfg.h"`（`bt/` が焼き込み）
+   ⇒ **`esp/common` 直下に平坦に置くと解決不能**。`esp/common/wifi/`・`esp/cN/bt/` と
+   **サブディレクトリ構造を保存**すれば書き換え不要（fable の提案・妥当）。
+3. **移動対象ファイル自身が階層依存の相対パスを持つ（4箇所）**：
+   `esp32c5_espidf/esp_bt.cmake:40`・`esp32c6_espidf/esp_bt.cmake:36`（`../esp32c3_espidf`）、
+   `esp32c6_espidf/esp_wifi.cmake:323`・`esp32c5_espidf/esp_wifi_v8.cmake:333`（`../../../esp-idf`）。
+   前者は移動後に不存在パスを指し**ビルドエラー（大きな音で壊れる＝まだ良い）**、
+   後者は `if(NOT DEFINED IDF_V554)` ガード内なので**黙って死ぬ潜在バグ**になる。
+
+## 8-5. §5 の未決定論点への回答（両レビュア一致）
+
+- **5-1**：**(b)** で一致。ただし「現状維持」ではなく **ESP資産の所在を `ESP_COMMON_DIR`/`ESP_CHIP_DIR` で明示**すべき。
+- **5-2**：「target port が esp-idf に依存しない」は**現実と合わない**（8-1・8-2 で実証）。
+  達成可能な定義は「**`asp3/` 配下に ESP統合ソース・shim・blob adapter を置かない**」まで。
+- **5-3**：段階Aの分岐は許容。段階Bの分岐はコストが便益を上回る。
+
+## 8-6. 検証戦略（§7）の不足
+
+- fresh build dir での configure 検証、`ASP3_APPLNAME` による NimBLE 自動有効化の確認、
+  旧パス残存の監査、`ninja -t deps` で旧パスが依存に残っていないことの確認を追加する。
+- バイナリ同一性は md5 でなく **debug情報を除いた `.text/.rodata/.data` 比較**。
+  ★**C5 seam 構成は `seam_appdesc.c:110-111` が `__TIME__`/`__DATE__` を埋めるため
+  同一性判定から除外**する（さもなくば偽の差分を追うことになる）。
+
+## 8-7. 改訂方針
+
+- **段階A のみ実行**する。ただし §0 の共有資産リストを 8-3 の漏れ2件で補正し、
+  `common` 配下は **`wifi/`・`bt/stub/` のサブディレクトリ構造を保存**する。
+- **段階B は見送り**。C6 の逆向き依存（8-2）と焼き込みディレクトリ名（8-4）を先に解消しない限り、
+  「物理配置を整える」便益に対してリスクが見合わない。
+- C5 の `pmu_instance.c`・`seam_appdesc.c`・`esp32c5_seam.ld`、C6 の `cold_clk_init_c6.c` を
+  ASP3側/ESP側どちらに置くかは**未決**。ここを決めないと §0 の動機は C5/C6 で達成されない。
