@@ -118,8 +118,15 @@ jobs:
           #  ★実体名は版で違う：IDF v5.5.4 の venv は `esptool.py`(v4系)、v6.1 系は `esptool`(v5系)。
           #    cmake 側（esp_find_esptool.cmake）も `NAMES esptool esptool.py` で両方を探すので、
           #    ここも両方を許容しないと «通っているのに警告» という誤検出になる（実際に出した）。
-          if ls "$IDF_TOOLS_PATH"/python_env/*/bin/esptool "$IDF_TOOLS_PATH"/python_env/*/bin/esptool.py 2>/dev/null; then
-            "$(ls "$IDF_TOOLS_PATH"/python_env/*/bin/esptool "$IDF_TOOLS_PATH"/python_env/*/bin/esptool.py 2>/dev/null | head -1)" version | head -1
+          #  ★`ls A B` は «片方が欠けるだけで非ゼロ» を返す。実体は版により
+          #    `esptool`(v5系) か `esptool.py`(v4系) の **どちらか一方しか無い**ため、
+          #    ls の終了コードで判定すると «通っているのに警告» になる（実際に出した）。
+          #    find で列挙して «1件以上あるか» で判定する。
+          ESPTOOL_FOUND=$(find "$IDF_TOOLS_PATH"/python_env -maxdepth 3 -type f \
+                            \( -name esptool -o -name esptool.py \) 2>/dev/null | head -1)
+          if [ -n "$ESPTOOL_FOUND" ]; then
+            echo "esptool: $ESPTOOL_FOUND"
+            "$ESPTOOL_FOUND" version 2>/dev/null | head -1
           else
             echo "::warning::esptool が見つからない（seam の configure が FATAL になる）"
           fi
@@ -180,19 +187,47 @@ jobs:
       #
       #  QEMU での移植検証テスト（C3のみQEMU対応）。TAP で機械判定する。
       #  ビルド成立だけでなく «動く» ことまで見る唯一のステップ。
-      #  QEMU は Espressif fork が要るため、標準の qemu-system-riscv32 では
-      #  動かない可能性がある＝取得できなければスキップし、CI は落とさない
-      #  （このステップの不成立でビルド腐敗検出という主目的を潰さないため）。
       #
-      - name: test_porting on QEMU (C3, best-effort)
-        continue-on-error: true
+      #  ★QEMU の版を固定する（`idf_tools.py` に任せない）。
+      #    pin している esp-idf v5.5.4 の tools.json が指定するのは
+      #    **esp_develop_9.2.2_20250817** だが、この版では test_porting が
+      #    **6/8 になる**（#6 alarm_handler・#7 isr_delayed_dispatch が not ok、
+      #    #8 に到達せずハング）。**同一 ELF を版だけ変えて実行する A/B** で、
+      #    20250817=6/8・20260417=8/8 を実測확認済み＝**移植側ではなく QEMU の
+      #    割込みエミュレーションの版差**（証跡＝evidence-02 §11）。
+      #    リリースアセットから直接取得して版を固定する。
+      #
+      #  ★失敗の扱いを分離する（`continue-on-error` で一括して飲み込まない）：
+      #      QEMU を取得できない        → スキップ（CI は緑のまま。主目的＝ビルド腐敗検出を潰さない）
+      #      QEMU で走ってテストが落ちた → **CI を赤にする**
+      #    以前は step 全体に continue-on-error を付けていたため、
+      #    **テストが 6/8 で落ちているのに run の結論が success** になっていた
+      #    ＝「壊れた検証も成功と同じ顔をする」状態だった（evidence-02 §10.1）。
+      #
+      - name: test_porting on QEMU (C3)
+        env:
+          QEMU_TAG: esp-develop-9.2.2-20260417
+          QEMU_VER: esp_develop_9.2.2_20260417
         run: |
+          set -o pipefail
           TC="$PWD/asp3/cmake/toolchain-esp32-riscv32.cmake"
           TP="$PWD/asp3/asp3_core/test/porting"
-          python3 esp-idf/tools/idf_tools.py install qemu-riscv32 || {
-            echo "qemu-riscv32 を取得できないためスキップ"; exit 0; }
-          QEMU=$(find "$IDF_TOOLS_PATH/tools/qemu-riscv32" -name 'qemu-system-riscv32' -type f | head -1)
-          [ -n "$QEMU" ] || { echo "qemu-system-riscv32 が見つからないためスキップ"; exit 0; }
+          URL="https://github.com/espressif/qemu/releases/download/${QEMU_TAG}/qemu-riscv32-softmmu-${QEMU_VER}-x86_64-linux-gnu.tar.xz"
+
+          #  --- 取得できなければスキップ（CI は落とさない）---
+          mkdir -p "$IDF_TOOLS_PATH/pinned-qemu"
+          if ! curl -fsSL "$URL" | tar xJ -C "$IDF_TOOLS_PATH/pinned-qemu"; then
+            echo "::warning::QEMU ($QEMU_VER) を取得できないため test_porting をスキップ"
+            exit 0
+          fi
+          QEMU=$(find "$IDF_TOOLS_PATH/pinned-qemu" -name 'qemu-system-riscv32' -type f | head -1)
+          if [ -z "$QEMU" ]; then
+            echo "::warning::qemu-system-riscv32 が見つからないため test_porting をスキップ"
+            exit 0
+          fi
+          "$QEMU" --version | head -1
+
+          #  --- ここから先の失敗は «本物» ＝ CI を赤にする ---
           cmake -S asp3/asp3_core -B build/c3_tp -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$TC" \
             -DASP3_TARGET=esp32c3_espidf \
@@ -203,5 +238,5 @@ jobs:
             -DQEMU_SYSTEM_RISCV32_ESP="$QEMU"
           cmake --build build/c3_tp
           #  TAP で機械判定（目視で「動いていそう」は判定にしない）
-          out=$(timeout 120 cmake --build build/c3_tp --target run 2>&1 | tee /dev/stderr)
+          out=$(timeout 120 cmake --build build/c3_tp --target run 2>&1 | tee /dev/stderr) || true
           echo "$out" | grep -q '^# 8/8 passed' || { echo "::error::test_porting: 8/8 passed が出ない"; exit 1; }
