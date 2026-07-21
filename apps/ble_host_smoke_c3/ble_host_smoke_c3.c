@@ -646,6 +646,42 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 				   "ble_host_smoke: GAP PAIRING_COMPLETE status=%d bonds our=%d peer=%d",
 				   (int_t) event->pairing_complete.status,
 				   (int_t) our_cnt, (int_t) peer_cnt);
+
+			/*
+			 *  ★「ペアリングは空中で成功しているのに ENC_CHANGE だけが
+			 *  ETIMEOUT(13) を報告する」の判別（evidence-06 §5）．
+			 *
+			 *  ENC_CHANGE ハンドラでしか sec_state を出していなかったため、
+			 *  «ETIMEOUT が出る 30 秒後» の状態しか観測できなかった。ここ
+			 *  （SM 手続き完了の «直後»）で出せば、
+			 *    encrypted=1 → bond は実際に成立しており、後続の ETIMEOUT は
+			 *                  «遅れて届く偽の失敗報告»（SM proc が回収されず
+			 *                  30 秒期限で発火した、が候補．未検証）
+			 *    encrypted=0 → 暗号化が本当に成立しておらず別機構
+			 *  を判別できる。
+			 *
+			 *  ★JTAG で読む案は断念した：観測手段が測定対象を壊す事故を
+			 *  3 度踏んだため（RTS 採取＝接続を切る／受動採取＝open でリセット／
+			 *  GDB halt＝resume できず DUT を停止）。アプリの 1 行ログなら
+			 *  観測が対象に干渉しない。
+			 */
+			{
+				struct ble_gap_conn_desc	d2;
+
+				if (ble_gap_conn_find(event->pairing_complete.conn_handle,
+									  &d2) == 0) {
+					syslog(LOG_NOTICE,
+						   "ble_host_smoke: PC sec_state enc=%d auth=%d bond=%d keysz=%d",
+						   (int_t) d2.sec_state.encrypted,
+						   (int_t) d2.sec_state.authenticated,
+						   (int_t) d2.sec_state.bonded,
+						   (int_t) d2.sec_state.key_size);
+				}
+				else {
+					syslog(LOG_NOTICE,
+						   "ble_host_smoke: PC sec_state (conn_find failed)");
+				}
+			}
 		}
 		break;
 #endif /* TOPPERS_ESP32C3_BT_SM */

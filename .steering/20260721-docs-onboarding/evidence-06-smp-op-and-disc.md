@@ -119,3 +119,72 @@ fable の中心的推論：
 `enc=1 bond=1` になっているかを見る。なっていれば
 「**bond は実は成功していて、アプリが遅れて偽の失敗報告を受け取っているだけ**」が確定する
 （`ble_sm_proc` が完了後も回収されず 30 秒で期限切れ発火、という機序が候補。**未検証**）。
+
+---
+
+## 6. 追加測定：**症状は 1 つではない**（Android 相手で 2 種類の経過を観測）
+
+`ENC_CHANGE` ハンドラでしか `sec_state` を出していなかったため、**ETIMEOUT が出る «前»** の
+状態が見えなかった。そこで `PAIRING_COMPLETE` 時点にも `sec_state` を出すログを 1 行足した
+（`ble_host_smoke_c3.c`．**JTAG 案は断念**——観測手段が測定対象を壊す事故を 3 度踏んだため。
+§6.3 に列挙）。
+
+### 6.1 観測された 2 種類の経過（同一ビルド・同一 central）
+
+| # | 経過 | DUT ログ | フラッシュ |
+|---|---|---|---|
+| **A** | **bond 成立 → 数十秒後に切断** | `PAIRING_COMPLETE status=0` が出る | **`magic=0x42535331` で保存**（peer = 実機の identity アドレス） |
+| **B** | **ペアリング要求が来ない → 切断** | `PAIRING_COMPLETE` が **一度も出ない** | 未保存 |
+
+**⇒ 同じ手順でも A と B が起きる＝単一の決定論的バグではない**（レース／タイミング依存の疑い）。
+evidence-05 §7 で「ペアリング要求は来るが bond しない」と記録した経過も含めると、
+**Android 相手の挙動は少なくとも 3 通り**ある。
+
+### 6.2 経過 B の実測ログ（今回・接続前から読み続けて捕獲）
+
+```
+ble_host_smoke: GAP CONNECT status=0 handle=1
+esp_shim: pend path engaged (dtqid=2)          ← ★D-2c 型の救済経路が発動
+ble_host_smoke: BT5 security_initiate(slave SecReq) rc=0
+ble_host_smoke: ss t=60s conn=1 disc=0 ntf=0/0
+ble_host_smoke: GAP ENC_CHANGE status=13
+ble_host_smoke: sec_state enc=0 auth=0 bond=0 keysz=0
+```
+
+**`esp_shim: pend path engaged (dtqid=2)`** は `esp_shim_core.c:781`。
+**ブロッキング API が BT のクリティカルセクション内で `E_CTX` を返し、救済の pending リングへ
+落ちた**ときに（初回のみ）出る＝memory `c3-ble-d2c-gatt-conn` が記録する **D-2c 型の機構が
+«接続直後に» 発動している**。
+
+★**ただし因果は未確定**：`shim_que_pend_used` は増分のみの累計カウンタで、
+evidence-rc-c3-P1 §1-1 が「**71 は «救済経路が累計 71 回発動し、すべて流れた» の意**」と
+明記しているとおり、**発動＝詰まりではない**。**「pend が出た → だから SMP が失敗した」と
+断定してはならない**（相関を因果と早合点しない）。**A/B 対照が必要**：
+経過 A（bond 成功）のときにも `pend path engaged` が出ているかを確認すれば、
+**この行が失敗の弁別指標になるか否か**が決まる。**本ラウンドでは未取得。**
+
+### 6.3 ★観測手段が測定対象を壊した事故（4 件・手法の記録）
+
+| 手段 | 何が起きたか |
+|---|---|
+| `tmp/rts_boot_capture.py` | **RTS でリセット**＝観測したい BLE セッションを切る。さらに**先にリセットしてから採取**するので **リセット «前» のログが失われる** |
+| `tmp/c5_cold_passive_capture.py` | **開く瞬間に一度リセットが入る**（スクリプト冒頭に明記）。測定開始が対象を再起動する |
+| `--wrap` 計装（`ESP32C3_BT_EVT_TRACE`） | ①`TOPPERS_C3_EVT_FAST_MAP` 未定義で**必ずリンクエラー**（修正済）②修正後も**最適化で inert**（§4） |
+| **自作 GDB スクリプト** | `continue &`＋`detach` が効かず **DUT を halt したまま放置**＝広告停止。ユーザーの試験を 1 回無駄にした |
+
+**結論＝この DUT でライブ BLE を観測する唯一の安全な方法は**
+「**接続を始める «前» から、DTR/RTS を触らずシリアルを読み続ける**」。
+（`c3_pool_watch.sh` の halt→read→**resume** は例外的に安全だが `sec_state` は読めない。）
+
+### 6.4 現時点の到達点
+
+**確定**：
+- ペアリングが成立する経過（A）では **空中で LESC 完全成功・鍵配布双方向**（§2）、
+  **フラッシュに bond 保存**、**真cold を跨いで復元**（evidence-05 §4）。
+- 切断は**ホストに正しく配送**される（§3．fable 仮説の反証）。
+- **同一条件で A/B の経過が分岐する**＝レース／タイミング依存（§6.1）。
+
+**未確定（次の測定）**：
+1. 経過 A でも `pend path engaged` が出るか（＝この行が弁別指標か）。**A/B 対照が必須**。
+2. 経過 A の `PAIRING_COMPLETE` 時点で `encrypted=1` か
+   （＝ETIMEOUT が «偽の失敗報告» か否か）。**ログは仕込み済み・未捕獲**。
