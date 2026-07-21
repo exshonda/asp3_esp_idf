@@ -182,7 +182,7 @@ cmake -S asp3/asp3_core -B build/c3_ble -G Ninja \
   -DASP3_TARGET=esp32c3_espidf \
   -DASP3_TARGET_DIR=$PWD/asp3/target/esp32c3_espidf \
   -DESP32C3_QEMU=OFF -DESP32C3_BT=ON -DESP32C3_BT_SM=ON \
-  -DASP3_APPLDIR=$PWD/apps/ble_host_smoke -DASP3_APPLNAME=ble_host_smoke
+  -DASP3_APPLDIR=$PWD/apps/ble_host_smoke_c3 -DASP3_APPLNAME=ble_host_smoke_c3
 cmake --build build/c3_ble
 ```
 
@@ -193,7 +193,7 @@ cmake --build build/c3_ble
 | `-DASP3_TARGET` / `TARGET_DIR` | `esp32c3_espidf` | `esp32c5_espidf` | `esp32c6_espidf` |
 | Wi-Fi | `-DESP32C3_WIFI=ON -DESP32C3_LWIP=ON` | `-DESP32C5_…` | `-DESP32C6_…` |
 | BLE | `-DESP32C3_BT=ON -DESP32C3_BT_SM=ON` | `-DESP32C5_…` | `-DESP32C6_…` |
-| BLEアプリ | `apps/ble_host_smoke` | `apps/ble_host_smoke_c5` | `apps/ble_host_smoke_c6` |
+| BLEアプリ | `apps/ble_host_smoke_c3` | `apps/ble_host_smoke_c5` | `apps/ble_host_smoke_c6` |
 | QEMU | あり（`-DESP32C3_QEMU`） | **なし** | **なし** |
 | 既定コンソール | USB Serial/JTAG | **UART0** | USB Serial/JTAG |
 

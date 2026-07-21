@@ -1,0 +1,196 @@
+#
+#		CI（ビルド腐敗の検出）
+#
+#  設計・経緯は tmp/plan-github-actions-ci.md、実測の証跡は
+#  .steering/20260721-docs-onboarding/evidence-02-ci.md を参照。
+#
+#  ■ 目的：**ビルド腐敗の早期検出**。実機は繋がらないのでビルド成立のみを判定する。
+#    過去に esptool の PATH 依存で seam 構成が «黙って» 壊れていた前歴があり、
+#    「触ったら手動でビルド」に依存する運用を自動化するのが動機。
+#
+#  ■ 構成をマトリクスにしない理由：submodule 込みのクローンが重い（数百MB）ため、
+#    10構成を並列にすると同じクローンを10回やることになる。
+#    **1回クローンして10構成をループ**する単一ジョブにする。
+#
+#  ■ トリガ：当面 workflow_dispatch のみ。
+#    ★いきなり push/PR で有効化しない（壊れた CI が常時赤いのは「テストが弱い」より悪い）。
+#    手動実行で数回グリーンを確認してから、下の push/pull_request のコメントを外す。
+#    リポジトリは public のため Actions は無料無制限（2026-07-21 時点）。
+#
+name: build
+
+on:
+  workflow_dispatch:
+  #  ★グリーンを確認してから有効化する（上記参照）
+  # push:
+  #   branches: [main]
+  #   paths-ignore: ['**.md', 'docs/**', '.steering/**', 'LICENSE']
+  # pull_request:
+  #   paths-ignore: ['**.md', 'docs/**', '.steering/**', 'LICENSE']
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build 10 configs (C3/C5/C6)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    env:
+      #  toolchain の導入先。asp3/cmake/toolchain-esp32-riscv32.cmake は
+      #  IDF_TOOLS_PATH を尊重する（$HOME 決め打ちではない）ため明示する。
+      IDF_TOOLS_PATH: ${{ github.workspace }}/.espressif
+
+    steps:
+      - name: checkout（submodule は手動制御）
+        uses: actions/checkout@v5
+        with:
+          submodules: false
+
+      - name: install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      #
+      #  submodule は「使う分だけ」。全部（esp-idf 配下 23個）を取ると数GBになる。
+      #  下の集合は実測で確定したもの（ninja -t deps とリンク行から採取．
+      #  evidence-01 §7／evidence-02）。推測で書くと CI で初めて壊れる。
+      #
+      - name: init submodules（asp3_core ＋ esp-idf）
+        run: |
+          git submodule update --init asp3/asp3_core
+          git submodule update --init --depth 1 esp-idf
+
+      - name: init esp-idf の必要な再帰submodule のみ
+        working-directory: esp-idf
+        run: |
+          git submodule update --init --depth 1 \
+            components/esp_wifi/lib \
+            components/esp_phy/lib \
+            components/esp_coex/lib \
+            components/lwip/lwip \
+            components/mbedtls/mbedtls \
+            components/bt/host/nimble/nimble \
+            components/bt/controller/lib_esp32c3_family \
+            components/bt/controller/lib_esp32c5/esp32c5-bt-lib \
+            components/bt/controller/lib_esp32c6/esp32c6-bt-lib
+
+      #
+      #  toolchain は esp-idf の pin に紐づく（tools.json が版を決める）ので、
+      #  キャッシュキーも esp-idf の commit にする＝版が変われば自動で入れ直る。
+      #
+      - name: cache toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.IDF_TOOLS_PATH }}
+          key: espressif-tools-${{ runner.os }}-${{ hashFiles('.git/modules/esp-idf/HEAD', 'esp-idf/tools/tools.json') }}
+
+      #  seam 構成は POST_BUILD で `esptool elf2image` を呼ぶため esptool が要る
+      #  （asp3_require_esptool() が configure 時に FATAL する）。
+      #  ★esptool は idf_tools.py の «tool» ではない（`idf_tools.py list` に出ない）。
+      #    実体は ESP-IDF の python venv に入り、asp3/cmake/esp_find_esptool.cmake が
+      #    `$IDF_TOOLS_PATH/python_env/*/bin` を探索する設計＝`install-python-env` が正解。
+      #    （ローカル実機環境でも解決されているのはこの venv の esptool：
+      #      ESP32C5_ESPTOOL=<IDF_TOOLS_PATH>/python_env/idf*_py*_env/bin/esptool）
+      - name: install toolchain
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: python3 esp-idf/tools/idf_tools.py install riscv32-esp-elf
+
+      - name: install ESP-IDF python env（esptool を含む．seam に必須）
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: python3 esp-idf/tools/idf_tools.py install-python-env
+
+      #  ★「成立」で終わらせないための可視化：解決された toolchain の実体を出す。
+      #  誤った toolchain は esp_toolchain_check.cmake が configure 時に FATAL するが、
+      #  ログにも残しておく（過去に汎用GCCへ黙って落ちていた事故があるため）。
+      - name: show toolchain / esptool
+        run: |
+          echo "IDF_TOOLS_PATH=$IDF_TOOLS_PATH"
+          find "$IDF_TOOLS_PATH/tools/riscv32-esp-elf" -maxdepth 1 -mindepth 1 -type d
+          "$IDF_TOOLS_PATH"/tools/riscv32-esp-elf/*/riscv32-esp-elf/bin/riscv32-esp-elf-gcc --version | head -1
+          #  seam が要求する esptool が venv に居ること（無ければ seam の configure が FATAL）
+          ls "$IDF_TOOLS_PATH"/python_env/*/bin/esptool || echo "::warning::esptool が見つからない（seam が落ちる）"
+
+      #
+      #  10構成をループ。判定は「ビルド成立」＋「生成物が実在する」の両方
+      #  （過去に「.o の個数だけで成否判定」「オプションを黙殺してバイト同一を吐く」
+      #    ビルドスクリプトの実例があったため、成果物の実在まで見る）。
+      #
+      - name: build 10 configs
+        run: |
+          set -o pipefail
+          TC="$PWD/asp3/cmake/toolchain-esp32-riscv32.cmake"
+          SAMPLE="$PWD/asp3/asp3_core/sample"
+          fail=0
+
+          build() {
+            tag=$1; chip=$2; appdir=$3; appname=$4; shift 4
+            echo "::group::$tag"
+            rm -rf "build/$tag"
+            if ! cmake -S asp3/asp3_core -B "build/$tag" -G Ninja \
+                 -DCMAKE_TOOLCHAIN_FILE="$TC" \
+                 -DASP3_TARGET="${chip}_espidf" \
+                 -DASP3_TARGET_DIR="$PWD/asp3/target/${chip}_espidf" \
+                 -DASP3_APPLDIR="$appdir" -DASP3_APPLNAME="$appname" "$@"; then
+              echo "::error::$tag: configure failed"; fail=1; echo "::endgroup::"; return
+            fi
+            if ! cmake --build "build/$tag"; then
+              echo "::error::$tag: build failed"; fail=1; echo "::endgroup::"; return
+            fi
+            if [ ! -f "build/$tag/asp.elf" ]; then
+              echo "::error::$tag: asp.elf not produced"; fail=1; echo "::endgroup::"; return
+            fi
+            echo "$tag OK ($(stat -c%s "build/$tag/asp.elf") bytes)"
+            echo "::endgroup::"
+          }
+
+          #  素構成（Wi-Fi/BT 両OFF）
+          build c3_plain esp32c3 "$SAMPLE" sample1 -DESP32C3_QEMU=OFF
+          build c5_plain esp32c5 "$SAMPLE" sample1
+          build c6_plain esp32c6 "$SAMPLE" sample1
+
+          #  Wi-Fi ＋ TCP/IP（認証情報は不要＝DHCPまで到達しなくてよい．ビルド判定のみ）
+          build c3_w1 esp32c3 "$PWD/apps/wifi_dhcp" wifi_dhcp -DESP32C3_QEMU=OFF -DESP32C3_WIFI=ON -DESP32C3_LWIP=ON
+          build c5_w1 esp32c5 "$PWD/apps/wifi_dhcp" wifi_dhcp -DESP32C5_WIFI=ON -DESP32C5_LWIP=ON
+          build c6_w1 esp32c6 "$PWD/apps/wifi_dhcp" wifi_dhcp -DESP32C6_WIFI=ON -DESP32C6_LWIP=ON
+
+          #  BLE（NimBLE ＋ SMP）
+          build c3_ble esp32c3 "$PWD/apps/ble_host_smoke_c3" ble_host_smoke_c3 -DESP32C3_QEMU=OFF -DESP32C3_BT=ON -DESP32C3_BT_SM=ON
+          build c5_ble esp32c5 "$PWD/apps/ble_host_smoke_c5" ble_host_smoke_c5 -DESP32C5_BT=ON -DESP32C5_BT_SM=ON
+          build c6_ble esp32c6 "$PWD/apps/ble_host_smoke_c6" ble_host_smoke_c6 -DESP32C6_BT=ON -DESP32C6_BT_SM=ON
+
+          #  ★本CIの主目的：seam（過去に esptool 依存で黙って腐った構成）
+          build c5_seam esp32c5 "$PWD/apps/wifi_scan" wifi_scan -DESP32C5_WIFI=ON -DASP3_SEAM_BOOT=ON
+
+          exit $fail
+
+      #
+      #  QEMU での移植検証テスト（C3のみQEMU対応）。TAP で機械判定する。
+      #  ビルド成立だけでなく «動く» ことまで見る唯一のステップ。
+      #  QEMU は Espressif fork が要るため、標準の qemu-system-riscv32 では
+      #  動かない可能性がある＝取得できなければスキップし、CI は落とさない
+      #  （このステップの不成立でビルド腐敗検出という主目的を潰さないため）。
+      #
+      - name: test_porting on QEMU (C3, best-effort)
+        continue-on-error: true
+        run: |
+          TC="$PWD/asp3/cmake/toolchain-esp32-riscv32.cmake"
+          TP="$PWD/asp3/asp3_core/test/porting"
+          python3 esp-idf/tools/idf_tools.py install qemu-riscv32 || {
+            echo "qemu-riscv32 を取得できないためスキップ"; exit 0; }
+          QEMU=$(find "$IDF_TOOLS_PATH/tools/qemu-riscv32" -name 'qemu-system-riscv32' -type f | head -1)
+          [ -n "$QEMU" ] || { echo "qemu-system-riscv32 が見つからないためスキップ"; exit 0; }
+          cmake -S asp3/asp3_core -B build/c3_tp -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$TC" \
+            -DASP3_TARGET=esp32c3_espidf \
+            -DASP3_TARGET_DIR="$PWD/asp3/target/esp32c3_espidf" \
+            -DESP32C3_QEMU=ON \
+            -DASP3_APPLDIR="$TP" -DASP3_APPLNAME=test_porting \
+            -DASP3_EXTRA_APP_C_FILES="$TP/tap.c" \
+            -DQEMU_SYSTEM_RISCV32_ESP="$QEMU"
+          cmake --build build/c3_tp
+          #  TAP で機械判定（目視で「動いていそう」は判定にしない）
+          out=$(timeout 120 cmake --build build/c3_tp --target run 2>&1 | tee /dev/stderr)
+          echo "$out" | grep -q '^# 8/8 passed' || { echo "::error::test_porting: 8/8 passed が出ない"; exit 1; }
