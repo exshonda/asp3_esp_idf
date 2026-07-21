@@ -1,5 +1,13 @@
 # 計画：asp3_esp_idf を esp-idf submodule(v5.5.4) 単一供給へ移行し ./hal と ./lwip を撤廃
 
+> ✅ **実行完了（2026-07-21）**。本計画は**実施済み**——`hal`／`lwip` submodule は
+> 撤廃され、供給元は `esp-idf` submodule 一本。3チップ・全構成で hal 参照 0 を
+> `ninja -t deps` で実測し、C3/C5/C6 とも W1（Wi-Fi＋DHCP＋ping）・W2（BLE GATT）を
+> **真cold** で達成済み。到達点は `README.md`、証跡は
+> `.steering/20260716-c3c5c6-esp-idf-supply-migration/`、判断の背景は
+> `docs/hal-vs-espidf-decision.md`。
+> 本書は**これから実行する計画ではなく**、実行された計画の記録として保存する。
+
 ローカルエージェント向けの実行計画。FMP3/Xtensa の esp32_s3 repo が
 「esp-idf-only 化＋hal 撤廃＋lwip を esp-idf から」を実機GREEN で完遂済みで、その
 実証手法を asp3_esp_idf(ASP3/RISC-V, C3/C5/C6)へ翻訳する。本 repo 側の背景正本は

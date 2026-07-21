@@ -1,41 +1,55 @@
 # CLAUDE.md — asp3_esp_idf
 
-TOPPERS/ASP3 Core と Espressif esp-hal（ESP32-C3）の統合リポジトリ。
-全体像・ビルド手順は `README.md`、統合の経緯・設計判断は
+TOPPERS/ASP3 Core と Espressif ESP-IDF の統合リポジトリ（**ESP32-C3 / C5 / C6**）。
+全体像・到達点・ビルド手順は `README.md`、開発を始める人向けの一本道は
+`docs/onboarding.md`、統合の経緯・設計判断は
 `asp3/asp3_core/docs/dev/esp-idf-integration.md` を正本とする。
 
-## 禁則（asp3_core と共通）
+## 禁則
 
 1. **`asp3/asp3_core/`（submodule）を直接編集しない**。カーネル・共通arch・
-   チップ依存部（`arch/riscv_gcc/esp32c3`）の変更は asp3_core リポジトリ側で
-   行い、submodule を bump する。
-2. **`hal/`（esp-hal-3rdparty submodule）を直接編集しない**。差分が必要な
-   場合はラッパ・シムを本リポジトリ側（`asp3/target/` 等）に置く。
-3. **カーネル内で動的メモリ確保を使わない**。Wi-Fi blob が要求する
+   チップ依存部の変更は asp3_core リポジトリ側で行い、submodule を bump する。
+2. **`esp-idf/`（submodule）を直接編集しない**。差分が必要な場合は
+   ラッパ・シムを本リポジトリ側（`esp/common/` または `esp/c{3,5,6}/`）に置く。
+   ESPコンポーネントの供給元は **esp-idf submodule 一本**（`hal`＝esp-hal-3rdparty と
+   `lwip` の submodule は 2026-07-21 に撤廃済み。lwIP は esp-idf 同梱フォークを使う）。
+3. **カーネル内で動的メモリ確保を使わない**。Wi-Fi/BT blob が要求する
    ヒープはカーネル外（アプリ/ライブラリ層）として実装する。
 
 ## 構成の要点
 
+- **`asp3/` は純ASP3（カーネルポート）、`esp/` はESP統合**という分離
+  （`esp/common/`＝3チップ共有、`esp/c{3,5,6}/`＝チップ固有）。
 - ビルドは **asp3_core 本体の CMake を `ASP3_TARGET_DIR` で駆動**する
-  （pico-sdk型）。ブートは ASP3 自前の Direct Boot（ESP-IDFの
-  スタートアップ・FreeRTOSは不使用）。
-- ターゲット依存部 `asp3/target/esp32c3_espidf/` は asp3_core の
-  `target/esp32c3_gcc` のコピーが起点（外部ターゲット規約＝
-  `CMAKE_CURRENT_LIST_DIR` 相対。PORTING_GUIDE.md §6）。
-- テストは asp3_core 側の資産を使う：QEMU＝`test/porting`・testexec、
-  実機＝`scripts/ci/run_board_esp32c3.py`（ESP32C3_TTY/ESPTOOL 環境変数）。
+  （pico-sdk型の外部ターゲット規約）。ブートは ASP3 自前の **Direct Boot**
+  （ESP-IDFのスタートアップ・FreeRTOSは不使用）。
+- ★**ツールチェーンは `asp3/cmake/toolchain-esp32-riscv32.cmake` を必ず使う**。
+  ESP-IDF v5.5.4 が指定する `riscv32-esp-elf` **esp-14.2.0_20260121** を
+  絶対パスで固定する（`IDF_TOOLS_PATH` は尊重される）。asp3_core の
+  `toolchain-riscv64.cmake` はPATH解決のため、**指定を忘れると汎用GCCへ黙って落ちる**
+  （rv32マルチリブがありビルドは通ってしまう）。誤った版は
+  `asp3/cmake/esp_toolchain_check.cmake` がconfigure時にFATALで止める。
+- **toolchain は esp-14.2.0 固定。esp-15 は使わない**——C3のBLE bondが
+  esp-14＝5/6成功・esp-15＝0/5失敗（供給・blob同一でコンパイラのみ変更した
+  真cold A/B。`evidence-c3-10`）。
 
 ## 検証の鉄則
 
 - 変更したら必ずビルドが通ることを確認してから報告する。
-- テストはTAP（`ok`/`not ok`・`# 6/6 passed`）で機械判定する。
+  **CIが無いリポジトリなので、触ったら手動でビルドを通す**
+  （過去に esptool の PATH 依存で黙って壊れていた実績がある。特に seam 構成）。
+- テストはTAP（`ok`／`not ok`・`# 8/8 passed`）で機械判定する
+  （`test_porting` は asp3_core 側で 6項目→**8項目**に増えている。
+  docs内に残る「6/6 passed」は6項目時代の記録）。
+- **「真cold」＝物理電源断（POR）からの起動のみ**。esptoolのhard-resetや
+  USB-JTAGコンソールのACM openによるリセットは真coldではない
+  （この区別を怠って測ったログが過去に多数ある＝誤測定の主因）。
 - QEMUと実機で割込み配送の仕組みが異なる（mie必須／mie非実装）等の
   既知の罠は esp-idf-integration.md「Phase A（実機）結果」を参照。
 
-## サブエージェントで調査を回すときの鉄則（C6 Wi-Fi 実施NN 系の長期調査）
+## 調査をサブエージェントに委譲するときの鉄則
 
-`docs/wifi-shim-c6.md` の実機JTAG調査をサブエージェントに委譲して回す
-場合、過去に実際に起きた事故を避けるため以下を守る。
+過去に実際に起きた事故を避けるため以下を守る。
 
 - **`fork` ではなく `general-purpose`（新規コンテキスト）を使う**。`fork`
   は親の会話文脈をそのまま引き継ぐため、直前が「エージェント起動の話」
@@ -44,11 +58,27 @@ TOPPERS/ASP3 Core と Espressif esp-hal（ESP32-C3）の統合リポジトリ。
   docs/メモリを読めと自己完結で書けるので、fresh context の方が確実。
 - **起動を確認してから「実行中」と報告する**。ツール結果に
   `Async agent launched successfully` と agentId が返って初めて起動成功。
-  ツール呼び出しを地の文に書くと起動されない（結果が返らない）。完了
-  通知で `tool_uses=0` のエージェントは何もしていない＝再起動が必要。
-- 完了はハーネスが自動通知する。短間隔のポーリング（「2分毎に確認」等）は
-  不要でコンテキストの無駄。
-- 各ラウンドは `docs/wifi-shim-c6.md` に実施NN として追記し、
-  `memory/project_c6_agc_investigation.md`・`MEMORY.md` を更新する運用。
-  「未検証の判別指標に乗らない・相関を因果と早合点しない・反証実験を先に」
-  は `memory/feedback_hardware_investigation_rigor.md` を正本とする。
+  完了通知で `tool_uses=0` のエージェントは何もしていない＝再起動が必要。
+- 完了はハーネスが自動通知する。短間隔のポーリングは不要でコンテキストの無駄。
+- **引き継いだ「事実」も、設計の土台にするなら自分で実測して裏を取る**
+  （親が未検証の推測を「確定事実」として渡し、それ自体が真因だった事例が複数ある）。
+- 各作業単位は `.steering/<日付>-<主題>/` に **背景・事前予測・結果・証跡**の形で記録する。
+
+### 実機調査の規律（このリポジトリで実際に事故った項目）
+
+- **測定の前に予測を固定する**。外れたらそれ自体が情報（仮説の反証）。
+- **相関を因果と早合点しない・反証実験を先に**。「Aを入れたら直った」は
+  **Aを外した対照**を採るまで因果ではない（決定的対照を省いて誤った成功譚を
+  書きかけた事例がある）。
+- **未検証の判別指標に乗らない**。nm のシンボル有無だけで blob の機能可否を
+  判断しない（実機で判断する）。
+- **操作の結果を読み戻す**。電源断したつもりで切れていなかった、
+  ログを `/dev/null` に捨てて失敗に気づかなかった、等の事例がある。
+- **ログが途中で切れたら DUT より先にハーネスを疑う**（リセット線の保持・
+  採取スクリプトの都合で切れる事例があった）。
+- 計測の罠：`.d` 依存は `ninja -t deps` で見る（CMake+Ninja は `.d` を
+  取り込んで削除するため `find -name '*.d'` は 0 と誤測する）。
+  採取ログの grep は `grep -a`（バイナリ混入で全マッチが無言で消える）。
+
+（エージェント運用時は、上記に対応する各自のメモリ／ノートも併用してよいが、
+**リポジトリ内の正本は本節**とする。）

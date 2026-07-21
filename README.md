@@ -86,6 +86,11 @@ OFF＝外部 v6.1 ツリー `ESP_IDF61_DIR`）。これは hal ではなく **v6
 
 ## ビルド
 
+> 🚀 **はじめての方は [`docs/onboarding.md`](docs/onboarding.md) から**。
+> 取得〜submodule の選択的init〜ツールチェーン導入〜ビルド〜QEMUでの検証
+> （`# 8/8 passed`）までを一本道で通す手順と、最初に踏みやすい罠をまとめてある。
+> 以下は要点のみ。
+
 `ASP3_TARGET_DIR` で asp3_core 本体の CMake を駆動する（pico-sdk型の
 外部ターゲット規約）。
 

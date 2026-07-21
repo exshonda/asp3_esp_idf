@@ -1,5 +1,18 @@
 # esp-hal-3rdparty統合（Phase B-1）
 
+> ⚠️ **歴史文書（2026-07-21 に役割を終えた）**。本書が前提とする
+> **`hal/`（esp-hal-3rdparty）submodule は撤廃済み**で、ESPコンポーネントの
+> 供給元は **`esp-idf` submodule 一本**になった（`lwip` submodule も撤廃し
+> esp-idf 同梱フォークを使う）。したがって本書のパス（`hal/components/…`）・
+> 版固定方針・レイアウト注意は**現行ツリーには当てはまらない**。
+> 現行の構成は `README.md`、始め方は `docs/onboarding.md`、移行の判断は
+> `docs/hal-vs-espidf-decision.md` を参照。
+> 本書は Phase B-1 当時の設計と実測の記録として保存する。
+>
+> なお本書中の `test_porting 6/6 passed` は**当時の実測どおりの記録**で
+> ある（`test_porting` はその後 asp3_core 側で 6項目→**8項目**に増え、
+> 現在の合格表示は `# 8/8 passed`）。記録の数値は書き換えていない。
+
 ## 方針
 
 - **submodule**：`hal/` ＝ [espressif/esp-hal-3rdparty](https://github.com/espressif/esp-hal-3rdparty)

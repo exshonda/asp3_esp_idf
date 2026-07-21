@@ -1,5 +1,13 @@
 # hal（esp-hal-3rdparty）か ESP-IDF か — 依存基盤の判断メモ
 
+> ✅ **実行完了（2026-07-21）**。本メモの結論＝**ESP-IDF 単一供給への移行は
+> 実施され、完了している**。`hal`／`lwip` submodule は撤廃され、3チップ・
+> 全構成で hal 参照 0 を `ninja -t deps` で実測済み。実行計画は
+> `tmp/plan-espidf-only-hal-removal.md`（同じく実行完了）、到達点は
+> `README.md`、証跡は `.steering/20260716-c3c5c6-esp-idf-supply-migration/`。
+> 本メモは**判断の根拠と当時の比較検討**の記録として保存する
+> （＝これから判断するための文書ではない）。
+
 本リポジトリのチップ依存基盤を **esp-hal-3rdparty（`hal` submodule）** に置くか
 **ESP-IDF** に置くかの議論を集約する。関連する実測の詳細は
 `docs/hal-nuttx-version-map.md`（版管理マップ）を参照。調査は全て read-only。
