@@ -95,7 +95,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_toolchain_check.cmake)
 if(NOT DEFINED IDF_V554)
     #  ★esp-idf submodule（v5.5.4タグ＝735507283d）をリポジトリ同梱で参照する。
     #  従来C3は esp_wifi.cmake:222／esp_bt.cmake:53 で外部絶対パス
-    #  /home/honda/tools/esp-idf を参照していたが，これは
+    #  $HOME/tools/esp-idf を参照していたが，これは
     #  (1) このマシン固有＝再現性が無く，(2) 変数名 `IDF_V554` に反して
     #  **v5.5.4タグではない**（version.hが5.5.4系を表示するため気づきにくい）。
     #  ★本PCでの実測（evidence-c3-01 §1．C6 evidence-c6-01 §1 と同じ罠）：

@@ -48,7 +48,7 @@ configure+build（toolchain=`esp-14.2.0_20260121` riscv32-esp-elf、
 
 ## 3. 実機検証（★実機GREEN・GOT IP + ping）
 
-DUT: C3 `60:55:F9:57:C2:60`（hub 1-6 port1、USB-JTAGのみ）。
+DUT: C3 `<MAC-21>`（hub 1-6 port1、USB-JTAGのみ）。
 `-DASP3_LWIP_ESPIDF=ON -DESP32C3_WIFI=ON -DESP32C3_LWIP=ON` で
 `apps/wifi_dhcp` を実 SSID/PASSWORD 付きでビルド・書込み。
 

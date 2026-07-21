@@ -17,13 +17,13 @@
 #
 set -u
 
-BOARD_MAC="${BOARD_MAC:-D0:CF:13:F0:A7:44}"		# C5#1
+BOARD_MAC="${BOARD_MAC:?BOARD_MAC を指定してください（対象ボードの MAC）。公開時にスクラブしたため既定値は持ちません}"		# C5#1
 PORT="/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_${BOARD_MAC}-if00"
 
-REPO="/home/honda/TOPPERS/asp3_esp_idf"
-GCC_BIN="/home/honda/tools/espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/bin"
+REPO="$HOME/TOPPERS/asp3_esp_idf"
+GCC_BIN="$HOME/tools/espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/bin"
 TOOLCHAIN_PREFIX="riscv32-esp-elf-"
-ESPTOOL="/home/honda/tools/espressif/python_env/idf6.1_py3.12_env/bin/esptool"
+ESPTOOL="$HOME/tools/espressif/python_env/idf6.1_py3.12_env/bin/esptool"
 BUILD="${C5BLE_BUILD:-$REPO/build/c5ble_esp15}"
 export PATH="$GCC_BIN:$PATH"
 

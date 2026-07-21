@@ -58,8 +58,8 @@ set(BT_TARGETDIR ${ESP_CHIP_DIR}/bt)
 #  （実際は +1169）。＝本質は「v5.5.4≡v6.1」ではなく「**+1169≡v6.1**」。
 #
 #  【★外部絶対パスの撤去（本PCでは版すら違う）】旧実装は
-#  `set(IDF /home/honda/tools/esp-idf)`（v5.5.4を名乗る）と
-#  `set(IDF /home/honda/tools/esp-idf-v6.1)` のローカルパス直書きだった。
+#  `set(IDF $HOME/tools/esp-idf)`（v5.5.4を名乗る）と
+#  `set(IDF $HOME/tools/esp-idf-v6.1)` のローカルパス直書きだった。
 #  実測：**本PCの `~/tools/esp-idf` は v5.5(=v5.5.0, 8c750b08) の shallow clone**
 #  ＝v5.5.4 タグでも +1169 でもない**第3の版**であり，どのラウンドでも
 #  検証されていない。同じパス名が PC ごとに別版を指す＝再現性が無い。
@@ -85,7 +85,7 @@ set(BT_TARGETDIR ${ESP_CHIP_DIR}/bt)
 #  が**一意に決まる**。＝実機ラウンドで最優先に測るべき対照（evidence-c6-01 §7）。
 #
 #  ★★【2026-07-17 実機結果＝evidence-c6-05。上の «2択» はどちらでもなかった】
-#  本DUT（14:C1:9F:E0:5A:9C・rev v0.2）で3アームを同一条件で回した実測：
+#  本DUT（<MAC-03>・rev v0.2）で3アームを同一条件で回した実測：
 #      hal  （hal型グルー × blob 75db98e5/cb429107）: warm D-1 / 真cold D-1
 #      v554 （C3型グルー  × blob 75db98e5/cb429107）: warm D-1 / 真cold D-1  ★4アーム目
 #      v61  （C3型グルー  × blob c28653df/3fea0708）: warm D-1 / 真cold D-1
@@ -116,7 +116,7 @@ set(BT_TARGETDIR ${ESP_CHIP_DIR}/bt)
 #
 option(ASP3_BT_IDF_V554 "Use the esp-idf submodule (TRUE v5.5.4 tag = 735507283d) BT controller/phy/coexist. Default ON (evidence-c6-06): on board C the v5.5.4-submodule supply reaches D-1 / D-2b / SM=ON device-side D-2a-2b at BOTH warm and TRUE COLD, i.e. >= the v6.1 evidence (which is warm-only), and it removes the dependency on the external non-submodule v6.1 tree. OFF = v6.1 matched set (reversible)" ON)
 
-set(ESP_IDF61_DIR /home/honda/tools/esp-idf-v6.1 CACHE PATH
+set(ESP_IDF61_DIR $HOME/tools/esp-idf-v6.1 CACHE PATH
     "Path to an ESP-IDF v6.1 tree (NOT a submodule; supplies the C6 BLE matched set). Override with -DESP_IDF61_DIR=<path>")
 
 if(ASP3_BT_IDF_V554)

@@ -1,6 +1,6 @@
 # 【S3→C6 共有】WiFi持続スループット時のシム欠陥と対策
 
-**作成元**: ESP32-S3 FMP3移植プロジェクト（`/home/honda/TOPPERS/ESP32/esp32_s3`）
+**作成元**: ESP32-S3 FMP3移植プロジェクト（`$HOME/TOPPERS/ESP32/esp32_s3`）
 **宛先**: 本プロジェクト（asp3_esp_idf / ESP32-C6 ターゲット）担当エージェント
 **作成日**: 2026-07-08
 

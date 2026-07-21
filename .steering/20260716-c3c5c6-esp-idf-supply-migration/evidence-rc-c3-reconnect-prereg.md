@@ -2,7 +2,7 @@
 
 **作成**: 2026-07-18 ／ **担当**: rc-c3 エージェント（PLAN Phase 2）
 **修正コードは書かない（計器のみ）。** 他エージェントの evidence/review/PLAN は読むだけ。
-DUT: **ESP32-C3 `60:55:F9:57:BA:BC`**（hub 1-6 `-p 1`）。
+DUT: **ESP32-C3 `<MAC-19>`**（hub 1-6 `-p 1`）。
 
 ---
 
@@ -266,7 +266,7 @@ Step 1 の «解除» と混同しない・別事象）。
 ### 10.2 snoop（phone 視点・較正 PASS）
 
 records=813・span 10:44:06..10:48:12。calibration `cmd230/acl_tx16/acl_rx192/evt375/att30/smp2`
-（**LE Conn Complete・Disconnection・ATT が見える＝SMP 有無を語れる**）。peer は全て `60:55:f9:57:ba:bc`（C3・public）。
+（**LE Conn Complete・Disconnection・ATT が見える＝SMP 有無を語れる**）。peer は全て `<MAC-19>`（C3・public）。
 
 | 時刻 | イベント |
 |---|---|
@@ -606,17 +606,17 @@ DISC=0 は «リンクが supervision timeout で silent に死ぬ» 切断が h
 
 | ボード | 復元 | 検証 |
 |---|---|---|
-| C3 `60:55:F9:57:BA:BC` | ★**計器入り `rc_c3_evt` → 計器なし通常 `rb_B_ble`（clean esp-idf GCC14・md5 `c32536dc`）へ戻す** | verify-flash digest matched＋真cold→`ASP3-C3-BLE` 広告実測 |
-| C5 `D0:CF:13:F0:A7:44` | `-p 3-4` 再給電（flash 保持＝`c5_tc_A2_ble`） | by-id PRESENT 読み戻し |
-| C6 `14:C1:9F:E0:5A:9C` | `-p 2` 再給電（flash 保持＝`gd_c6_ble`） | by-id PRESENT 読み戻し |
+| C3 `<MAC-19>` | ★**計器入り `rc_c3_evt` → 計器なし通常 `rb_B_ble`（clean esp-idf GCC14・md5 `c32536dc`）へ戻す** | verify-flash digest matched＋真cold→`ASP3-C3-BLE` 広告実測 |
+| C5 `<MAC-37>` | `-p 3-4` 再給電（flash 保持＝`c5_tc_A2_ble`） | by-id PRESENT 読み戻し |
+| C6 `<MAC-03>` | `-p 2` 再給電（flash 保持＝`gd_c6_ble`） | by-id PRESENT 読み戻し |
 
 （実測値は §16.7 に追記）
 
 ### 16.7 ベンチ復旧 実測（2026-07-18・1セル1ボード解除完了）
 
 - **C3**：`rc_c3_evt`（計器入り）→ **`rb_B_ble`（計器なし clean esp-idf GCC14）へ flash**・**verify-flash digest matched**・真cold（by-id 消滅読み戻し）→ 起動。**計器なし通常 ASP3 へ復元**（判断：計器 EVT_TRACE は passive だが «通常 ASP3» へ戻すのが復旧の趣旨＝instrument を外した）。
-- **C5** `D0:CF:13:F0:A7:44`・**C6** `14:C1:9F:E0:5A:9C`：`-p 3-4`/`-p 2` 再給電＝flash 保持（`c5_tc_A2_ble`/`gd_c6_ble`）。
+- **C5** `<MAC-37>`・**C6** `<MAC-03>`：`-p 3-4`/`-p 2` 再給電＝flash 保持（`c5_tc_A2_ble`/`gd_c6_ble`）。
 - **by-id PRESENT 読み戻し＝3ボードとも PRESENT**（C3 BA:BC / C5 A7:44 / C6 5A:9C）。
-- ★**新ベンチ機（我々でない JTAG `30:ED:A0:EA:98:0E`・`30:ED:A0:EA:B6:3E`・`F4:12:FA:5B:4A:58`）は不触。hub 1-5 不触。**
+- ★**新ベンチ機（我々でない JTAG `<MAC-08>`・`<MAC-09>`・`<MAC-41>`）は不触。hub 1-5 不触。**
 
 **★ラウンド rc-c3 クローズ完了。** 修正コード 0（計器のみ）・submodule 不触・hub 1-5 不触・認証情報 0。

@@ -1,7 +1,7 @@
 # C6 evidence-06 — **W1（GOT IP+ping）を真cold で／v554 の D-2b／board C 誤認の訂正**
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration` ／ 前段 commit: `bf8e92d`
-DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`**（hub `1-6` port2）＝**★board C 本体**（§2）
+DUT: **ESP32-C6 `<MAC-03>`**（hub `1-6` port2）＝**★board C 本体**（§2）
 
 ---
 
@@ -19,7 +19,7 @@ DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`**（hub `1-6` port2）＝**★board C 本体
 
 | 主張 | 検算 | 判定 |
 |---|---|---|
-| **`14:C1:9F:E0:5A:9C` ＝ board C** | `docs/wifi-shim-c6.md` に同 MAC が **8回**。加えて `docs/ble-c5c6.md`（「ESP32-C6 board C（`14:C1:9F:E0:5A:9C`）」）・`docs/load-test-c3c5c6.md`（「DUT＝C6 board C（`14:C1:9F:E0:5A:9C`）」）・`docs/c5-toolchain.md`・`docs/blob-unify-v554.md` が**独立に**同じ対応を記録 | **★正しい＝本DUT は board C** |
+| **`<MAC-03>` ＝ board C** | `docs/wifi-shim-c6.md` に同 MAC が **8回**。加えて `docs/ble-c5c6.md`（「ESP32-C6 board C（`<MAC-03>`）」）・`docs/load-test-c3c5c6.md`（「DUT＝C6 board C（`<MAC-03>`）」）・`docs/c5-toolchain.md`・`docs/blob-unify-v554.md` が**独立に**同じ対応を記録 | **★正しい＝本DUT は board C** |
 | 「board C は **rev v0.3**」 | `docs/wifi-shim-c6.md` に **`v0.3` は 0 件**＝**一次情報が存在しない**。esptool 実測＝**`ESP32-C6FH4 (QFN32) (revision v0.2)`** | **★誤り** |
 
 ### 2.2 ★誤りの発生源＝**2つの別レジスタの取り違え**（辿った）
@@ -192,7 +192,7 @@ uint32_t efuse_hal_blk_version(void);     /* line 36 ＝eFuse ブロック版数
 | **既定（flip 後）** | **★0**（＝provenance の罠が既定で外れた） | 264 |
 | `-DASP3_BT_IDF_V554=OFF` | 311 | — |
 
-⇒ **既定で «外部の非 submodule tree（`/home/honda/tools/esp-idf-v6.1`）» に一切触らなくなった**
+⇒ **既定で «外部の非 submodule tree（`$HOME/tools/esp-idf-v6.1`）» に一切触らなくなった**
 ＝`evidence-c6-01 §6` の据置き撤回の**実装**。**OFF で完全に戻せる＝可逆**。
 
 ### 5.4 ★v554 で踏んだ «版差の壁» は 2件・いずれも低かった（依頼 (b)）

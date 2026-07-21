@@ -63,7 +63,7 @@
    (c) connect→DHCP→ping→TCP/UDP＋**5GHz**（ch48等）
 5. **判定後**：
    - 成功→C3/C6/C5をhal一本に統一。`esp_wifi.cmake:46`のローカル
-     パス直書き（`/home/honda/tools/esp-idf-v6.1`）を撤去。
+     パス直書き（`$HOME/tools/esp-idf-v6.1`）を撤去。
      docs（c5-bringup.md・README）へ実施NNとして記録。
    - 失敗→v6.1依存を「ローカルパス」から「pinned submodule化
      （esp-idf v6.1-beta1）」へ変えて依存を明示化するフォールバックを

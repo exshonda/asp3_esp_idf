@@ -7,17 +7,17 @@
 #     必要なカウンタ（shim_*_pend_total 等）は出荷ビルドに既に存在する。
 #
 #  使い方:  ./c3_postmortem.sh <asp.elf> [出力先.txt]
-#  前提  :  C3 = USB-JTAG adapter serial 60:55:F9:57:BA:BC（ベンチ台帳）
+#  前提  :  C3 = USB-JTAG adapter serial <MAC-19>（ベンチ台帳）
 #
 #  ★halt したままにする（resume しない）＝死んだ瞬間の状態を保持して追加読み出しできる。
 #    再開したい場合は openocd を再度起動して `resume` を打つ。
 set -u
 ELF="${1:?usage: c3_postmortem.sh <asp.elf> [out.txt]}"
 OUT="${2:-c3_postmortem_$(date +%H%M%S).txt}"
-OOCD_DIR=/home/honda/.espressif/tools/openocd-esp32/v0.12.0-esp32-20250422/openocd-esp32
+OOCD_DIR=$HOME/.espressif/tools/openocd-esp32/v0.12.0-esp32-20250422/openocd-esp32
 OOCD="$OOCD_DIR/bin/openocd"
 SCRIPTS="$OOCD_DIR/share/openocd/scripts"
-SERIAL="60:55:F9:57:BA:BC"
+SERIAL="<MAC-19>"
 
 # シンボル位置は ELF から引く（ビルドが変わっても追従する）
 sym() { riscv32-esp-elf-nm "$ELF" | awk -v n="$2" '$3==n{print "0x"$1}' | head -1; }

@@ -1,7 +1,7 @@
 # C6 evidence-10 — **`ESP32C6_BT_SM` の既定を ON へ（C5 と同型・完全一致）**
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`＝board C**（hub `1-6` port2）
+DUT: **ESP32-C6 `<MAC-03>`＝board C**（hub `1-6` port2）
 前段: `evidence-c6-09`（hal 経路撤去・C5 と同型化。**SM 既定だけ C5(ON) と違い OFF** で申し送り）
 ユーザー判断: **「ON にして」**
 

@@ -21,8 +21,8 @@
 #  観測は Monitor ツールで /dev/ttyUSB0（CP2102, 115200）を読む．
 #
 set -u
-HUB=/home/honda/tools/acroname/usbhub3c_ctl.py
-ESPTOOL_ENV=/home/honda/tools/espressif/python_env/idf6.1_py3.12_env/bin
+HUB=$HOME/tools/acroname/usbhub3c_ctl.py
+ESPTOOL_ENV=$HOME/tools/espressif/python_env/idf6.1_py3.12_env/bin
 export PATH="$ESPTOOL_ENV:$PATH"
 PORT=/dev/ttyACM0
 

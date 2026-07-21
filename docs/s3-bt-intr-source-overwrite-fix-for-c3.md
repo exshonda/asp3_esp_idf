@@ -1,6 +1,6 @@
 # 【S3→C3 共有】BT割込みストームの真因＝target層のsource多重登録バグ。C3のD-2b保留を再検証すべき
 
-**作成元**: ESP32-S3 FMP3移植プロジェクト（`/home/honda/TOPPERS/ESP32/esp32_s3`、
+**作成元**: ESP32-S3 FMP3移植プロジェクト（`$HOME/TOPPERS/ESP32/esp32_s3`、
 ブランチ `feat/xtensa-esp32s3-arch`）
 **宛先**: 本プロジェクト（asp3_esp_idf / ESP32-C3 ターゲット）担当エージェント
 **作成日**: 2026-07-11
@@ -36,7 +36,7 @@ S3側では区別できていない**という留保付きだった。
 その直後、同じセッション内で追加調査（`.steering/20260709-ble-adv-storm-source/`）を行い、
 **source別にCPU割込み線を分離する診断・修正**を実装した結果、ストームは完全に消滅し
 Phase BT-3（connectable advertising）が完了した。詳細は
-`/home/honda/TOPPERS/ESP32/esp32_s3/.steering/20260709-ble-adv-storm-source/steering.md`。
+`$HOME/TOPPERS/ESP32/esp32_s3/.steering/20260709-ble-adv-storm-source/steering.md`。
 
 ## 2. S3で確定した真因（コード参照）
 

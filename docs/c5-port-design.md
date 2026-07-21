@@ -8,10 +8,10 @@ ESP32-C6移植（`asp3/target/esp32c6_espidf/`・`asp3_core/arch/riscv_gcc/esp32
 
 必読の前提文書：
 
-- `/home/user/asp3_esp_idf/CLAUDE.md`（禁則：submodule直接編集禁止・動的メモリ禁止）
-- `/home/user/asp3_esp_idf/README.md`（ビルド手順・フェーズ構成・C6の到達点）
-- `/home/user/asp3_esp_idf/docs/wifi-shim-c6.md`冒頭150行（C6でのチップ固有差替え一覧）
-- `/home/user/asp3_esp_idf/docs/hal-integration.md`（B-1コンソール・タイマ統合，C6横展開の経緯）
+- `$HOME/asp3_esp_idf/CLAUDE.md`（禁則：submodule直接編集禁止・動的メモリ禁止）
+- `$HOME/asp3_esp_idf/README.md`（ビルド手順・フェーズ構成・C6の到達点）
+- `$HOME/asp3_esp_idf/docs/wifi-shim-c6.md`冒頭150行（C6でのチップ固有差替え一覧）
+- `$HOME/asp3_esp_idf/docs/hal-integration.md`（B-1コンソール・タイマ統合，C6横展開の経緯）
 - `asp3/asp3_core/docs/porting/PORTING_GUIDE.md` §「外部（SDK）ターゲットの置き方」
   （読み取り専用．本書の§2.2の結論の直接的根拠）
 
@@ -168,7 +168,7 @@ test_porting）→B-2a（Wi-Fi scan）の順で完了判定を行う（詳細は
 
 ## 4. arch/riscv_gcc/esp32c5 ファイル別変更計画（22ファイル）
 
-配置：`/home/user/asp3_esp_idf/asp3/arch/riscv_gcc/esp32c5/`（新設，submodule外）。
+配置：`$HOME/asp3_esp_idf/asp3/arch/riscv_gcc/esp32c5/`（新設，submodule外）。
 以下はC6の同名ファイル（`asp3_core/arch/riscv_gcc/esp32c6/`）を全文精読した上での
 変更計画。「c6→c5」はファイル内の全識別子（`ESP32C6_*`→`ESP32C5_*`・
 `esp32c6_*`→`esp32c5_*`・`TOPPERS_ESP32C6*`→`TOPPERS_ESP32C5*`・コメント中の

@@ -644,7 +644,7 @@ wifi_reset_mac_wrapper(void)
  *  （＝本関数を呼ばなくても事実上effectがすでに適用済みだった）ことの
  *  結果であり，「本関数が不要」を意味しない．
  *
- *  ★実施91のJTAG A/B実験（board C，14:C1:9F:E0:5A:9C）で直接反証：
+ *  ★実施91のJTAG A/B実験（board C，<MAC-03>）で直接反証：
  *  1. `reset halt`直後（PC=0x40000000，ROM実行前）でPMU
  *     ICG_MODEM_REGを強制的にcode=0（POR既定値）へ書き戻し
  *     （真の電源断で得られる状態を模擬——warm残留の可能性がある

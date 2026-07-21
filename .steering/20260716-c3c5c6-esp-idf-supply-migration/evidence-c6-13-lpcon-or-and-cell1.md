@@ -1,7 +1,7 @@
 # C6 evidence-13 — **shim の `= 0x7` → `|= 0x7`**／**マトリクス セル1（iPhone）の準備**
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`＝board C**（hub `1-6` port2）
+DUT: **ESP32-C6 `<MAC-03>`＝board C**（hub `1-6` port2）
 前段: `evidence-c6-12`（app の重複 LPCON 書込み除去。`= 0x7` → `|= 0x7` を推奨として申し送り）
 
 ★**認証情報はビルド注入のみ。本ファイルには書かない。**
@@ -84,14 +84,14 @@ DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`＝board C**（hub `1-6` port2）
 **★電波（`bluetoothctl scan le`・受動）**：
 
 ```
-[NEW] Device 14:C1:9F:E0:5A:9C ASP3-C6-BLE     ← ★MAC が本DUT と一致
-[CHG] Device 14:C1:9F:E0:5A:9C RSSI: -71
-[CHG] Device 14:C1:9F:E0:5A:9C RSSI: -70       ← 反復＝生きた広告
+[NEW] Device <MAC-03> ASP3-C6-BLE     ← ★MAC が本DUT と一致
+[CHG] Device <MAC-03> RSSI: -71
+[CHG] Device <MAC-03> RSSI: -70       ← 反復＝生きた広告
 Discovering: no                                 ← ★スキャンは止めた（ユーザーのスマホを邪魔しない）
 ```
 
 ⇒ **広告名 `ASP3-C6-BLE`（source 実測 `:202` と一致）・RSSI 約 -70 dBm で «実際に電波が出ている»**。
-★同時に `ASP3-C5-BLE`(`D0:CF:13:F0:A7:44`)・`ASP3-C3-BLE`(`60:55:F9:57:BA:BC`) も見えたが
+★同時に `ASP3-C5-BLE`(`<MAC-37>`)・`ASP3-C3-BLE`(`<MAC-19>`) も見えたが
 **触っていない**（別エージェント／ユーザーの領域）。
 
 ---

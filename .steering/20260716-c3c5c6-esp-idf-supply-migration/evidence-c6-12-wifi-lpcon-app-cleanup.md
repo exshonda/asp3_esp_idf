@@ -1,7 +1,7 @@
 # C6 evidence-12 — **`0x600af018` は «既に shim に在る»／app 側の重複を除去する**
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`＝board C**（hub `1-6` port2）
+DUT: **ESP32-C6 `<MAC-03>`＝board C**（hub `1-6` port2）
 前段: `evidence-c6-11`（`--wrap` 計装を既定から除去／app 側の live 書込みを «触らず» 報告）
 
 ★**認証情報はビルド注入のみ。本ファイルには書かない。**

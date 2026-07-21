@@ -1,7 +1,7 @@
 # C3 evidence-07 — PVCY draft(ii) 投入／**BlueZ 非回帰(C0) を先に**／予測を実機前に登録
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C3 `60:55:F9:57:BA:BC`**（hub `1-6` port1）
+DUT: **ESP32-C3 `<MAC-19>`**（hub `1-6` port1）
 
 > ★**§3 は実機を1回も触らずに書き、実機の前に commit した。以後書き換えない。**
 
@@ -44,7 +44,7 @@ DUT: **ESP32-C3 `60:55:F9:57:BA:BC`**（hub `1-6` port1）
 
 | central | アドレス種別 | 結果 |
 |---|---|---|
-| **BlueZ `hci0`** | **public**（`8C:1D:96:BA:6D:BD`） | **bond 成功**（私が真cold 2/2 で実証） |
+| **BlueZ `hci0`** | **public**（`<MAC-33>`） | **bond 成功**（私が真cold 2/2 で実証） |
 | **Android** | **RPA** | **ENC ETIMEOUT 2/2**（コーディネータ実測） |
 
 **同一デバイス・同一 hal ビルド（`ASP3_ESPIDF_SUPPLY=OFF`・計装0）・central だけが違う。**

@@ -1,7 +1,7 @@
 # C5 evidence-04 — stock `pmu_init()` を ASP3 の C5 起動経路へ**そのまま積む**
 
 日付: 2026-07-16 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C5 #2**（BASE MAC `d0:cf:13:f0:c8:94`, hub **port5**, `ttyACM5` / `ttyUSB2`）
+DUT: **ESP32-C5 #2**（BASE MAC `<MAC-39>`, hub **port5**, `ttyACM5` / `ttyUSB2`）
 toolchain: Espressif `riscv32-esp-elf` esp-15.2.0
 
 evidence-03 §4.3「次の一手＝seam化ではなく `pmu_init()` 相当の移植」への回答。
@@ -145,7 +145,7 @@ MODEM_SYSCON/MODEM_LPCON 側のレジスタであり、`pmu_init()` の守備範
 
 - 全アーム **真の POWERON から**（`tmp/c5_cold_cycle.sh`＝`off 5`→**読み戻しで
   device count=0／Vbus 0.02V／`no device` を実証**→10s→`on 5`）。
-- 書込前に毎回 `esptool read-mac` で `d0:cf:13:f0:c8:94` を照合（全アームで一致）。
+- 書込前に毎回 `esptool read-mac` で `<MAC-39>` を照合（全アームで一致）。
 - 採取＝`tmp/rts_boot_capture.py /dev/ttyACM5`（native USB-JTAG．single-reset）。`grep -a`。
 - **ASP3側コードは完全同一。反転するのは cmake option だけ**。
 

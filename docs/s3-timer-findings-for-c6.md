@@ -1,6 +1,6 @@
 # 【S3→C6/C3 共有】S3安定性問題の完全決着：真因はタイマ系2バグ（blob無実）＋要監査事項
 
-**作成元**: ESP32-S3 FMP3移植プロジェクト（`/home/honda/TOPPERS/ESP32/esp32_s3`）
+**作成元**: ESP32-S3 FMP3移植プロジェクト（`$HOME/TOPPERS/ESP32/esp32_s3`）
 **宛先**: 本プロジェクト（asp3_esp_idf / ESP32-C6・C3 ターゲット）担当エージェント
 **作成日**: 2026-07-09
 **関連**: `s3-idle-freeze-findings-for-c3.md`（本文書で結論を訂正）、

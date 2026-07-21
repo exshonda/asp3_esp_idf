@@ -1,9 +1,9 @@
 非対話（一回きり）の相談です。コードの編集や実装は不要——**分析と次の一手の提案だけ**をお願いします。
 回答は日本語で。根拠となるESP-IDF/blob/ROM/HALの該当箇所があれば `file:line` や関数名で示してください。
 
-このリポジトリは `/home/honda/TOPPERS/ASP3CORE/asp3_esp_idf`（branch `claude/c6-wifi-c5-dev-5vc6x9`）。
+このリポジトリは `$HOME/TOPPERS/ASP3CORE/asp3_esp_idf`（branch `claude/c6-wifi-c5-dev-5vc6x9`）。
 全経緯は `docs/c5-bringup.md`（実施1〜13）。C6側の長期調査は `docs/wifi-shim-c6.md`（実施1〜85）。
-ESP-IDF v6.1-beta1 は `/home/honda/tools/esp-idf-v6.1`、HALは `hal/`（esp-hal-3rdparty submodule）。
+ESP-IDF v6.1-beta1 は `$HOME/tools/esp-idf-v6.1`、HALは `hal/`（esp-hal-3rdparty submodule）。
 
 # 文脈：なぜC5をやっているのか
 

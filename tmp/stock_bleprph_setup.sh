@@ -21,7 +21,7 @@
 # key dist = ENC only, EXT_ADV=y (see the evidence file for why these matter).
 set -euo pipefail
 
-R=/home/honda/TOPPERS/ASP3CORE/asp3_esp_idf
+R=$HOME/TOPPERS/ASP3CORE/asp3_esp_idf
 export IDF_PATH=$R/esp-idf
 SRC=$IDF_PATH/examples/bluetooth/nimble/bleprph
 DST=$R/tmp/stock_bleprph
@@ -91,7 +91,7 @@ done
 
 echo "=== toolchain actually used (measured, not assumed) ==="
 for t in esp32c6 esp32c5; do
-    grep -m1 -oE "/home/honda/\.espressif/tools/riscv32-esp-elf/[^ ]*riscv32-esp-elf-gcc" "build_$t/build.ninja"
+    grep -m1 -oE "$HOME/\.espressif/tools/riscv32-esp-elf/[^ ]*riscv32-esp-elf-gcc" "build_$t/build.ninja"
     # NB: -march is NOT in build.ninja; IDF v5.5.4 indirects flags via @response file
     grep -oE '\-march=[a-z0-9_]+' "build_$t/toolchain/cflags"
 done

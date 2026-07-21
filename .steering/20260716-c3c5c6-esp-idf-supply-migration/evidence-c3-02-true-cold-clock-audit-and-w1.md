@@ -1,7 +1,7 @@
 # C3 evidence-02 — ★真cold クロック監査（**事前登録した予測が的中**）／★**真cold W1 達成**（GOT IP + ping）／hal参照0 の実機非回帰
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C3 `60:55:F9:57:BA:BC`**（hub `1-6` **port1**．書込前に毎回 `read-mac` 照合）
+DUT: **ESP32-C3 `<MAC-19>`**（hub `1-6` **port1**．書込前に毎回 `read-mac` 照合）
 toolchain: Espressif `riscv32-esp-elf` **esp-15.2.0**
 前段: `evidence-c3-01`（供給移行＋静的監査．**予測はそこで実機前に commit 済み＝本ラウンドで改竄していない**）
 
@@ -265,7 +265,7 @@ STORE4=XTAL freq／STORE5=APB freq／STORE6,7=FAST_RTC entry,CRC）。
   `Hash of data verified` を確認する**。
 - **★安全上の齟齬（コーディネータの表と実機が違った）**：プロンプトの hub 表は
   「port2=C6／port3/4=C5#1」としていたが、実測は **port2＝ネストした ganged hub（`05e3:0608`）**・
-  **port4＝`D0:CF:13:F0:A7:44`**。**私の DUT が port1（`60:55:F9:57:BA:BC`）である点だけは一致**したので
+  **port4＝`<MAC-37>`**。**私の DUT が port1（`<MAC-19>`）である点だけは一致**したので
   `-p 1` のみで進めた。**電源操作前に毎回 `uhubctl -l 1-6` で port1 の中身を目視確認した。**
 
 ---

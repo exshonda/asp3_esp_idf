@@ -1,7 +1,7 @@
 # C6 evidence-02 — **決定的対照の4アーム目**（C3型グルー × hal同一blob）で BT 非収束の帰属を一意に決める
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration` ／ 前段 commit: `22ea5a2`
-DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`**（hub `1-6` port2・**台帳未知の新個体**＝board C ではない）
+DUT: **ESP32-C6 `<MAC-03>`**（hub `1-6` port2・**台帳未知の新個体**＝board C ではない）
 toolchain: `~/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204`（gcc 15.2.0）
 
 
@@ -11,7 +11,7 @@ toolchain: `~/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204`（gcc 15.2.0
 >
 > | 誤り | 正 |
 > |---|---|
-> | 「本DUT は台帳未知の**新個体**」「**board C＝別個体**」 | **`14:C1:9F:E0:5A:9C` こそが board C 本体**。`docs/wifi-shim-c6.md` に同 MAC が **8回**、他に `docs/ble-c5c6.md`・`docs/load-test-c3c5c6.md`・`docs/c5-toolchain.md`・`docs/blob-unify-v554.md` が独立に「board C＝`14:C1:9F:E0:5A:9C`」と記録 |
+> | 「本DUT は台帳未知の**新個体**」「**board C＝別個体**」 | **`<MAC-03>` こそが board C 本体**。`docs/wifi-shim-c6.md` に同 MAC が **8回**、他に `docs/ble-c5c6.md`・`docs/load-test-c3c5c6.md`・`docs/c5-toolchain.md`・`docs/blob-unify-v554.md` が独立に「board C＝`<MAC-03>`」と記録 |
 > | 「board C は **rev v0.3**」 | **一次情報が存在しない**（`docs/wifi-shim-c6.md` に `v0.3` の記述は **0件**）。**実測は rev v0.2**（esptool: `ESP32-C6FH4 (QFN32) (revision v0.2)`） |
 >
 > **★誤りの発生源＝2つの別レジスタの取り違え**：`evidence-c6-02:195` は
@@ -46,7 +46,7 @@ toolchain: `~/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204`（gcc 15.2.0
 |---|---|---|
 | submodule `esp-idf/` | `735507283d` | **`v5.5.4` タグ（真の v5.5.4）** |
 | `hal/` | `b90b1837` | esp-hal-3rdparty |
-| `/home/honda/tools/esp-idf-v6.1` | — | `v6.1-beta1` |
+| `$HOME/tools/esp-idf-v6.1` | — | `v6.1-beta1` |
 
 ### 2.2 C6 BT blob md5（先頭8桁・`esp32c6/` パス）
 
@@ -192,8 +192,8 @@ C6 実施03 の事故（`no time event is processed in hrt interrupt.` の氾濫
 
 ## 4. 測定計画（実機）
 
-1. `read-mac` で `14:c1:9f:e0:5a:9c` を照合（不一致なら中断）。
-2. **真cold**＝`sudo uhubctl -l 1-6 -p 2 -a off` → **`ls /dev/serial/by-id/ | grep -Ec "14:C1:9F:E0:5A:9C|125a266b"` が 0 の読み戻し**（★`rst:` 行は根拠にしない）→ `-a on`。
+1. `read-mac` で `<MAC-03>` を照合（不一致なら中断）。
+2. **真cold**＝`sudo uhubctl -l 1-6 -p 2 -a off` → **`ls /dev/serial/by-id/ | grep -Ec "<MAC-03>|125a266b"` が 0 の読み戻し**（★`rst:` 行は根拠にしない）→ `-a on`。
    **`-l 1-6 -p 2` 以外のポートには触らない**（port1=C3／port3-4=C5／hub 1-5=別プロジェクト）。
 3. 採取は**測定対象の状態が始まる前に1回だけ open して保持**（C5 §13 の「capture-open が DUT を
    リセットして «存在しないバグを捏造» した」の再発防止）。
@@ -217,7 +217,7 @@ C6 実施03 の事故（`no time event is processed in hrt interrupt.` の氾濫
    ★実測：本DUT＝**ESP32-C6FH4（QFN32）rev v0.2・内蔵Flash**。
    board C＝**rev v0.3**（§20 コミットが「本board efuse blk v0.3>=1」と明記）＝**別の型番/リビジョン**。
 
-### 5.1 ★測定マトリクス（すべて本個体 `14:C1:9F:E0:5A:9C`／真cold は読み戻しで実証）
+### 5.1 ★測定マトリクス（すべて本個体 `<MAC-03>`／真cold は読み戻しで実証）
 
 | # | アーム | blob | グルー | gcc | 電源 | 結果 |
 |---|---|---|---|---|---|---|

@@ -1,6 +1,6 @@
 OpenAI Codex v0.142.5
 --------
-workdir: /home/honda/TOPPERS/ASP3CORE/asp3_esp_idf
+workdir: $HOME/TOPPERS/ASP3CORE/asp3_esp_idf
 model: gpt-5.5
 provider: openai
 approval: never
@@ -13,10 +13,10 @@ user
 非対話（一回きり）の相談です。コードの編集や実装は不要——**分析と次の一手の提案だけ**をお願いします。
 回答は日本語で。根拠となるESP-IDF/blob/ROM/HALの該当箇所があれば `file:line` や関数名で示してください。
 
-このリポジトリは `/home/honda/TOPPERS/ASP3CORE/asp3_esp_idf`（branch `claude/c6-wifi-c5-dev-5vc6x9`）。
+このリポジトリは `$HOME/TOPPERS/ASP3CORE/asp3_esp_idf`（branch `claude/c6-wifi-c5-dev-5vc6x9`）。
 前回の相談（round1、実施13時点）＝`tmp/codex_c5_round1_prompt.md`/`_output.txt`。
 その後の全経緯は `docs/c5-bringup.md` の実施14〜26（各セクション見出しだけでも流れが分かるように書いてあります）。
-ESP-IDF v6.1-beta1 は `/home/honda/tools/esp-idf-v6.1`、HALは `hal/`（esp-hal-3rdparty submodule）。
+ESP-IDF v6.1-beta1 は `$HOME/tools/esp-idf-v6.1`、HALは `hal/`（esp-hal-3rdparty submodule）。
 
 # 前提（round1からの差分＝実施14〜26で確定した事実）
 
@@ -98,14 +98,14 @@ web search: https://rawcdn.githack.com/espressif/esp-idf/v6.1-beta1/components/e
 web search: 
 web search: rawcdn.githack.com/espressif/esp-idf/v6.1-beta1/components/esp_system/port/cpu_start.c
 codex
-注: このセッションではローカル読み取りが sandbox エラーで失敗したため、行番号は確認できていません。以下は `file:function` 単位です。該当行は `rg -n "関数名" /home/honda/tools/esp-idf-v6.1 ...` で確認してください。
+注: このセッションではローカル読み取りが sandbox エラーで失敗したため、行番号は確認できていません。以下は `file:function` 単位です。該当行は `rg -n "関数名" $HOME/tools/esp-idf-v6.1 ...` で確認してください。
 
 **候補リスト**
 優先度順です。
 
 1. **stock の Wi-Fi/PHY 較正そのものが作った保持状態**
    これは現時点で最優先に潰すべき別解釈です。実施26は「stock scan 完走後」のハンドオフなので、`MODEM0+0x81c..0x828` と `+0x47c bit16` が、bootloader/startup ではなく `esp_wifi_init`/`esp_phy_enable`/scan 中の PHY 較正で残った状態の可能性があります。
-   根拠箇所: `/home/honda/tools/esp-idf-v6.1/components/esp_phy/src/phy_init.c:esp_phy_enable()`, `esp_phy_load_cal_and_init()`、Wi-Fi 側は `components/esp_wifi/...:esp_wifi_init()`、blob 内 `phy_iq_est_enable_new`。
+   根拠箇所: `$HOME/tools/esp-idf-v6.1/components/esp_phy/src/phy_init.c:esp_phy_enable()`, `esp_phy_load_cal_and_init()`、Wi-Fi 側は `components/esp_wifi/...:esp_wifi_init()`、blob 内 `phy_iq_est_enable_new`。
 
 2. **MODEM/PCR クロック・リセットのパルス履歴**
    スナップショット一致で最も見落としやすいです。reset bit、clock enable、module reset は write-only/self-clear/順序依存になりがちで、最終値一致は因果棄却になりません。raw ADC 恒久ゼロとも整合します。
@@ -160,14 +160,14 @@ codex
 次の一手は、`app_main` 先頭即 handoff と bootloader jump 直前 handoff の2点です。この2点だけで、探索範囲は「PHY残留」「2nd-stage bootloader」「app startup」のどれかにかなり鋭く分かれます。
 tokens used
 48,884
-注: このセッションではローカル読み取りが sandbox エラーで失敗したため、行番号は確認できていません。以下は `file:function` 単位です。該当行は `rg -n "関数名" /home/honda/tools/esp-idf-v6.1 ...` で確認してください。
+注: このセッションではローカル読み取りが sandbox エラーで失敗したため、行番号は確認できていません。以下は `file:function` 単位です。該当行は `rg -n "関数名" $HOME/tools/esp-idf-v6.1 ...` で確認してください。
 
 **候補リスト**
 優先度順です。
 
 1. **stock の Wi-Fi/PHY 較正そのものが作った保持状態**
    これは現時点で最優先に潰すべき別解釈です。実施26は「stock scan 完走後」のハンドオフなので、`MODEM0+0x81c..0x828` と `+0x47c bit16` が、bootloader/startup ではなく `esp_wifi_init`/`esp_phy_enable`/scan 中の PHY 較正で残った状態の可能性があります。
-   根拠箇所: `/home/honda/tools/esp-idf-v6.1/components/esp_phy/src/phy_init.c:esp_phy_enable()`, `esp_phy_load_cal_and_init()`、Wi-Fi 側は `components/esp_wifi/...:esp_wifi_init()`、blob 内 `phy_iq_est_enable_new`。
+   根拠箇所: `$HOME/tools/esp-idf-v6.1/components/esp_phy/src/phy_init.c:esp_phy_enable()`, `esp_phy_load_cal_and_init()`、Wi-Fi 側は `components/esp_wifi/...:esp_wifi_init()`、blob 内 `phy_iq_est_enable_new`。
 
 2. **MODEM/PCR クロック・リセットのパルス履歴**
    スナップショット一致で最も見落としやすいです。reset bit、clock enable、module reset は write-only/self-clear/順序依存になりがちで、最終値一致は因果棄却になりません。raw ADC 恒久ゼロとも整合します。

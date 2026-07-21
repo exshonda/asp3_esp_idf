@@ -1,6 +1,6 @@
 /*
  *  ★D-2c準備（GAP_SERVICE以下の追加分）はビルド未検証（IDF v6.1環境
- *  （`/home/honda/tools/esp-idf-v6.1`）が本開発環境に存在しないため）．
+ *  （`$HOME/tools/esp-idf-v6.1`）が本開発環境に存在しないため）．
  *  C6での同種変更（本ファイル内GAP_SERVICE節のコメント参照）はビルド
  *  検証済みだが，C5はhal submoduleではなくIDF v6.1のnimbleソースを
  *  使うため，esp_nimble_cfg.hのgate位置がC6と完全一致する保証はない

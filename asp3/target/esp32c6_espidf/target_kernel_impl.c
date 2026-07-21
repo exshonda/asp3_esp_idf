@@ -106,7 +106,7 @@ esp32c6_disable_mwdt(uint32_t timg_base)
  *  POR既定REE2）のバスマスタアクセスがHP_APMフィルタ（POR既定有効）の
  *  ゲート対象になり得る。
  *
- *  実施87実測（board B 14:C1:9F:E0:61:B0）：
+ *  実施87実測（board B <MAC-06>）：
  *    ASP3冷間（2ブート再現）：HP_APM_FUNC_CTRL=0xF・LP_APM0=0x1・
  *      LP_APM=0x3（全てPOR既定=有効），TEE_M4(MODEM)=3(REE2)，
  *      HP_APM M0-M3例外ラッチ=全て0（ただし当日board BのASP3は
@@ -118,7 +118,7 @@ esp32c6_disable_mwdt(uint32_t timg_base)
  *  寄与）は本ラウンドでは判定不能（board Bのハング＋NuttXでも同板は
  *  RX不能という個体要因のため）——docs/wifi-shim-c6.md 実施87参照。
  *
- *  実施88（docs/wifi-shim-c6.md）：board C（14:C1:9F:E0:5A:9C）上で
+ *  実施88（docs/wifi-shim-c6.md）：board C（<MAC-03>）上で
  *  因果を確定・恒久化。ASP3冷間スキャン中にHP_APM M1例外ラッチが
  *  独立2ブートとも同一値で再現（STATUS=1／INFO0=0x00130001＝
  *  master_id=4(MODEM)+mode=3(REE2)+region=1／INFO1=0x4081f0a8＝

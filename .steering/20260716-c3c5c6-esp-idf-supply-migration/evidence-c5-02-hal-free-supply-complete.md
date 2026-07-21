@@ -1,7 +1,7 @@
 # C5 evidence-02 — **HAL依存ゼロ達成**（供給を全面 esp-idf v5.5.4 へ）＋ W1/scan 実機非回帰
 
 日付: 2026-07-16 ／ branch: `claude/c5-espidf-supply-migration` ／ commit: `cbe94d8`
-DUT: **ESP32-C5 #2**（BASE MAC `d0:cf:13:f0:c8:94`, hub **port5**, `ttyACM5`）
+DUT: **ESP32-C5 #2**（BASE MAC `<MAC-39>`, hub **port5**, `ttyACM5`）
 toolchain: Espressif `riscv32-esp-elf` esp-15.2.0
 
 ---
@@ -164,7 +164,7 @@ $ objdump -s -j .data (g_wifi_osi_funcs+480 .. +492)
 
 ## 5. 実機結果（生ログ．**SSIDはマスク**）
 
-手続き：`read-mac` で `d0:cf:13:f0:c8:94` 照合 → `--after no-reset` で
+手続き：`read-mac` で `<MAC-39>` 照合 → `--after no-reset` で
 `write-flash 0x0`（Hash of data verified）→ **真の cold**
 （`off 5` → **読み戻しで `C5 device count = 0` / `Vbus 0.01V` / `no device` を確認** → `on 5`）
 → `rts_boot_capture.py`（**single-reset**）。

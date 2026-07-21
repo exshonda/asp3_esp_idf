@@ -73,7 +73,7 @@
 
 ### 2.1 機構の実体（C5・絶対パス）
 
-**ファイル**: `/home/honda/TOPPERS/ASP3CORE/asp3_esp_idf/asp3/target/esp32c5_espidf/wifi_v8/esp_shim.c`
+**ファイル**: `$HOME/TOPPERS/ASP3CORE/asp3_esp_idf/asp3/target/esp32c5_espidf/wifi_v8/esp_shim.c`
 
 | 要素 | 行 | 内容 |
 |---|---|---|
@@ -443,10 +443,10 @@ BT クリティカルセクション内）でのみ発動する。** **通常の
 
 | 項目 | 実測 |
 |---|---|
-| 個体 | ★**MAC で同定＝`d0:cf:13:f0:a7:44`**（ESP32-C5 rev v1.0）＝**ポート番号で焼いていない** |
+| 個体 | ★**MAC で同定＝`<MAC-37>`**（ESP32-C5 rev v1.0）＝**ポート番号で焼いていない** |
 | ビルド | `build/e1_c5_pend`（**アーム B ＝ IDF 標準 `esp-14.2.0_20260121` / rv32imac**・`ESP32C5_BT_SM=ON`・**`ESP32C5_BT_PEND_DIAG=ON`**） |
 | 書込み | `Hash of data verified` |
-| 広告 | ★**`ASP3-C5-BLE @ D0:CF:13:F0:A7:44` をスキャンで実測**（**スキャナ較正＝7 デバイス見えている＝死んだ検出器ではない**） |
+| 広告 | ★**`ASP3-C5-BLE @ <MAC-37>` をスキャンで実測**（**スキャナ較正＝7 デバイス見えている＝死んだ検出器ではない**） |
 
 ### 8.3 ★真cold の証明 ＋ 1セル1ボード
 

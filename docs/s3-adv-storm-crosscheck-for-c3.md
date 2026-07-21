@@ -1,6 +1,6 @@
 # 【S3→C3 共有】BLE connectable advertisingの割込みストーム、S3でも再現
 
-**作成元**: ESP32-S3 FMP3移植プロジェクト（`/home/honda/TOPPERS/ESP32/esp32_s3`、
+**作成元**: ESP32-S3 FMP3移植プロジェクト（`$HOME/TOPPERS/ESP32/esp32_s3`、
 ブランチ `feat/xtensa-esp32s3-arch`）
 **宛先**: 本プロジェクト（asp3_esp_idf / ESP32-C3 ターゲット）担当エージェント
 **作成日**: 2026-07-09
@@ -35,7 +35,7 @@ spurious発火が大量に続き，CPUが飽和してホストタスク/RF送信
 
 S3はBT-1（`720e86f`，controller enable完走＋VHCIループバック）・BT-2
 （`69fa9b6`，NimBLE host sync到達）まで実機で達成済み（詳細は
-`/home/honda/TOPPERS/ESP32/esp32_s3/wifi/debug/JTAG_DEBUG.md` 追記56・57）。
+`$HOME/TOPPERS/ESP32/esp32_s3/wifi/debug/JTAG_DEBUG.md` 追記56・57）。
 本セッションでは，C3のPhase D-2b実装（`apps/ble_host_smoke/ble_host_smoke.c`の
 `start_advertising()`/`gap_event_cb()`，本リポジトリ`docs/bt-shim.md`
 1089-1146行）をS3のBT-2の上へほぼそのまま移植し（Phase BT-3），実機で
@@ -97,7 +97,7 @@ UARTで確認した後の，アイドル・sync済み状態で行った。**adv 
 
 ホストPCの内蔵BTアダプタで`bluetoothctl scan on`を40秒実施（S3をリセット直後から
 開始）。**`ASP3-S3-BLE`という名前のデバイスは一度も検出されなかった**。同一
-スキャンでC3側のNuttXボード（`60:55:F9:57:C9:8A "NuttX"`）は正常に検出されており，
+スキャンでC3側のNuttXボード（`<MAC-24> "NuttX"`）は正常に検出されており，
 スキャナ自体は健全であることを確認済み。JTAG単発halt観測では`g_adv_rc=0`
 （`ble_gap_adv_start`が成功扱いで返る）・`g_adv_active=1`のケースも複数回
 確認しているが，それでも電波としては出ていない＝**C3のD-2b(1)(m)節「storm下で
@@ -146,7 +146,7 @@ ASP3の無線はadvを出していない」という結論と一致する結果*
 
 ## 5. 参照
 
-- S3側詳細：`/home/honda/TOPPERS/ESP32/esp32_s3/wifi/debug/JTAG_DEBUG.md` 追記58
+- S3側詳細：`$HOME/TOPPERS/ESP32/esp32_s3/wifi/debug/JTAG_DEBUG.md` 追記58
 - S3側実装差分：`wifi/app/ble_hs_smoke.c`（Phase BT-3拡張），`wifi/bt/bt_shim.c`
 - C3側詳細：本リポジトリ `docs/bt-shim.md` 1089-1873行（Phase D-2b全体，
   特に1352行以降のストーム調査）

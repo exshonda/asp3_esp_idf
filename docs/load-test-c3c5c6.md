@@ -20,7 +20,7 @@ S3の欠陥は2つ：
   からmalloc/freeされ，欠陥Aの断片化を助長する．
 
 S3の対策（commit `dd7a76d`，S3リポジトリ
-`/home/honda/TOPPERS/ESP32/esp32_s3`）：
+`$HOME/TOPPERS/ESP32/esp32_s3`）：
 1. キューの固定プール化（生成時にdepth×item_sizeのプールを1回だけ
    確保し，送受信はスロット番号をDTQで運ぶ．mallocを送受信経路から
    排除）
@@ -120,7 +120,7 @@ cmake -S asp3/asp3_core -B build/load_test_c3_qfix -G Ninja \
 
 ### 負荷試験の実施と結果
 
-**環境**：DUT＝board A（`60:55:F9:57:C9:88`，USB-Serial-JTAG直結）．
+**環境**：DUT＝board A（`<MAC-23>`，USB-Serial-JTAG直結）．
 AP＝SSID `<SSID-2G>`（2.4GHz．認証情報は
 `build/wifi_connect/CMakeCache.txt`から取得，docs非記載）．ホスト＝
 同一LAN有線（192.168.1.48）．DUTのDHCP取得IP=192.168.1.63．
@@ -247,7 +247,7 @@ C3の固定プール化（commit 5c9ff81）を忠実移植した（C3独自の
 ### 負荷試験アプリ・環境
 
 `apps/load_test_c6/`＝`apps/load_test_c3`のコピー（include名・
-ログ接頭辞のみ変更）．DUT＝C6 board C（`14:C1:9F:E0:5A:9C`，
+ログ接頭辞のみ変更）．DUT＝C6 board C（`<MAC-03>`，
 コンソール=UARTブリッジ`125a266b…`）．AP＝`<SSID-2G>`（2.4GHz．
 C6は2.4GHz専用）．DUT IP=192.168.1.69．ホスト＝192.168.1.48
 （有線）．ハーネス＝C3と同一方法論（TCP持続1400Bチャンク・内容
@@ -333,7 +333,7 @@ TCP/UDPエコー・ping疎通確認済みのwarm状態で残置．
 
 ## board A 転用の記録と復元手順
 
-- **転用前**：C3 board A（`60:55:F9:57:C9:88`）はNuttX-C3-BLE参照機
+- **転用前**：C3 board A（`<MAC-23>`）はNuttX-C3-BLE参照機
   （host `hci0`とのover-the-air BLE比較用．console=UART0）だった．
 - **転用**：2026-07-13．本ラウンド（Wi-Fi負荷試験）のためユーザー
   了承済み．
@@ -348,7 +348,7 @@ TCP/UDPエコー・ping疎通確認済みのwarm状態で残置．
     --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_60:55:F9:57:C9:88-if00 \
     --before usb-reset --after watchdog-reset --no-stub \
     write-flash 0x0 \
-    /home/honda/.claude/jobs/494f98a3/tmp/nuttx-c3ble/nuttx/nuttx.bin
+    $HOME/.claude/jobs/494f98a3/tmp/nuttx-c3ble/nuttx/nuttx.bin
   ```
   （NuttXのconsoleはUART0＝USB-Serial-JTAG CDCではない点に注意．
   復元後はhost `hci0`（`bluetoothctl scan le`）でのadv検出により
@@ -357,7 +357,7 @@ TCP/UDPエコー・ping疎通確認済みのwarm状態で残置．
 ## 参照
 
 - `docs/s3-throughput-findings-for-c6.md`（S3の欠陥調査・対策詳細）
-- S3リポジトリ`/home/honda/TOPPERS/ESP32/esp32_s3` commit `dd7a76d`
+- S3リポジトリ`$HOME/TOPPERS/ESP32/esp32_s3` commit `dd7a76d`
 - `docs/tcpip-integration.md`（C3のlwIP統合設計・既存テスト実績）
 - ホスト側ハーネス：セッションスクラッチの`load_test.py`／
   `serial_logger.py`（リポジトリ外．本ドキュメントの記述から再構成

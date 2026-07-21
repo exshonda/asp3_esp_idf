@@ -1,7 +1,7 @@
 # C3 evidence-04 — bond 失敗の «機構» を A/B で局在化（**予測は実機前に commit**）
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C3 `60:55:F9:57:BA:BC`**（hub `1-6` **port1**）／central＝ホスト `hci0`
+DUT: **ESP32-C3 `<MAC-19>`**（hub `1-6` **port1**）／central＝ホスト `hci0`
 前段: `evidence-c3-03` ＝ **帰属は «供給» まで確定**（A=esp-idf/真v5.5.4 は bond 失敗 2/2 ／ B=hal は成功 2/2）
 
 > ★**§3 の予測は実機を1回も触らずに書き、実機の前に commit した。以後書き換えない。**

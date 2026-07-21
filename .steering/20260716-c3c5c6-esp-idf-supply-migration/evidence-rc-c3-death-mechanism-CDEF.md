@@ -1,7 +1,7 @@
 # evidence-rc-c3 Steps C–F — C3 BLE «supervision timeout 死» の機序調査（系統的除外＋方法論的訂正）
 
-2026-07-18。HEAD=`0867aba`（#1–#7 込み）。board C3=`60:55:F9:57:BA:BC`（ttyACM1・USB-JTAG のみ）。
-host hci0=`8C:1D:96:BA:6D:BD`。ビルド＝`ble_host_smoke`（esp-idf 供給=ON・QEMU=OFF・GCC14 `esp-14.2.0_20260121`）。
+2026-07-18。HEAD=`0867aba`（#1–#7 込み）。board C3=`<MAC-19>`（ttyACM1・USB-JTAG のみ）。
+host hci0=`<MAC-33>`。ビルド＝`ble_host_smoke`（esp-idf 供給=ON・QEMU=OFF・GCC14 `esp-14.2.0_20260121`）。
 前段＝`evidence-rc-c3-reconnect-prereg.md`（rc-c3 Step 0–B）。
 
 ## 0. 背景（前段で確立・再導出しない）

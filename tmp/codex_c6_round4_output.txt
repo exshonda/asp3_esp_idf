@@ -1,7 +1,7 @@
 Reading additional input from stdin...
 OpenAI Codex v0.142.5
 --------
-workdir: /home/honda/TOPPERS/ASP3CORE/asp3_esp_idf
+workdir: $HOME/TOPPERS/ASP3CORE/asp3_esp_idf
 model: gpt-5.5
 provider: openai
 approval: never

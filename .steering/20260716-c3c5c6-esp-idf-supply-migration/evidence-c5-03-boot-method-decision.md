@@ -1,7 +1,7 @@
 # C5 evidence-03 — ブート方式の**決定**：seam は C5 で成立する。だが **Direct Boot を継続**する
 
 日付: 2026-07-16 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C5 #2**（BASE MAC `d0:cf:13:f0:c8:94`, hub **port5**, `ttyACM5` / `ttyUSB2`）
+DUT: **ESP32-C5 #2**（BASE MAC `<MAC-39>`, hub **port5**, `ttyACM5` / `ttyUSB2`）
 toolchain: ASP3側 = Espressif `riscv32-esp-elf` esp-15.2.0 ／ bootloader側 = esp-14.2.0（IDF v5.5.4の指定版）
 
 evidence-02 §8「本ラウンドでは決定しない・判断はコーディネータへ差し戻す」への回答。

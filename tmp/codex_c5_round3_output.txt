@@ -1,6 +1,6 @@
 OpenAI Codex v0.142.5
 --------
-workdir: /home/honda/TOPPERS/ASP3CORE/asp3_esp_idf
+workdir: $HOME/TOPPERS/ASP3CORE/asp3_esp_idf
 model: gpt-5.5
 provider: openai
 approval: never
@@ -13,9 +13,9 @@ user
 非対話（一回きり）の相談です。コードの編集や実装は不要——**分析と次の一手の提案だけ**をお願いします。
 回答は日本語で。根拠となるESP-IDF/blob/ROM/HALの該当箇所は `file:line` や関数名・ROMシンボル名で示してください。
 
-このリポジトリは `/home/honda/TOPPERS/ASP3CORE/asp3_esp_idf`（branch `claude/c6-wifi-c5-dev-5vc6x9`）。
+このリポジトリは `$HOME/TOPPERS/ASP3CORE/asp3_esp_idf`（branch `claude/c6-wifi-c5-dev-5vc6x9`）。
 過去の相談＝`tmp/codex_c5_round1_prompt.md`/`_output.txt`（実施13時点）、`tmp/codex_c5_round2_prompt.md`/`_output.txt`（実施26時点）。
-その後の全経緯は `docs/c5-bringup.md` の実施27〜36。ESP-IDF v6.1-beta1は`/home/honda/tools/esp-idf-v6.1`、HALは`hal/`。
+その後の全経緯は `docs/c5-bringup.md` の実施27〜36。ESP-IDF v6.1-beta1は`$HOME/tools/esp-idf-v6.1`、HALは`hal/`。
 
 # 現状（round2以降の激変——実施27〜35で確定した事実）
 
@@ -443,8 +443,8 @@ popcount(xtal_48m_sel) が奇数なら 48MHz、偶数なら 40MHz
 
 ```sh
 riscv32-esp-elf-nm -u -A \
-  /home/honda/tools/esp-idf-v6.1/components/esp_phy/lib/esp32c5/libphy.a \
-  /home/honda/tools/esp-idf-v6.1/components/esp_wifi/lib/esp32c5/libpp.a |
+  $HOME/tools/esp-idf-v6.1/components/esp_phy/lib/esp32c5/libphy.a \
+  $HOME/tools/esp-idf-v6.1/components/esp_wifi/lib/esp32c5/libpp.a |
   egrep -i 'xtal|clk|freq|tick|delay|ets_|rom|rtc'
 ```
 
@@ -565,8 +565,8 @@ popcount(xtal_48m_sel) が奇数なら 48MHz、偶数なら 40MHz
 
 ```sh
 riscv32-esp-elf-nm -u -A \
-  /home/honda/tools/esp-idf-v6.1/components/esp_phy/lib/esp32c5/libphy.a \
-  /home/honda/tools/esp-idf-v6.1/components/esp_wifi/lib/esp32c5/libpp.a |
+  $HOME/tools/esp-idf-v6.1/components/esp_phy/lib/esp32c5/libphy.a \
+  $HOME/tools/esp-idf-v6.1/components/esp_wifi/lib/esp32c5/libpp.a |
   egrep -i 'xtal|clk|freq|tick|delay|ets_|rom|rtc'
 ```
 

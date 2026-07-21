@@ -1,7 +1,7 @@
 # C6 evidence-04 — **真cold の phy_init ハングを直す**
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration` ／ 前段 commit: `e614973`
-DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`**（hub `1-6` port2）
+DUT: **ESP32-C6 `<MAC-03>`**（hub `1-6` port2）
 前段: `evidence-c6-03` ＝ **帰属は ASP3 側**（同一個体・同一 libphy バイトで stock は真cold 完走・ASP3 は phy_init で停止）
 
 ---
@@ -208,7 +208,7 @@ port1=C3・port3/4=C5 は**触らない**。
    未初期化でゴミポインタ＝**実測**）。ただし**それを直しても cold は通らなかった**
    ＝**別個の実バグ**（修正は保持）。
 
-### 4.1 ★測定マトリクス（**全て本個体 `14:C1:9F:E0:5A:9C`・本セッション・私が実測**）
+### 4.1 ★測定マトリクス（**全て本個体 `<MAC-03>`・本セッション・私が実測**）
 
 **真cold の証明＝毎回2重**：(i) `uhubctl -l 1-6 -p 2 -a off` ＋ **by-id 消滅の読み戻し=0**、
 (ii) **センチネル `0xCAFE5A9C` → 電源断 → `0x00000000`**（＝POR が LP_AON を消した＝

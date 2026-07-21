@@ -1,7 +1,7 @@
 # C6 evidence-03 — **stock ESP-IDF を参照機にして「ASP3 側か／個体・品種側か」の帰属を決める**
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration` ／ 前段 commit: `ab108bf`
-DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`**（hub `1-6` port2）
+DUT: **ESP32-C6 `<MAC-03>`**（hub `1-6` port2）
 前段: `evidence-c6-02` が **BLOCKED**（この個体は何を焼いてもハング＝対照が落ち帰属不能）
 
 ---
@@ -25,10 +25,10 @@ DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`**（hub `1-6` port2）
 ```
 Chip type:  ESP32-C6FH4 (QFN32) (revision v0.2)
 Features:   Wi-Fi 6, BT 5 (LE), IEEE802.15.4, Single Core + LP Core, 160MHz, Embedded Flash 4MB
-BASE MAC:   14:c1:9f:e0:5a:9c
+BASE MAC:   <MAC-03>
 ```
 ⇒ **rev v0.2・内蔵Flash 4MB＝追認**。~~board C は rev v0.3（evidence-02 §5.5）。~~
-**★【2026-07-17 訂正】この一文は誤り**：**`14:C1:9F:E0:5A:9C` こそが board C 本体**であり
+**★【2026-07-17 訂正】この一文は誤り**：**`<MAC-03>` こそが board C 本体**であり
 （`docs/wifi-shim-c6.md` に同 MAC が8回）、**rev v0.3 という一次情報は存在しない**
 （同 doc に `v0.3` は0件）。**出所＝`evidence-c6-02:195` が «efuse blk_version» を
 «chip revision» と取り違えた**（stock `efuse_hal.h` は両者を別APIとして持つ）。
@@ -156,7 +156,7 @@ config ESP32C6_REV_MAX_FULL  int  default 99     ← 最大 v0.99
    ＝**pmu_init だけでは足りない**。残りは **2nd-stage bootloader の
    `rtc_clk_init()`（modem ICG preinit＋regi2c アナログトリム）ほか**（§5 の差分表）。
 
-### 4.1 ★測定マトリクス（**すべて本個体 `14:C1:9F:E0:5A:9C`・本セッション・私が実測**）
+### 4.1 ★測定マトリクス（**すべて本個体 `<MAC-03>`・本セッション・私が実測**）
 
 真cold の証明＝**`uhubctl -l 1-6 -p 2 -a off` ＋ by-id 消滅の読み戻し（毎回 0 を確認）**。
 

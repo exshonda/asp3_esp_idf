@@ -31,12 +31,12 @@
 set -u
 
 #  DUT（board B）＝BLE MAC 兼 USB-JTAG iSerial。別機は BOARD_MAC=... で上書き。
-BOARD_MAC="${BOARD_MAC:-60:55:F9:57:C2:60}"
+BOARD_MAC="${BOARD_MAC:?BOARD_MAC を指定してください（対象ボードの MAC）。公開時にスクラブしたため既定値は持ちません}"
 PORT="/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_${BOARD_MAC}-if00"
 
-REPO="/home/honda/TOPPERS/asp3_esp_idf"
-GCC_BIN="/home/honda/opt/tools/xpack-riscv-none-elf-gcc-15.2.0-1/bin"
-ESPTOOL="/home/honda/tools/espressif/python_env/idf6.1_py3.12_env/bin/esptool"
+REPO="$HOME/TOPPERS/asp3_esp_idf"
+GCC_BIN="$HOME/opt/tools/xpack-riscv-none-elf-gcc-15.2.0-1/bin"
+ESPTOOL="$HOME/tools/espressif/python_env/idf6.1_py3.12_env/bin/esptool"
 BUILD="${C3BLE_BUILD:-$REPO/build/c3ble}"
 export PATH="$GCC_BIN:$PATH"
 

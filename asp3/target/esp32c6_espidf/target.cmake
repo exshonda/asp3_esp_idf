@@ -102,7 +102,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_toolchain_check.cmake)
 #
 if(NOT DEFINED IDF_V554)
     #  ★esp-idf submodule（v5.5.4タグ＝735507283d）をリポジトリ同梱で参照する。
-    #  従来C6は外部絶対パス /home/honda/tools/esp-idf を参照していたが，これは
+    #  従来C6は外部絶対パス $HOME/tools/esp-idf を参照していたが，これは
     #  (1) このマシン固有＝再現性が無く，(2) 変数名 `IDF_V554` に反して
     #  **v5.5.4タグではない**（version.hが5.5.4系を表示するため気づきにくい）。
     #  実測（evidence-c6-01 §1）：本PCの ~/tools/esp-idf は **v5.5(=v5.5.0,

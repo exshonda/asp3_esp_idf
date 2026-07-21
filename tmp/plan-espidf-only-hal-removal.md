@@ -37,7 +37,7 @@
 ## 3. 段階（各段：可逆・チップ別・実機TAP検証・非回帰厳守）
 
 - **段階0**：**esp-idf を submodule 追加**し外部ハードコードパスを置換（規約の具体は §3a）。
-  既存の `IDF_V554=/home/honda/tools/esp-idf`・`${IDF}=…/esp-idf-v6.1`・`esp_bt_idf61.cmake:50/52`
+  既存の `IDF_V554=$HOME/tools/esp-idf`・`${IDF}=…/esp-idf-v6.1`・`esp_bt_idf61.cmake:50/52`
   等（＝ToDo-2）を submodule 参照へ。
 - **段階1**：**lwip を esp-idf から**。`$ESPIDF/components/lwip/lwip` をソースビルドし
   `liblwip.a` 化（`build_lwip_lib_espidf_esp32s3.sh` を riscv へ翻訳）。`ESP32Cx_LWIP` の
@@ -83,8 +83,8 @@
 5. **パス供給の置換原則（非破壊・消費者単位・リンク駆動）**：
    - ヘッダ：`-I$ESPIDF/components/<c>/include …`
    - blob：`-L$ESPIDF/components/{esp_wifi,esp_phy,esp_coex,bt}/lib/<chip>`
-     （旧 `IDF_V554=/home/honda/tools/esp-idf`・`${IDF}=…/esp-idf-v6.1` 機外パスを置換）
-   - 触れた箇所の `/home/honda` 絶対リテラル（incflags・スクリプト・`.ld`・`target_timer.h` 等）を
+     （旧 `IDF_V554=$HOME/tools/esp-idf`・`${IDF}=…/esp-idf-v6.1` 機外パスを置換）
+   - 触れた箇所の `$HOME` 絶対リテラル（incflags・スクリプト・`.ld`・`target_timer.h` 等）を
      `$REPO`/`$ESPIDF` 相対トークンへ。
    - 既存の hal/外部IDF 既定は**当面フォールバックで温存**し、ESP-IDF 等価供給を確認できた
      消費者から旧参照を除去。

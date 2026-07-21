@@ -1,7 +1,7 @@
 # C3 evidence-09 — マトリクス **セル3（esp-idf 真v5.5.4 × iPhone）準備完了**
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C3 `60:55:F9:57:BA:BC`**（hub `1-6` port1）／**残置＝真cold・広告中・全マーカ0クリア済み**
+DUT: **ESP32-C3 `<MAC-19>`**（hub `1-6` port1）／**残置＝真cold・広告中・全マーカ0クリア済み**
 
 ---
 

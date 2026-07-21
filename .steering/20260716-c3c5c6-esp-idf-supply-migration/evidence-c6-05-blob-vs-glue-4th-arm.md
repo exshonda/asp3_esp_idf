@@ -1,7 +1,7 @@
 # C6 evidence-05 — **4アーム目：blob か グルーか の帰属を決める**
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration` ／ 前段 commit: `097b4bd`
-DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`**（hub `1-6` port2）
+DUT: **ESP32-C6 `<MAC-03>`**（hub `1-6` port2）
 前段: `evidence-c6-04` ＝ **真cold(POR) の phy_init ハングを根治**（ROM は CPU を XTAL@40MHz で渡す）
 
 ---
@@ -172,7 +172,7 @@ DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`**（hub `1-6` port2）
    warm・真cold とも D-1**。**ただし v554 の実機実績は D-1 まで**（v6.1 は D-2b/D-2c まで）
    ＝**既定を替えるなら D-2b の確認を先に**（§6.3）。
 
-### 5.1 ★測定マトリクス（**全て本個体 `14:C1:9F:E0:5A:9C`・本セッション・同一アプリ `bt_smoke_c6`＋同一 D-1 マーカ**）
+### 5.1 ★測定マトリクス（**全て本個体 `<MAC-03>`・本セッション・同一アプリ `bt_smoke_c6`＋同一 D-1 マーカ**）
 
 真cold の証明＝毎回2重（by-id 読み戻し 0 ＋ センチネル `0xCAFE5A9C`→`0x00000000`）。
 warm は `rst:` を毎回採取＝**全て `rst:0x15 (USB_UART_HPSYS)`**。
@@ -202,7 +202,7 @@ warm は `rst:` を毎回採取＝**全て `rst:0x15 (USB_UART_HPSYS)`**。
 ### 5.3 ★★「では §10-12 の hal ハングは何だったのか」＝**未解決（★交絡の同定を訂正）**
 
 > ## ★★【2026-07-17 訂正＝本節の «個体/rev 交絡» は幻だった】
-> **`14:C1:9F:E0:5A:9C` こそが board C 本体**（`docs/wifi-shim-c6.md` に8回）。
+> **`<MAC-03>` こそが board C 本体**（`docs/wifi-shim-c6.md` に8回）。
 > **rev v0.3 の一次情報は存在しない**（同 doc に0件。出所＝`evidence-c6-02:195` の
 > «efuse blk_version» と «chip revision» の取り違え＝stock `efuse_hal.h` は別API）。
 > ⇒ **本節の「個体が違う」「board C は非接続」「rev v0.2 vs v0.3」は全て誤り。**
@@ -264,7 +264,7 @@ warm については自分で反証した**（hal は修正 OFF でも warm で 
 
 ⇒ **根拠1と3は崩れた。∴「BT だけ外部 v6.1 tree が必須」は撤回**。
 **`ASP3_BT_IDF_V554=ON`（submodule 供給）で C6 BT は D-1 に到達する**
-＝**外部 v6.1 tree（`/home/honda/tools/esp-idf-v6.1`＝submodule でない＝provenance の罠）への
+＝**外部 v6.1 tree（`$HOME/tools/esp-idf-v6.1`＝submodule でない＝provenance の罠）への
 依存を外せる**。**根拠2（基盤の混成）は別問題として残る**（§5.6）。
 
 ### 5.6 ★供給移行の進捗と hal 参照（依頼 (f)）

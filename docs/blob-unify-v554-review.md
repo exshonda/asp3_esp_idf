@@ -66,7 +66,7 @@ v5.5.4」は**C6について誤り**（コーディネータが`esp_bt.cmake`で
   （`e1e965c`）は`ASP3_BT_IDF_V554`の既定2箇所しか変えておらず`ESP32C6_BT_IDF61`の
   既定に触れていない。実機ヘルパ`tmp/c6ble.sh`が常に`-DESP32C6_BT_IDF61=ON`を手動
   付加する運用がこれを裏付ける。
-- なお`esp_bt_idf61.cmake:52`はv5.5.4経路でも`set(IDF /home/honda/tools/esp-idf-v6.1)`
+- なお`esp_bt_idf61.cmake:52`はv5.5.4経路でも`set(IDF $HOME/tools/esp-idf-v6.1)`
   のローカルパス直書きに依存（`wifi-blob-generation-todo.md`のToDo-2と同根）。
 
 **B2（可逆性）**：WiFi（3チップ共通）・C3-BT・C5-BTは単一if/elseで可逆（override

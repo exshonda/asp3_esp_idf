@@ -1,7 +1,7 @@
 # C6 evidence-14 — **マトリクス セル2（Android）の準備**
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`＝board C**（hub `1-6` port2）
+DUT: **ESP32-C6 `<MAC-03>`＝board C**（hub `1-6` port2）
 前段: `evidence-c6-13`（セル1＝iPhone 準備）→ **セル1 完了・仮説と一致**
 （ユーザー：「1回目の disconnect で timeout が出る以外は OK」／デバイス側は
 `ENC=0x5de00000`・`CONNECT=0x604e0002`・`DISC=0xd15c1302`(reason `0x13`＝**正常切断**)
@@ -69,7 +69,7 @@ STORE9 DISCONNECT = 0x00000000
 **`bluetoothctl` 受動スキャン（12秒）**：
 
 ```
-[CHG] Device 14:C1:9F:E0:5A:9C RSSI: -69 / -70 / -71   ← ★MAC が本DUT と一致・反復＝生きた広告
+[CHG] Device <MAC-03> RSSI: -69 / -70 / -71   ← ★MAC が本DUT と一致・反復＝生きた広告
 Discovering: no                                          ← ★スキャンは明示停止した
 ```
 ★**1回目の `--timeout` では `Discovering: yes` のまま残っていたので、`scan off` を明示発行して

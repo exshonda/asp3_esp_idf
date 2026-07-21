@@ -1,7 +1,7 @@
 # C6 evidence-15 — esp_timer ヘッダ shadow の根治（3チップ共有）と C6 への toolchain 転写
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`（= board C 本体）／hub `1-6` port 2**
+DUT: **ESP32-C6 `<MAC-03>`（= board C 本体）／hub `1-6` port 2**
 正本: `evidence-c5-08-toolchain-idf-alignment.md`（C5 で確立した型を C6 へ転写）
 commit: Phase1 `24715e5` ／ Phase2 `c981bf5`
 
@@ -520,13 +520,13 @@ C6 では `RTC_XTAL_FREQ_REG` そのもの**＝`esp-idf/components/esp_rom/esp32
 
 | USB パス | 個体 | 備考 |
 |---|---|---|
-| `1-6.1` | C3 `60:55:F9:57:BA:BC` | 本ラウンド対象外 |
-| **`1-6.2.3`** | **C6 `14:C1:9F:E0:5A:9C`（DUT＝board C）** | `-p 2` で落ちる |
+| `1-6.1` | C3 `<MAC-19>` | 本ラウンド対象外 |
+| **`1-6.2.3`** | **C6 `<MAC-03>`（DUT＝board C）** | `-p 2` で落ちる |
 | **`1-6.2.4`** | **CP2102N `125a266b…`＝C6 の UART0** | `-p 2` で落ちる＝**第2の witness** |
-| `1-6.3` / `1-6.4` | C5 の UART / C5 `D0:CF:13:F0:A7:44` | 対象外 |
-| **`1-5.2` / `1-5.3` / `1-5.4`** | **別プロジェクト（ESP32-S3 `F4:12:FA:5B:4A:58` 等）** | ★**hub 1-5 は一切触っていない** |
+| `1-6.3` / `1-6.4` | C5 の UART / C5 `<MAC-37>` | 対象外 |
+| **`1-5.2` / `1-5.3` / `1-5.4`** | **別プロジェクト（ESP32-S3 `<MAC-41>` 等）** | ★**hub 1-5 は一切触っていない** |
 
-★**実際に危なかった**：`F4:12:FA:5B:4A:58`（別プロジェクトの S3）は本セッション中
+★**実際に危なかった**：`<MAC-41>`（別プロジェクトの S3）は本セッション中
 **`/dev/ttyACM0`** に居た。**全書込みを by-id ＋ `--chip esp32c6` で行った**
 （監査：`Hash of data verified` ×5・`wrong chip` エラー **0**）。
 

@@ -1,7 +1,7 @@
 # C6 evidence-11 — **WiFi の «一時診断» 計装を既定から除去する**
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`＝board C**（hub `1-6` port2）
+DUT: **ESP32-C6 `<MAC-03>`＝board C**（hub `1-6` port2）
 契機: リポジトリ全体レビューの指摘 ／ ユーザー判断＝**削除**
 
 ★**認証情報はビルド注入のみ。本ファイルにも commit message にも memory にも書かない。**

@@ -74,7 +74,7 @@ set(BT_TARGETDIR ${ESP_CHIP_DIR}/bt)
 option(ASP3_BT_IDF_V554 "Use the esp-idf submodule (true v5.5.4 tag) BT controller/phy/coexist tree instead of external v6.1. Default ON = supply unified with WiFi (ESP_SUP_DIR). OFF = external v6.1 fallback (reversible)" ON)
 
 #
-#  ★2026-07-17：OFF 側の退避先だった `set(IDF /home/honda/tools/esp-idf-v6.1)`
+#  ★2026-07-17：OFF 側の退避先だった `set(IDF $HOME/tools/esp-idf-v6.1)`
 #  は **個人の絶対パス直書き**で，(a) CACHE でないので `-D` で上書きできず，
 #  (b) EXISTS チェックが無いため，そのツリーが無いPCでは「v6.1 が無い」とは
 #  言わずに **存在しないパスを -I/-L し続けて意味不明な未解決参照で死ぬ**。
@@ -82,7 +82,7 @@ option(ASP3_BT_IDF_V554 "Use the esp-idf submodule (true v5.5.4 tag) BT controll
 #  ＝**新規規約の発明ではない**。C3 も同型（`ASP3_BT_IDF_V554_DIR`＝ON 側の
 #  ツリーを CACHE＋EXISTS で検証）。
 #
-set(ESP_IDF61_DIR /home/honda/tools/esp-idf-v6.1 CACHE PATH
+set(ESP_IDF61_DIR $HOME/tools/esp-idf-v6.1 CACHE PATH
     "Path to an ESP-IDF v6.1 tree (NOT a submodule; supplies the C5 BT/BLE matched set when ASP3_BT_IDF_V554=OFF). Override with -DESP_IDF61_DIR=<path>")
 
 if(ASP3_BT_IDF_V554)

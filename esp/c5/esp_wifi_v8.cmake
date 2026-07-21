@@ -322,7 +322,7 @@ option(ASP3_WIFI_OSI_HAS_DISABLE_AC_AX "wifi_osi_funcs_t has _wifi_disable_ac_ax
 if(NOT DEFINED IDF_V554)
     #  ★esp-idf submodule（v5.5.4タグ＝735507283d）をリポジトリ同梱で参照する
     #  （HAL依存撤去ミッション＝.steering/20260716-c3c5c6-esp-idf-supply-migration）。
-    #  従来は外部絶対パス /home/honda/tools/esp-idf を -L していたが，これは
+    #  従来は外部絶対パス $HOME/tools/esp-idf を -L していたが，これは
     #  (1) このマシン固有＝再現性が無く，(2) 実測すると v5.5.4-1169-gbb2188bf
     #  （release/v5.5 の先端）で **v5.5.4タグではなかった**（version.hが5.5.4と
     #  表示するため気づきにくい）。C5 WiFi blobは両者で全て相違する

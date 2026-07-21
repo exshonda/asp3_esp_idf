@@ -11,8 +11,8 @@
 set -u
 ELF="${1:?usage: c3_pool_watch.sh <asp.elf> [label]}"
 LABEL="${2:-}"
-OOCD_DIR=/home/honda/.espressif/tools/openocd-esp32/v0.12.0-esp32-20250422/openocd-esp32
-SERIAL="60:55:F9:57:BA:BC"
+OOCD_DIR=$HOME/.espressif/tools/openocd-esp32/v0.12.0-esp32-20250422/openocd-esp32
+SERIAL="<MAC-19>"
 
 sym() { riscv32-esp-elf-nm "$ELF" | awk -v n="$1" '$3==n{print "0x"$1}' | head -1; }
 MP1=$(sym os_msys_init_1_mempool)

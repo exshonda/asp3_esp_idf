@@ -64,7 +64,7 @@ advisor レビューに基づき **idf.py ビルドは行っていない**（環
    - 両者の fallback ロジックは **diff で確認した通り実質同一**
      （行番号が数行ずれるだけで `#ifdef`/`#ifndef`/既定値は同一。§3 冒頭）
      ＝ C5 の fallback を hal 版のコメントで代用して差し支えない。
-2. **姉妹プロジェクト S3**（`/home/honda/TOPPERS/esp32_s3`，v5.5.4，
+2. **姉妹プロジェクト S3**（`$HOME/TOPPERS/esp32_s3`，v5.5.4，
    WiFi+BT 実機動作確認済み）の `wifi/bt/stub/include/bt_nimble_config.h`
    ＝ PVCY バグの発見の元になった「働く比較対象」そのもの。
    C3 の同ファイルは元々この S3 版からの移植（ヘッダのコメント参照）。

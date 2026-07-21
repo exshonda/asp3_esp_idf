@@ -1,10 +1,10 @@
 非対話（一回きり）の相談です。コードの編集や実装は不要——**分析と次の一手の提案だけ**をお願いします。
 回答は日本語で。根拠となるESP-IDF/blob/ROM/HALの該当箇所があれば `file:line` や関数名で示してください。
 
-このリポジトリは `/home/honda/TOPPERS/ASP3CORE/asp3_esp_idf`（branch `claude/c6-wifi-c5-dev-5vc6x9`）。
+このリポジトリは `$HOME/TOPPERS/ASP3CORE/asp3_esp_idf`（branch `claude/c6-wifi-c5-dev-5vc6x9`）。
 前回の相談（round1、実施13時点）＝`tmp/codex_c5_round1_prompt.md`/`_output.txt`。
 その後の全経緯は `docs/c5-bringup.md` の実施14〜26（各セクション見出しだけでも流れが分かるように書いてあります）。
-ESP-IDF v6.1-beta1 は `/home/honda/tools/esp-idf-v6.1`、HALは `hal/`（esp-hal-3rdparty submodule）。
+ESP-IDF v6.1-beta1 は `$HOME/tools/esp-idf-v6.1`、HALは `hal/`（esp-hal-3rdparty submodule）。
 
 # 前提（round1からの差分＝実施14〜26で確定した事実）
 

@@ -20,13 +20,13 @@
 #                                                     （cat/sttyはDTR/RTS assertで0バイトになる既知の罠）
 #    c5wifi.sh port                                  by-id ポート表示
 #
-BOARD_MAC="${BOARD_MAC:-D0:CF:13:F0:A7:44}"		# C5#1
+BOARD_MAC="${BOARD_MAC:?BOARD_MAC を指定してください（対象ボードの MAC）。公開時にスクラブしたため既定値は持ちません}"		# C5#1
 PORT="/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_${BOARD_MAC}-if00"
 UART_PORT="${UART_PORT:-/dev/ttyUSB3}"			# CP2102N console (uart0)
 
-REPO="/home/honda/TOPPERS/asp3_esp_idf"
-GCC_BIN="/home/honda/opt/tools/xpack-riscv-none-elf-gcc-15.2.0-1/bin"
-ESPTOOL="/home/honda/tools/espressif/python_env/idf6.1_py3.12_env/bin/esptool"
+REPO="$HOME/TOPPERS/asp3_esp_idf"
+GCC_BIN="$HOME/opt/tools/xpack-riscv-none-elf-gcc-15.2.0-1/bin"
+ESPTOOL="$HOME/tools/espressif/python_env/idf6.1_py3.12_env/bin/esptool"
 BUILD="${C5WIFI_BUILD:-$REPO/build/c5wifi}"
 export PATH="$GCC_BIN:$PATH"
 

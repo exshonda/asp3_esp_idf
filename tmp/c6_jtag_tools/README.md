@@ -2,7 +2,7 @@
 
 使い方（共通）：
 ```bash
-OCD=/home/honda/tools/espressif/tools/openocd-esp32/v0.12.0-esp32-20260424/openocd-esp32
+OCD=$HOME/tools/espressif/tools/openocd-esp32/v0.12.0-esp32-20260424/openocd-esp32
 export OPENOCD_SCRIPTS=$OCD/share/openocd/scripts
 $OCD/bin/openocd -f board/esp32c6-builtin.cfg -f <script>.tcl
 ```

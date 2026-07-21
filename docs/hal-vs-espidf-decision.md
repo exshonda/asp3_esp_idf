@@ -61,7 +61,7 @@
 - mbedtls（hal 供給）は `git submodule update` で揃い**追加 setup ゼロ**。3.x へ
   下げるだけなら別ツリーが要り手間が増える（＝4.0 維持が setup 上は有利）。
 - 本当の手間は **BT の `${IDF}` ハードコードパス**（`esp_bt_idf61.cmake:50/52`＝
-  `/home/honda/tools/esp-idf*`）。新開発機は同じパスに clone が要る（ToDo-2）。
+  `$HOME/tools/esp-idf*`）。新開発機は同じパスに clone が要る（ToDo-2）。
 - **esp-idf を submodule 化するとこのハードコードパスが消え、dual-tree（hal＋外部
   IDF）が single-tree になり自己完結**＝トータルの手間はむしろ減る。
 

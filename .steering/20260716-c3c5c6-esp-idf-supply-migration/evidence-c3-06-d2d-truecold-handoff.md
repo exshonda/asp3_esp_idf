@@ -1,7 +1,7 @@
 # C3 evidence-06 — **真cold D-2c/D-2d の «デバイス側準備完了»**（スマホ central へ引き渡し）
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C3 `60:55:F9:57:BA:BC`**（hub `1-6` **port1**）
+DUT: **ESP32-C3 `<MAC-19>`**（hub `1-6` **port1**）
 **ボードは «真cold 起動済み・広告中» のまま残置**（RSSI −42〜−51 で実測）
 
 > ★**C3 にとって初物**：`docs/bt-shim.md` の D-2c/D-2d フル達成は**すべて warm**。
@@ -15,8 +15,8 @@ DUT: **ESP32-C3 `60:55:F9:57:BA:BC`**（hub `1-6` **port1**）
 
 - バイナリから：`strings asp.elf | grep '^ASP3-.*BLE$'` → `ASP3-C3-BLE`
 - **電波から**（真cold 起動後・hci0 パッシブスキャン）：
-  `60:55:F9:57:BA:BC ASP3-C3-BLE` / `RSSI -42 〜 -51`
-- **BD address ＝ `60:55:F9:57:BA:BC`＝DUT の BASE MAC と一致**（他個体との取り違えは無い）
+  `<MAC-19> ASP3-C3-BLE` / `RSSI -42 〜 -51`
+- **BD address ＝ `<MAC-19>`＝DUT の BASE MAC と一致**（他個体との取り違えは無い）
 
 ## 2. (b) tripwire（**焼く前に確認**）
 
@@ -78,7 +78,7 @@ ESP32C3_BT_EVT_TRACE=OFF  ESP32C3_BT_ACL_TRACE=OFF  ESP32C3_BT_PHY_CAL_TRACE=OFF
 
 ## 4. (d) ★ユーザー向け スマホ手順
 
-**対象：`ASP3-C3-BLE`（`60:55:F9:57:BA:BC`）／アプリ：nRF Connect 等の GATT クライアント推奨**
+**対象：`ASP3-C3-BLE`（`<MAC-19>`）／アプリ：nRF Connect 等の GATT クライアント推奨**
 
 ### 4.0 ★★最初に必ず：GATT キャッシュの掃除
 

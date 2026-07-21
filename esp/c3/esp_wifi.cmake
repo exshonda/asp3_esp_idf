@@ -263,7 +263,7 @@ list(APPEND ASP3_INCLUDE_DIRS
 #
 #  ★provenance（本ラウンドの実測．evidence-c3-01 §1）：`IDF_V554` は
 #  **target.cmake で submodule 相対に定義**するようになった。従来ここに
-#  あった `set(IDF_V554 /home/honda/tools/esp-idf)` は
+#  あった `set(IDF_V554 $HOME/tools/esp-idf)` は
 #  **v5.5.4タグではなかった**（本PC実測＝v5.5.0．元PCでは v5.5.4-1169）＝
 #  **変数名が版を偽っていた**。撤去済み。
 #

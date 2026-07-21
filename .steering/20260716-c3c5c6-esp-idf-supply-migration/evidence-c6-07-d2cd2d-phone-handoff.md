@@ -1,7 +1,7 @@
 # C6 evidence-07 — **D-2c/D-2d のデバイス側準備（スマホ central へ引き渡し）**
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`＝board C**（hub `1-6` port2）
+DUT: **ESP32-C6 `<MAC-03>`＝board C**（hub `1-6` port2）
 前段: `evidence-c6-06`（W1 真cold 達成／BT 既定を v5.5.4 submodule へ flip）
 
 ★**本ラウンドは «デバイス側の準備» まで**。スマホ操作はユーザーが行う。

@@ -1,6 +1,6 @@
 import json, subprocess, sys, os
 TMP=os.path.dirname(__file__)
-OCD="/home/honda/tools/espressif/tools/openocd-esp32/v0.12.0-esp32-20260424/openocd-esp32"
+OCD="$HOME/tools/espressif/tools/openocd-esp32/v0.12.0-esp32-20260424/openocd-esp32"
 os.environ["OPENOCD_SCRIPTS"]=OCD+"/share/openocd/scripts"
 CNT="0x4081bd2c"
 pairs=json.load(open(TMP+"/diffs.json"))
@@ -8,7 +8,7 @@ pairs=json.load(open(TMP+"/diffs.json"))
 def run_ocd(cmds):
     args=[OCD+"/bin/openocd","-f","board/esp32c6-builtin.cfg"]
     for c in cmds: args+=["-c",c]
-    r=subprocess.run(args,capture_output=True,text=True,timeout=60,cwd="/home/honda/TOPPERS/asp3_esp_idf")
+    r=subprocess.run(args,capture_output=True,text=True,timeout=60,cwd="$HOME/TOPPERS/asp3_esp_idf")
     return r.stdout+r.stderr
 
 def rd(addr):

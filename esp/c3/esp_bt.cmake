@@ -59,7 +59,7 @@ set(BT_TARGETDIR ${ESP_CHIP_DIR}/bt)
 #  「決定的事実（md5実測）」は **真のv5.5.4タグに対しては成立しない**。
 #  ------------------------------------------------------------------
 #
-#  従来ここは `set(BT_IDF /home/honda/tools/esp-idf)` と外部絶対パスを
+#  従来ここは `set(BT_IDF $HOME/tools/esp-idf)` と外部絶対パスを
 #  直書きし，それを「v5.5.4」と呼んでいた。**その名前は嘘だった**：
 #
 #    tree                       libbtdm_app.a   bt.c OSI_VERSION / _malloc_retention

@@ -1,7 +1,7 @@
 # C3 evidence-10 — heap_caps_malloc 根治・esp-idf 供給統一・toolchain を IDF 標準へ整合
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C3 `60:55:F9:57:BA:BC`（hub `1-6` port 1）**
+DUT: **ESP32-C3 `<MAC-19>`（hub `1-6` port 1）**
 正本: `evidence-c5-08-toolchain-idf-alignment.md`（C5 で確立した型）／
 `evidence-c6-15-toolchain-idf-alignment.md`（C6 への転写実績）を C3 へ再転写。
 commit: Phase1+2 `c2939f6`
@@ -246,7 +246,7 @@ evidence-c3-01 が確立した指標）。
 ```
 
 **外部 `~/tools/esp-idf` 参照＝0**（deps・commands とも。較正＝同じ corpus で
-`/home/honda/TOPPERS` は 9935 件当たる＝grep は生きている）。
+`$HOME/TOPPERS` は 9935 件当たる＝grep は生きている）。
 
 ### 2.2 ★既定の変更（ユーザー決定）と、その帰結の記録
 
@@ -479,7 +479,7 @@ C5/C6 では BLE の A/B が**退化**（バイト同一・差は `__TIME__` の
 
 ### 4.1 結論（先に）
 
-**同一 DUT・同一 central（`hci0` `8C:1D:96:BA:6D:BD`）・同一セッション・毎回 forget・全て真cold**：
+**同一 DUT・同一 central（`hci0` `<MAC-33>`）・同一セッション・毎回 forget・全て真cold**：
 
 | アーム | 供給 | コンパイラ | **bond** |
 |---|---|---|---|

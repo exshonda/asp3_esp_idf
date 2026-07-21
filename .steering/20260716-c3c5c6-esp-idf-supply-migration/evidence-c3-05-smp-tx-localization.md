@@ -1,7 +1,7 @@
 # C3 evidence-05 — **A の最後の SMP PDU を特定**／TX で「沈黙」と「誤答」を分離 ⇒ **機構は «暗号開始»（LL/コントローラ層）へ移動**
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C3 `60:55:F9:57:BA:BC`**（hub `1-6` port1）／central＝ホスト `hci0`
+DUT: **ESP32-C3 `<MAC-19>`**（hub `1-6` port1）／central＝ホスト `hci0`
 前段: `evidence-c3-04` ＝ 機構は «SMP 交換の内部» までしか絞れていなかった
 
 ---

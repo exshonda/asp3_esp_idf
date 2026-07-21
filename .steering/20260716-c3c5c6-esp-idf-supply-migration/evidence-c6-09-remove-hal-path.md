@@ -1,7 +1,7 @@
 # C6 evidence-09 — **hal 経路と `ESP32C6_BT_IDF61` を撤去（C5 と同型化）**
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`＝board C**（hub `1-6` port2）
+DUT: **ESP32-C6 `<MAC-03>`＝board C**（hub `1-6` port2）
 前段: `evidence-c6-08`（BT の hal 参照 0 達成。hal 経路は «退避路» として残置）
 ユーザー判断: **「削除」**（退避路を捨てることを承知のうえでの決定）
 

@@ -353,7 +353,7 @@ endif()
 #  APM交絡による誤判定と確定）。
 #
 #  かつての opt-in fallback だった v9（IDF v6.1 blob ＝ esp_wifi.cmake ＋ wifi/）
-#  は，`/home/honda/tools/esp-idf-v6.1` へのローカルパスハードコード依存で
+#  は，`$HOME/tools/esp-idf-v6.1` へのローカルパスハードコード依存で
 #  ポータビリティを損ねるため **削除**した（実施52）。v9 の履歴は git 及び
 #  docs/c5-bringup.md（実施08〜49）に残る。BT単体ビルドも wifi_v8/ を使う。
 #

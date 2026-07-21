@@ -234,7 +234,7 @@ C6 は STORE6/STORE7 に **分離**しているので両方観測できる。
 
 **問い**：**C5×Android で device が実際に受け取る peer アドレスは本当に RPA か？**
 
-- **根拠**：`memory/c5-ble-bond-persistence.md` は「**H1(RPA/IRK) は実測で死亡＝peer は public `8C:1D:96:BA:6D:BD`**」と
+- **根拠**：`memory/c5-ble-bond-persistence.md` は「**H1(RPA/IRK) は実測で死亡＝peer は public `<MAC-33>`**」と
   するが、**それは BlueZ 相手の測定**。**Android 相手では未測定**。
   親の指示どおり「死んだ仮説が «別の条件で» 死んだのか」を確かめる必要がある。
 - **測るもの**：既存の `TOPPERS_C5_LTK_DIAG`（既定OFF）が
@@ -404,13 +404,13 @@ C6 は STORE6/STORE7 に **分離**しているので両方観測できる。
 
 ## 10. 参照（すべて絶対パス）
 
-- app: `/home/honda/TOPPERS/ASP3CORE/asp3_esp_idf/apps/ble_host_smoke_c5/ble_host_smoke_c5.c`
-- app: `/home/honda/TOPPERS/ASP3CORE/asp3_esp_idf/apps/ble_host_smoke_c6/ble_host_smoke_c6.c`
-- app(C3・flush の «正»): `/home/honda/TOPPERS/ASP3CORE/asp3_esp_idf/apps/ble_host_smoke/ble_host_smoke.c:944-957`
-- shim: `/home/honda/TOPPERS/ASP3CORE/asp3_esp_idf/asp3/target/esp32c5_espidf/wifi_v8/esp_shim.c:145-165`
-- shim: `/home/honda/TOPPERS/ASP3CORE/asp3_esp_idf/asp3/target/esp32c6_espidf/wifi/esp_shim.c:112-130`
-- cmake: `/home/honda/TOPPERS/ASP3CORE/asp3_esp_idf/asp3/target/esp32c5_espidf/esp_bt.cmake:509-531`（`TRUE=1`／記述の腐り）
-- cmake: `/home/honda/TOPPERS/ASP3CORE/asp3_esp_idf/asp3/target/esp32c6_espidf/esp_bt.cmake:594-599`
-- header: `/home/honda/TOPPERS/asp3_esp_idf/esp-idf/components/bt/include/esp32c5/include/esp_bt.h:239,306`
-- header: `/home/honda/TOPPERS/asp3_esp_idf/esp-idf/components/bt/include/esp32c6/include/esp_bt.h:210,288,309`
+- app: `$HOME/TOPPERS/ASP3CORE/asp3_esp_idf/apps/ble_host_smoke_c5/ble_host_smoke_c5.c`
+- app: `$HOME/TOPPERS/ASP3CORE/asp3_esp_idf/apps/ble_host_smoke_c6/ble_host_smoke_c6.c`
+- app(C3・flush の «正»): `$HOME/TOPPERS/ASP3CORE/asp3_esp_idf/apps/ble_host_smoke/ble_host_smoke.c:944-957`
+- shim: `$HOME/TOPPERS/ASP3CORE/asp3_esp_idf/asp3/target/esp32c5_espidf/wifi_v8/esp_shim.c:145-165`
+- shim: `$HOME/TOPPERS/ASP3CORE/asp3_esp_idf/asp3/target/esp32c6_espidf/wifi/esp_shim.c:112-130`
+- cmake: `$HOME/TOPPERS/ASP3CORE/asp3_esp_idf/asp3/target/esp32c5_espidf/esp_bt.cmake:509-531`（`TRUE=1`／記述の腐り）
+- cmake: `$HOME/TOPPERS/ASP3CORE/asp3_esp_idf/asp3/target/esp32c6_espidf/esp_bt.cmake:594-599`
+- header: `$HOME/TOPPERS/asp3_esp_idf/esp-idf/components/bt/include/esp32c5/include/esp_bt.h:239,306`
+- header: `$HOME/TOPPERS/asp3_esp_idf/esp-idf/components/bt/include/esp32c6/include/esp_bt.h:210,288,309`
 - evidence(他エージェント・読取のみ): `.steering/20260716-c3c5c6-esp-idf-supply-migration/evidence-c5-08-toolchain-idf-alignment.md:508-567`

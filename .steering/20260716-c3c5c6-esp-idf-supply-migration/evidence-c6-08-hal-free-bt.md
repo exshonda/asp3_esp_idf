@@ -1,7 +1,7 @@
 # C6 evidence-08 — **BT の hal 参照 0 を達成（122箇所の移行）**
 
 日付: 2026-07-17 ／ branch: `claude/c5-espidf-supply-migration`
-DUT: **ESP32-C6 `14:C1:9F:E0:5A:9C`＝board C**（hub `1-6` port2）
+DUT: **ESP32-C6 `<MAC-03>`＝board C**（hub `1-6` port2）
 前段: `evidence-c6-07`（D-2c/D-2d 達成・BT 既定は v5.5.4 submodule だが**基盤は hal**）
 ユーザー判断: **「改名より先に 122箇所の移行をやる」**（移行が終われば hal 経路が消え→
 `ESP32C6_BT_IDF61` トグルごと不要→C5 と同型＝**改名の議論自体が消滅する**）
