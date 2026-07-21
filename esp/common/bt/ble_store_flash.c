@@ -107,6 +107,46 @@ extern int esp_rom_spiflash_read(uint32_t src_addr, uint32_t *dest, int32_t len)
 extern int esp_rom_spiflash_write(uint32_t dest_addr, const uint32_t *src, int32_t len);
 extern int esp_rom_spiflash_erase_sector(uint32_t sector_num);
 extern int esp_rom_spiflash_unlock(void);
+extern int esp_rom_spiflash_config_param(uint32_t deviceId, uint32_t chip_size,
+										 uint32_t block_size, uint32_t sector_size,
+										 uint32_t page_size, uint32_t status_mask);
+
+/*
+ *  ★ROM の SPI flash API は «チップパラメータが設定済み» を前提とする。
+ *  ESP-IDF では 2段ブートローダが `esp_rom_spiflash_config_param()` を呼んで
+ *  容量等を教えるが、**本リポジトリは Direct Boot でそれを通らない**ため
+ *  未設定のままで、`esp_rom_spiflash_read()` が容量の境界チェックに落ちて
+ *  **rc=1（ESP_ROM_SPIFLASH_RESULT_ERR）を返す**（実機で実測）。
+ *  ∴ 使用前に一度だけ設定する。引数は ESP-IDF 本家の bootloader と同じ形
+ *  （`bootloader_flash_config_esp32c61.c:131` 等）：
+ *      config_param(device_id, size*0x100000, 0x10000(block), 0x1000(sector),
+ *                   0x100(page), 0xffff(status_mask))
+ *  device_id は本 API では境界チェックに使われないため 0 でよい。
+ */
+#ifndef ASP3_BLE_STORE_FLASH_SIZE
+#define ASP3_BLE_STORE_FLASH_SIZE		(4U * 1024U * 1024U)	/* 実測：C3 は 4MB */
+#endif /* ASP3_BLE_STORE_FLASH_SIZE */
+
+static bool_t	store_flash_cfg_done;
+
+static int
+store_flash_config(void)
+{
+	int		rc;
+
+	if (store_flash_cfg_done) {
+		return(0);
+	}
+	rc = esp_rom_spiflash_config_param(0U, ASP3_BLE_STORE_FLASH_SIZE,
+									   0x10000U, ASP3_BLE_STORE_SECTOR_SIZE,
+									   0x100U, 0xFFFFU);
+	if (rc != 0) {
+		syslog(LOG_ERROR, "ble_store_flash: config_param failed (%d)", rc);
+		return(rc);
+	}
+	store_flash_cfg_done = true;
+	return(0);
+}
 
 /*
  *  単純な加算 CRC（改竄検知ではなく「消去済み/中途半端な書込み」の検出が目的）。
@@ -128,14 +168,38 @@ store_crc(const struct asp3_ble_store_image *img)
 static void
 store_load(void)
 {
+	int		rc;
+
 	if (store_loaded) {
 		return;
 	}
 	store_loaded = true;
 
-	(void) esp_rom_spiflash_read(ASP3_BLE_STORE_FLASH_OFFSET,
-								 (uint32_t *) &store_image,
-								 (int32_t) sizeof(store_image));
+	if (store_flash_config() != 0) {
+		syslog(LOG_ERROR,
+			   "ble_store_flash: flash config failed -> bonds will NOT persist");
+		memset(&store_image, 0, sizeof(store_image));
+		store_image.magic = ASP3_BLE_STORE_MAGIC;
+		store_image.version = 1U;
+		return;
+	}
+
+	/*
+	 *  ★戻り値を捨てないこと。実機で「read が失敗し .bss(=0) のままなのに
+	 *  『空のストア』として黙って通る」事象を実際に踏んだ（失敗の握り潰し）。
+	 *  read 失敗と「未初期化(全0xff)」は区別してログに出す。
+	 */
+	rc = esp_rom_spiflash_read(ASP3_BLE_STORE_FLASH_OFFSET,
+							   (uint32_t *) &store_image,
+							   (int32_t) sizeof(store_image));
+	if (rc != 0) {
+		syslog(LOG_ERROR,
+			   "ble_store_flash: READ FAILED (rc=%d) -> bonds will NOT persist", rc);
+		memset(&store_image, 0, sizeof(store_image));
+		store_image.magic = ASP3_BLE_STORE_MAGIC;
+		store_image.version = 1U;
+		return;
+	}
 
 	if ((store_image.magic != ASP3_BLE_STORE_MAGIC)
 			|| (store_image.crc != store_crc(&store_image))) {
@@ -162,6 +226,9 @@ store_commit(void)
 
 	store_image.crc = store_crc(&store_image);
 
+	if (store_flash_config() != 0) {
+		return(BLE_HS_ESTORE_FAIL);
+	}
 	(void) esp_rom_spiflash_unlock();
 	rc = esp_rom_spiflash_erase_sector(ASP3_BLE_STORE_FLASH_OFFSET
 										/ ASP3_BLE_STORE_SECTOR_SIZE);

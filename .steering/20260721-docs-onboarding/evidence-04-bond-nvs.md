@@ -75,3 +75,72 @@
 3. 予約領域がアプリ/フラッシュ設定と衝突しないこと（4MB 前提の確認）
 
 C5/C6 への展開は C3 で実機確認できてから（同じ `esp/common/` のソースを使う）。
+
+---
+
+## 7. 実機検証（C3・`60:55:F9:57:BA:BC` rev v0.3・flash 4MB）
+
+### 7.1 ★真因を1つ潰した——`esp_rom_spiflash_config_param` が要る
+
+**予測**：予約領域は書込み前に全 `0xff`。→ **的中**（esptool で確認）。
+
+しかし起動ログは `image invalid (magic=0x00000000)` を出した。フラッシュは `0xff` なのに
+コードが読んだ magic が `0x00000000`＝**`esp_rom_spiflash_read` が失敗し、`.bss`(=0) の
+ままだった**。当初コードは戻り値を `(void)` で捨てており、**「読めなかった」が
+「空のストア」として黙って通っていた**（失敗の握り潰し）。
+
+戻り値を見るよう修正 → **`READ FAILED (rc=1)`** を可視化。
+`rc=1` は `ESP_ROM_SPIFLASH_RESULT_ERR`。
+
+**真因＝ROM の SPI flash API は「チップパラメータが設定済み」を前提とするが、
+Direct Boot はそれを設定する 2段ブートローダを通らない**。
+ESP-IDF 本家は bootloader が `esp_rom_spiflash_config_param()` を呼ぶ
+（`bootloader_flash_config_esp32c61.c:131` 等）。
+
+**予測**：`config_param(0, 4MB, 0x10000, 0x1000, 0x100, 0xffff)` を先に呼べば read が通る。
+→ **的中**（`READ FAILED` が消え、警告も出なくなった＝`0xff` を正しく読めている）。
+
+⇒ **検証項目2「`esp_rom_spiflash_*` が Direct Boot 環境で使えるか」は
+「そのままでは使えない。`config_param` を自前で呼べば使える」と確定**。
+検証項目3「予約領域が収まるか」も flash 4MB 実測で確認済み。
+
+### 7.2 ★私のテスト手法の誤り（記録）
+
+ペアリング中に `tmp/rts_boot_capture.py` を走らせたところ接続が切れた。
+**同スクリプトは RTS で DUT をリセットする**ため、**観測しようとした BLE セッション自体を
+壊していた**（DUT ログに store 初期化が2回＝再起動の証拠）。
+memory `c3-usbjtag-serial-open-resets-dut` にある既知の罠を踏んだ。
+⇒ **ライブ BLE はホスト側（BlueZ）から観測し、コンソールに触れない**。
+
+### 7.3 ★bond 永続化そのものは **未達**——ただし原因は本実装«ではない»
+
+コンソール非接触でペアリングし直しても失敗：
+```
+Failed to pair: org.bluez.Error.ConnectionAttemptFailed
+```
+DUT 側ログ＝**`conn=0 disc=0`**（**接続が一度も成立していない**）、
+予約領域も `0xff` のまま（＝bond が成立していないので書込みも起きない）。
+∴ **SMP 以前に「接続」段階で失敗**している。
+
+**決定的対照**：`ESP32C3_BLE_STORE_FLASH=OFF`（＝**本実装を含まない**従来の RAM store）を
+同じボード・同じ手順で書込んで試行 → **同じ `ConnectionAttemptFailed`**。
+
+⇒ **接続失敗は本実装とは無関係の既存事象**と切り分け完了（相関を因果と早合点しない）。
+本ラウンドでは **bond 永続化の可否を判定できない**（前提となる接続が成立しないため）。
+
+### 7.4 現時点の到達点と残り
+
+| 項目 | 状態 |
+|---|---|
+| 実装（ビルド・リンク・非回帰） | ✅ 完了 |
+| **`esp_rom_spiflash_*` が Direct Boot で使えるか** | ✅ **解決**（`config_param` が必要と判明・修正済み） |
+| 予約領域が収まるか（flash 4MB） | ✅ 確認 |
+| フラッシュ read が成功するか | ✅ 実機で確認 |
+| **フラッシュ write（bond 保存）** | ❌ **未検証**——bond が成立しないため到達せず |
+| **真cold を跨いだ鍵の復元** | ❌ **未検証**——同上 |
+
+**次の一手**＝先に**接続失敗（`ConnectionAttemptFailed`・`conn=0`）を解く**必要がある。
+これは残課題D（`docs/ble-c3-smp-death-plan.md`）と同じ領域の可能性がある
+（同 doc は「切断が届かず広告が止まる `DISC=0`」を扱うが、本件は `conn=0`＝
+そもそも繋がらない）。**接続が回復してから bond 永続化の判定を行う。**
+既定は **OFF のまま**とする。
