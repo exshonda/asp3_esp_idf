@@ -600,6 +600,25 @@ if(ESP32C3_BT_NIMBLE)
         #  uECC_make_key/uECC_valid_public_key/uECC_shared_secret に対応．
         #  ecc_platform_specific.c は /dev/urandom 用で不要＝RNG は
         #  ble_sm_alg_ecc_init→ble_hs_hci_util_rand 経由で供給）．
+        #
+        #  ★bond ストアの不揮発化（残課題C．可逆オプション・既定OFF）
+        #    ON にすると `ble_store_config`（PERSIST=0＝RAM保持．電源断で鍵が
+        #    消える）の代わりに、フラッシュ末尾の予約領域へ直接保存する
+        #    自前バックエンド（esp/common/bt/ble_store_flash.c）を使う。
+        #    NVS を使わない理由＝本リポジトリは Direct Boot でパーティション
+        #    テーブルが存在せず、`nvs_flash` は esp_partition 前提かつ C++＋
+        #    ヒープ多用のため（設計の経緯＝evidence-04-bond-nvs.md）。
+        #    アプリ側は ble_store_config_init() の代わりに
+        #    asp3_ble_store_flash_init() を呼ぶ（TOPPERS_BLE_STORE_FLASH で分岐）。
+        #
+        option(ESP32C3_BLE_STORE_FLASH
+               "Persist BLE bonds to flash instead of RAM-only ble_store_config" OFF)
+        if(ESP32C3_BLE_STORE_FLASH)
+            list(APPEND ASP3_COMPILE_DEFS TOPPERS_BLE_STORE_FLASH)
+            list(APPEND ASP3_SYSSVC_TARGET_C_FILES
+                ${CMAKE_CURRENT_LIST_DIR}/../common/bt/ble_store_flash.c)
+        endif()
+
         list(APPEND ASP3_SYSSVC_TARGET_C_FILES
             ${NIMBLE_ROOT}/host/store/config/src/ble_store_config.c
             ${TINYCRYPT_ROOT}/src/aes_encrypt.c

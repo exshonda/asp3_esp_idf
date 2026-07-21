@@ -60,8 +60,16 @@ extern void esp_shim_sem_flush_pending(void);
  *  D-2d(SM)：bond store 初期化（S3 BT-5 と同じ）．ble_store_ram.c は
  *  IDF文脈（BLE_USED_IN_IDF=1）で空になるため使えず，stock bleprph と同じ
  *  ble_store_config（BLE_STORE_CONFIG_PERSIST=0＝RAM保持）を使う．公開
- *  ヘッダが無いので自前 extern する（stock bleprph も同様）．  */
+ *  ヘッダが無いので自前 extern する（stock bleprph も同様）．
+ *
+ *  ★TOPPERS_BLE_STORE_FLASH（-DESP32C3_BLE_STORE_FLASH=ON）時は，RAM保持の
+ *  代わりにフラッシュ末尾の予約領域へ保存する自前バックエンドを使う
+ *  （esp/common/bt/ble_store_flash.c）＝電源断で鍵が消えない．  */
+#ifdef TOPPERS_BLE_STORE_FLASH
+extern void asp3_ble_store_flash_init(void);
+#else /* TOPPERS_BLE_STORE_FLASH */
 extern void ble_store_config_init(void);
+#endif /* TOPPERS_BLE_STORE_FLASH */
 #endif
 
 /*
@@ -856,7 +864,11 @@ main_task(EXINF exinf)
 	 *  （S3 BT-5 §5：store未初期化だと Pairing Request 直後に
 	 *  ble_sm_chk_store_overflow→ble_store_read が ENOTSUP で即 Pairing
 	 *  Failed になる．これが SM 即時失敗の真因だった）．  */
+#ifdef TOPPERS_BLE_STORE_FLASH
+	asp3_ble_store_flash_init();
+#else /* TOPPERS_BLE_STORE_FLASH */
 	ble_store_config_init();
+#endif /* TOPPERS_BLE_STORE_FLASH */
 
 	/*  Just Works / Secure Connections（S3 BT-5 と同一設定）．IO=NoIO・
 	    bonding=1・MITM=0・SC=1．鍵配布は ENC|ID（bond再利用＋IRK交換）．  */
