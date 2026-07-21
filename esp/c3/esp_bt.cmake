@@ -453,7 +453,25 @@ if(ESP32C3_BT_NIMBLE)
     endif()
     if(ESP32C3_BT_CONN_WD)
         list(APPEND ASP3_COMPILE_DEFS TOPPERS_ESP32C3_BT_CONN_WD)
-    else()
+    endif()
+
+    #
+    #  ★SM を 0 に蓋するのは「SM を使わないビルド」のときだけ。
+    #
+    #  【2026-07-21 修正】この `else()` は **`ESP32C3_BT_CONN_WD` の else に
+    #  繋がっていた**（本来は `ESP32C3_BT_SM` の else であるべき）。
+    #  `CONN_WD` は既定 OFF なので、**`ESP32C3_BT_SM=ON` にしても常に
+    #  `MYNEWT_VAL_BLE_SM_LEGACY/SC=0` が定義され、`NIMBLE_BLE_SM` が 0 に
+    #  落ちて SM 一式がコンパイルアウトされていた**。
+    #  症状＝`ble_gap_security_initiate()` が `#if NIMBLE_BLE_SM` に阻まれ
+    #  **`rc=8`(`BLE_HS_ENOTSUP`)** を返し、Security Request が空中に出ない
+    #  ⇒ central から見ると「接続はできるがペアリング要求が来ない・bond できない」。
+    #  実機実測＝btsnoop で **SMP PDU 0件**、DUT ログで
+    #  `BT5 security_initiate(slave SecReq) rc=8`、`nm` で `ble_sm_slave_initiate`
+    #  等が **未リンク**（証跡＝evidence-05-c3-smp-notsup.md）。
+    #  すぐ上のコメント「SM=ON なら蓋をしない」が実装と食い違っていた。
+    #
+    if(NOT ESP32C3_BT_SM)
         #  D-2c まで：SECURITY off．NIMBLE_BLE_SM=SM_LEGACY||SM_SC を 0 に落とし
         #  （nimble_opt_auto.h），ble_sm*.c を near-empty 化して tinycrypt/mbedTLS
         #  リンクを回避する．
