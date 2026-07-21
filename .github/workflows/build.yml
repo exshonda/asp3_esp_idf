@@ -12,21 +12,26 @@
 #    10構成を並列にすると同じクローンを10回やることになる。
 #    **1回クローンして10構成をループ**する単一ジョブにする。
 #
-#  ■ トリガ：当面 workflow_dispatch のみ。
-#    ★いきなり push/PR で有効化しない（壊れた CI が常時赤いのは「テストが弱い」より悪い）。
-#    手動実行で数回グリーンを確認してから、下の push/pull_request のコメントを外す。
+#  ■ トリガ：push(main) / pull_request / workflow_dispatch。
+#    計画 §6-4「いきなり push トリガで有効化しない」に従い、**手動実行で
+#    グリーンを確認してから**有効化した（2026-07-21）。確認の実績：
+#      1回目 failure … ★seam の潜在バグを検出（CI の目的を達成．evidence §9）
+#      2回目 success … 修正後（ビルドのみ）
+#      3回目 success … だがテストは 6/8 で失敗を握り潰していた（evidence §10.1）
+#      4回目 success … ビルド10構成 ＋ 実テスト # 8/8 passed（握り潰し解消後）
+#      5回目 success … **キャッシュヒット経路**でも同結果（両経路とも検証済み）
 #    リポジトリは public のため Actions は無料無制限（2026-07-21 時点）。
+#    docs/.steering のみの変更は paths-ignore でスキップする（コード非変更のため）。
 #
 name: build
 
 on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**', '.steering/**', 'LICENSE']
+  pull_request:
+    paths-ignore: ['**.md', 'docs/**', '.steering/**', 'LICENSE']
   workflow_dispatch:
-  #  ★グリーンを確認してから有効化する（上記参照）
-  # push:
-  #   branches: [main]
-  #   paths-ignore: ['**.md', 'docs/**', '.steering/**', 'LICENSE']
-  # pull_request:
-  #   paths-ignore: ['**.md', 'docs/**', '.steering/**', 'LICENSE']
 
 concurrency:
   group: build-${{ github.ref }}
