@@ -112,3 +112,55 @@ BLE だけは実質未検証だった。
 入れるので常に通ってしまう）と書いており、これに同意する。
 **再発防止は既に構造側で達成済み**（`asp3_require_esptool()` が configure 時に FATAL）。
 本 CI の価値は「**新規の**腐敗を早期に見つける」ことにある、という整理が正確。
+
+---
+
+## 9. ★初回 CI 実行の結果——**本物の潜在バグを検出**（CI の目的が果たされた）
+
+run `29796831795`（`workflow_dispatch`）。**9構成は成功、`c5_seam` のみ失敗**。
+
+### 9.1 検出された不整合
+
+```
+esptool.py --chip esp32c5 elf2image --flash-mode dio --flash-freq 80m --flash-size 2MB …
+esptool: error: unrecognized arguments: --flash-mode --flash-freq 80m --flash-size 2MB
+```
+
+CI が解決した esptool＝`.espressif/python_env/idf5.5_py3.12_env/bin/esptool.py`。
+
+| 環境 | esptool | 構文 |
+|---|---|---|
+| **IDF v5.5.4 の venv（＝本repoが pin している版）** | **v4.12.0** | `--flash_mode`（アンダースコア）・`image_info` |
+| IDF v6.1 の venv（開発機にたまたま同居） | v5.3.1 | `--flash-mode`（ハイフン）・`image-info` |
+| `run.cmake:42-47`（修正前） | — | **ハイフン形＝v5 専用** |
+
+∴ **pin している v5.5.4 だけの clean 環境では seam がビルドできなかった**。
+開発機で通っていたのは **IDF v6.1 の venv が偶然存在し、`esp_find_esptool.cmake` の
+glob（`python_env/*/bin`）がそちらを拾っていた**ため＝典型的な "works on my machine"。
+
+**これは CI のバグではなくリポジトリのバグ**であり、**CI を作った目的そのものを果たした**
+（計画 §5 は「今回の esptool 腐敗を CI が検出できたかは微妙」と正直に書いていたが、
+**別の esptool 起因の腐敗を実際に検出した**）。
+
+### 9.2 修正と検証
+
+`--flash_mode`／`image_info`（アンダースコア形）へ変更。**v4.12.0 と v5.3.1 の両方が
+アンダースコア形を受け付ける**ことを実測確認した上での選択（ハイフン形は v5 のみ）。
+
+ローカルで **両版を明示指定して A/B**：
+
+| esptool | build | `asp_seam.bin` |
+|---|---|---|
+| v4.12.0（`-DESP32C5_ESPTOOL=…idf5.5…/esptool.py`）＝CI環境の再現 | rc=0 | 516,928 bytes |
+| v5.3.1（`…idf6.1…/esptool`）＝非回帰確認 | rc=0 | 516,928 bytes（**バイト数一致**） |
+
+### 9.3 併せて判明したこと
+
+- **evidence-02 §7 の未確認(a)＝`install-python-env` は CI で成功**した（所要時間込みで
+  ジョブ全体 2m46s）。`idf_tools.py install esptool` と書いていれば初回で落ちていた
+  という §3 の判断も、結果的に正しかった。
+- `gh run watch --exit-status` が **exit 0 を返したのに run の結論は `failure`** だった。
+  **成功指標を鵜呑みにせず `gh run view --json conclusion` で確認すること**
+  （このリポジトリの「ビルドスクリプトの成功判定を信用しない」という教訓と同型）。
+- ジョブログは `gh run view --log` では空になり、`gh api …/actions/jobs/<id>/logs` で
+  取得できた（fine-grained PAT の権限差と思われる）。
