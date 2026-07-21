@@ -114,3 +114,75 @@ bond 永続化を最後まで検証できた。
   （C5/C6 は bond 実績があるので同型ではない可能性が高いが、**未検証**）。
 - `ESP32C3_BLE_STORE_FLASH` は**既定 OFF のまま**（本ラウンドで実機実証できたので
   既定 ON への昇格は判断可能な状態になったが、C5/C6 未展開のため見送り）。
+
+---
+
+## 7. スマホ（Android）での検証——SM 修正は効いたが **bond は ETIMEOUT で不成立**
+
+DUT＝`build/bondfix`（SM 修正＋bond 不揮発、既定 OFF オプションを ON）。
+central＝Galaxy `SM_F966Q`。BlueZ は power off にして干渉を排除。
+
+### 7.1 SM 修正の効果は出た（前後比較）
+
+| | 修正前 | **修正後** |
+|---|---|---|
+| ペアリング要求 | **来ない**（btsnoop で SMP PDU 0件） | **来る**（ユーザー確認） |
+| `security_initiate` | `rc=8`（ENOTSUP） | **`rc=0`（送信成功）** |
+
+⇒ §3 の cmake 修正は**スマホでも効果を確認**できた。
+
+### 7.2 ★残る症状＝`ENC_CHANGE status=13`（`BLE_HS_ETIMEOUT`）
+
+受動採取（リセットしない）で捕らえた DUT ログ：
+
+```
+ble_host_smoke: GAP CONNECT status=0 handle=1
+ble_host_smoke: BT5 security_initiate(slave SecReq) rc=0
+ble_host_smoke: GAP ENC_CHANGE status=13      ← 30s SM タイムアウト
+ble_host_smoke: sec_state enc=0 auth=0 bond=0 keysz=0
+```
+
+btsnoop 側（`+111689s`〜）：接続 → 25秒後に `0x16`（スマホが切断）→ 再接続 →
+**`0x08`＝supervision timeout（リンクが物理的に沈黙）**。
+
+### 7.3 旧真因（PVCY=0）は**今回には当てはまらない**（実測で否定）
+
+memory `c3-ble-d2d-gatt-notify-sm` は同じ `ENC_CHANGE status=13` の真因を
+「`MYNEWT_VAL(BLE_HS_PVCY)=0` で responder の Identity 鍵配布がコンパイルアウト」
+と記録している。SM が実は無効だった前例（§3）があるため**設定ファイルの記述を信じず
+プリプロセッサで実効値を確定**した：
+
+```c
+_Static_assert(MYNEWT_VAL(BLE_HS_PVCY) == 1, ...);   // ble_sm.c と同一フラグでコンパイル
+_Static_assert(MYNEWT_VAL(BLE_SM_SC)  == 1, ...);
+```
+→ **両方とも通過＝`PVCY=1`・`SM_SC=1` が実効**。⇒ **旧真因の再発ではない**。
+
+### 7.4 ★重要な観測：BlueZ では成功し、スマホでは失敗する
+
+| central | 結果 |
+|---|---|
+| **BlueZ**（`hci0`） | **bond 成立**・真cold を跨いだ鍵の復元まで実証（§4） |
+| **Android**（`SM_F966Q`） | ペアリング要求は来るが **ENC_CHANGE status=13 で不成立** |
+
+⇒ **central 依存**。README の既知の制限「スマホcentralは全組合せが通るわけではない
+（BlueZ では3チップとも成立）」と**整合**する。
+これは `docs/ble-c3-smp-death-plan.md` が扱う**未解決の本丸**であり、
+本ラウンドで**新たに壊したものではない**（修正前はそもそもペアリング要求すら
+出ていなかったので、**症状はむしろ前進している**）。
+
+### 7.5 本ラウンドの到達点と、次に必要な測定
+
+**到達**：
+- SM コンパイルアウトのバグを**特定・修正**（BlueZ で bond 成立を実証）
+- **bond 永続化を完全実証**（真cold を跨いだ鍵の復元）
+- スマホでも**ペアリング要求が出るところまで前進**
+- 旧真因（PVCY=0）の**再発ではない**ことを実効値で否定
+
+**残**：スマホ相手の `ENC_CHANGE status=13`。次に必要なのは
+**SMP PDU レベルの両端点突合**——具体的には
+「**我々が鍵配布（Identity Info/Address）を送っているか**」を
+`ble_sm_tx` の `--wrap` 計装（`rx_trace.c` 系の既存手法）と btsnoop の
+SMP op 列（0x08/0x09/0x0a/0x0b の有無）で照合する。
+`docs/ble-c3-smp-death-plan.md` rev2 の分類では **Step3 型**（LESC 成功→鍵配布→沈黙）に
+相当する可能性が高いが、**本ラウンドでは SMP op 列を採れていないため断定しない**。
