@@ -3,8 +3,9 @@
 依頼＝`tmp/review-request.md`（★A〜★F）。レビュアはリポジトリ全体をread-onlyで
 精読（サブエージェント4本を次元別に並列実行し本ファイルで統合）。ブランチ
 `claude/blob-unify-v5.5.4`（`bcffac4`）＋submodule `asp3_core`＝`feat/esp32c6`
-（`9904a44`）。各項目の詳細レポート＝`tmp/review_{A_c3bond,C_clic,BD_blobunify,
-EF_attr_config}.md`。**stock ESP-IDF（`~/tools/esp-idf`）は本環境に不在**のため、
+（`9904a44`）。各項目の詳細生レポート（`tmp/review_{A_c3bond,C_clic,BD_blobunify,
+EF_attr_config}.md`）は本ファイルへ統合後に削除済み（履歴には残存）。
+**stock ESP-IDF（`~/tools/esp-idf`）は本環境に不在**のため、
 stock現物との直接突合が要る箇所は「要stock比較・本環境で未確認」と明示した。
 
 ## 総括（優先度順）
