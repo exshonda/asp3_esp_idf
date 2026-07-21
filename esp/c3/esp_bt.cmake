@@ -694,6 +694,16 @@ if(ESP32C3_BT_NIMBLE)
     option(ESP32C3_BT_EVT_TRACE "Trace HCI EVT (LTK Req/Enc Change) via --wrap (D-2d bond diag)" OFF)
     if(ESP32C3_BT_EVT_TRACE)
         list(APPEND ASP3_SYSSVC_TARGET_C_FILES ${BT_TARGETDIR}/evt_trace.c)
+        #
+        #  ★TOPPERS_C3_EVT_FAST_MAP が要る（2026-07-21 修正）。
+        #    `evt_trace.c` の TX 側 wrap 実体 `__wrap_ble_transport_to_ll_acl_impl`
+        #    （およびイベント配送カウンタの一部）は `#ifdef TOPPERS_C3_EVT_FAST_MAP`
+        #    の中にあるが、本 cmake はこのマクロを定義せずに `-Wl,--wrap=` だけを
+        #    張っていた ⇒ **リンク不能**
+        #      undefined reference to `__wrap_ble_transport_to_ll_acl_impl'
+        #    ＝このオプションは ON にすると必ずビルドが落ちる状態だった
+        #    （既定 OFF のため気づかれていなかった）。
+        list(APPEND ASP3_COMPILE_DEFS TOPPERS_C3_EVT_FAST_MAP)
         list(APPEND ASP3_LINK_OPTIONS
             -Wl,--wrap=ble_hs_hci_evt_process
             -Wl,--wrap=ble_mqueue_put
