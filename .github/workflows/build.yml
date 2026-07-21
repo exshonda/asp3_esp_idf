@@ -49,8 +49,12 @@ jobs:
         with:
           submodules: false
 
-      - name: install ninja
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      #  libsdl2 は Espressif fork の qemu-system-riscv32 が要求する（実測：
+      #  無いと idf_tools.py が「installed, but getting error: … libSDL2-2.0.so.0:
+      #  cannot open shared object file」でインストールを取り消す）。
+      #  これが無いと QEMU ステップが丸ごとスキップされ、CI が «ビルドだけ» になる。
+      - name: install ninja / libsdl2（QEMU が要求）
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libsdl2-2.0-0
 
       #
       #  submodule は「使う分だけ」。全部（esp-idf 配下 23個）を取ると数GBになる。
@@ -110,8 +114,15 @@ jobs:
           echo "IDF_TOOLS_PATH=$IDF_TOOLS_PATH"
           find "$IDF_TOOLS_PATH/tools/riscv32-esp-elf" -maxdepth 1 -mindepth 1 -type d
           "$IDF_TOOLS_PATH"/tools/riscv32-esp-elf/*/riscv32-esp-elf/bin/riscv32-esp-elf-gcc --version | head -1
-          #  seam が要求する esptool が venv に居ること（無ければ seam の configure が FATAL）
-          ls "$IDF_TOOLS_PATH"/python_env/*/bin/esptool || echo "::warning::esptool が見つからない（seam が落ちる）"
+          #  seam が要求する esptool が venv に居ること（無ければ seam の configure が FATAL）。
+          #  ★実体名は版で違う：IDF v5.5.4 の venv は `esptool.py`(v4系)、v6.1 系は `esptool`(v5系)。
+          #    cmake 側（esp_find_esptool.cmake）も `NAMES esptool esptool.py` で両方を探すので、
+          #    ここも両方を許容しないと «通っているのに警告» という誤検出になる（実際に出した）。
+          if ls "$IDF_TOOLS_PATH"/python_env/*/bin/esptool "$IDF_TOOLS_PATH"/python_env/*/bin/esptool.py 2>/dev/null; then
+            "$(ls "$IDF_TOOLS_PATH"/python_env/*/bin/esptool "$IDF_TOOLS_PATH"/python_env/*/bin/esptool.py 2>/dev/null | head -1)" version | head -1
+          else
+            echo "::warning::esptool が見つからない（seam の configure が FATAL になる）"
+          fi
 
       #
       #  10構成をループ。判定は「ビルド成立」＋「生成物が実在する」の両方
